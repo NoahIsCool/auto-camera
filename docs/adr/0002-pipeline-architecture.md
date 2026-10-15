@@ -29,7 +29,7 @@ channels, and the operator sees it only through immutable snapshots.
 | UI (`main`) or headless runner | `apps/auto-camera` | Reads snapshots, posts commands. Never touches engine state. |
 | `ac-engine` | `Engine` | The master clock loop: applies commands, runs one `EngineCore::tick` per output frame, pushes program to the encoder, publishes a snapshot. |
 | source workers (`ac-synthetic-<id>`, file decoders) | each `VideoSource` | Decode or generate frames at the source rate; publish into the source's frame mailbox and a small bounded audio queue. |
-| `ac-discovery-<source>` | `DiscoveryWorker`, one per source with a detector | Loads the detector (a CoreML compile can take minutes), then runs it on the newest frame it was handed. |
+| `ac-discovery-<source>` | `DiscoveryWorker`, one per source with a detector | Loads the detector (a CoreML compile can take minutes), then runs it on the newest frame it was handed. The OWL detector returns whole people, each tagged with the query whose object they hold (`ac_vision::matching`). |
 | `ac-output-start`, `ac-output-finish` | `OutputController` | Start ffmpeg (probing encoders) and finish it (flushing the recording) off the engine thread, since both can take seconds. |
 | `ac-output-video/-audio/-progress/-stderr` and the `ffmpeg` child | `ProgramEncoder` | Feed and watch the single program encode (RTMP and MP4 from one encode, ADR 0001). |
 | rayon pool | process | Data-parallel per-pixel kernels (tracker pyramid, compositor) *inside* a tick; holds no state. |

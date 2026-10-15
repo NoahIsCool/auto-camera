@@ -166,6 +166,8 @@ fn build_owl(settings: &DetectorSettings) -> Result<DetectorLoader, String> {
         input_size,
         score_threshold,
         use_coreml,
+        people_first,
+        person_threshold,
     } = settings
     else {
         return Err("not an OWL detector config".into());
@@ -188,6 +190,8 @@ fn build_owl(settings: &DetectorSettings) -> Result<DetectorLoader, String> {
         input_size: input_size.unwrap_or(defaults.input_size),
         score_threshold: score_threshold.unwrap_or(defaults.score_threshold),
         use_coreml: use_coreml.unwrap_or(defaults.use_coreml),
+        people_first: people_first.unwrap_or(defaults.people_first),
+        person_threshold: person_threshold.unwrap_or(defaults.person_threshold),
         ..defaults
     };
     let tokenizer = tokenizer.clone();
@@ -369,6 +373,8 @@ mod tests {
             input_size: None,
             score_threshold: None,
             use_coreml: None,
+            people_first: None,
+            person_threshold: None,
         };
         assert!(build_detector(&owl, &file).is_err());
     }

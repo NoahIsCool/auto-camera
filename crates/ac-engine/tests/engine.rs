@@ -259,6 +259,8 @@ fn start_reports_unusable_setups() {
         input_size: None,
         score_threshold: None,
         use_coreml: None,
+        people_first: None,
+        person_threshold: None,
     };
     assert!(matches!(
         Engine::start_with(owl, fast_time()),

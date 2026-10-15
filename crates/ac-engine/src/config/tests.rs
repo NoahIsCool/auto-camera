@@ -60,6 +60,8 @@ presets = ["medium", { id = "tight", name = "Tight", size = "close", headroom = 
 kind = "owl"
 model = "models/owlv2.onnx"
 tokenizer = "models/tokenizer.json"
+people_first = true
+person_threshold = 0.2
 
 [discovery]
 rate_hz = 2.0
@@ -112,6 +114,14 @@ thumb_rate_hz = 5.0
         ac_switcher::TransitionKind::Dip
     );
     assert_eq!(c.monitors.thumb_rate_hz, 5.0);
+    assert!(matches!(
+        c.detector,
+        DetectorSettings::Owl {
+            people_first: Some(true),
+            person_threshold: Some(t),
+            ..
+        } if t == 0.2
+    ));
 }
 
 #[test]
@@ -173,6 +183,21 @@ fn invalid_values_are_rejected_with_a_message() {
         (
             "score",
             Box::new(|c| c.detector = DetectorSettings::Synthetic { score: 1.5 }),
+        ),
+        (
+            "person threshold",
+            Box::new(|c| {
+                c.detector = DetectorSettings::Owl {
+                    model: "m.onnx".into(),
+                    text_encoder: None,
+                    tokenizer: "t.json".into(),
+                    input_size: None,
+                    score_threshold: None,
+                    use_coreml: None,
+                    people_first: None,
+                    person_threshold: Some(1.5),
+                }
+            }),
         ),
         (
             "empty prompt",

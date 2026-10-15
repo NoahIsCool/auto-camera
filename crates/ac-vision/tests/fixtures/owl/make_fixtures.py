@@ -5,7 +5,7 @@ documented in crates/ac-vision/README.md, but 4 "patches", 4-dimensional
 embeddings and a 32x32 input, so the `onnx` feature's plumbing (tokenizing,
 tensor shapes, output extraction, decoding) is tested without model downloads.
 
-Scores: "person" fires on patches 0 and 3 (3 overlaps 0 and is suppressed by
+A query's embedding is that of its last word. Scores: "person" fires on patches 0 and 3 (3 overlaps 0 and is suppressed by
 NMS), "guitar" on patch 1, and "drum" on patch 2 only when the image is bright
 (its logit is a gain times the mean normalized pixel), which checks that pixels
 reach the graph.
@@ -64,11 +64,16 @@ def save(graph, name):
     onnx.save(model, os.path.join(HERE, name))
 
 
-def first_token_nodes():
-    """input_ids [Q, L] -> tok [Q] (the token after BOS)."""
+def last_token_nodes():
+    """input_ids [Q, L] -> tok [Q] (the last word: the token before EOS, which
+    has the largest id, so "a guitar" means "guitar")."""
     return [
         const("one", np.array(1, dtype=np.int64)),
-        helper.make_node("Gather", ["input_ids", "one"], ["tok"], axis=1),
+        const("axis1", np.array([1], dtype=np.int64)),
+        helper.make_node("ArgMax", ["input_ids"], ["eos_pos"], axis=1, keepdims=1),  # [Q, 1]
+        helper.make_node("Sub", ["eos_pos", "one"], ["last_pos"]),
+        helper.make_node("GatherElements", ["input_ids", "last_pos"], ["tok_col"], axis=1),
+        helper.make_node("Squeeze", ["tok_col", "axis1"], ["tok"]),
     ]
 
 
@@ -99,7 +104,7 @@ box_node = const("pred_boxes", BOXES)
 
 # Combined: ids + pixels -> logits.
 combined = helper.make_graph(
-    first_token_nodes()
+    last_token_nodes()
     + feature_nodes()
     + [
         const("emb", EMB),
@@ -116,7 +121,7 @@ save(combined, "combined.onnx")
 
 # Split: text encoder.
 text = helper.make_graph(
-    first_token_nodes() + [const("emb", EMB), helper.make_node("Gather", ["emb", "tok"], ["text_embeds"], axis=0)],
+    last_token_nodes() + [const("emb", EMB), helper.make_node("Gather", ["emb", "tok"], ["text_embeds"], axis=0)],
     "owl_text",
     text_inputs,
     [helper.make_tensor_value_info("text_embeds", TensorProto.FLOAT, ["q", D])],

@@ -17,6 +17,11 @@
 //!   `logits`, `pred_boxes`). Text embeddings are cached per normalized prompt,
 //!   so steady-state detection runs only the image side.
 //!
+//! By default (`OwlConfig::people_first`) the detector returns whole people:
+//! each pass asks the model for people and for the objects the prompts name,
+//! and [`crate::matching`] picks, per prompt, the people holding its object.
+//! With `people_first` off it returns each prompt's own boxes.
+//!
 //! The execution provider is CoreML on macOS when the loaded ONNX Runtime has
 //! it (unsupported nodes fall back to the CPU), and the CPU elsewhere. CoreML
 //! is given only nodes with static input shapes: the query axis of both
@@ -46,6 +51,7 @@ use tokenizers::Tokenizer;
 
 use crate::api::{Detection, Detector, PromptQuery};
 use crate::error::VisionError;
+use crate::matching::{MatchParams, MatchPlan, PERSON_PROMPT};
 use crate::owl::{
     DecodeParams, OWL_MAX_TOKENS, OwlOutputs, decode, normalize_prompt, pack_tokens,
     preprocess_into,
@@ -110,7 +116,8 @@ pub struct OwlConfig {
     pub max_tokens: usize,
     /// Padding token id; `None` uses the tokenizer's `!` (OWL's pad token), else 0.
     pub pad_token_id: Option<u32>,
-    /// Score threshold for queries without their own.
+    /// Score threshold for queries without their own. With `people_first`
+    /// it applies to the object a prompt names (see [`crate::matching`]).
     pub score_threshold: f32,
     /// Per-query score thresholds.
     pub query_thresholds: HashMap<QueryId, f32>,
@@ -126,6 +133,16 @@ pub struct OwlConfig {
     pub max_cached_prompts: usize,
     /// Tensor names in the graphs.
     pub names: OwlTensorNames,
+    /// Return whole people chosen by each prompt instead of the prompt's
+    /// own boxes ([`crate::matching`]).
+    pub people_first: bool,
+    /// The prompt that finds people when `people_first` is set.
+    pub person_prompt: String,
+    /// Lowest person score kept when `people_first` is set.
+    pub person_threshold: f32,
+    /// Fraction of an object's box that must lie inside a person's box for
+    /// the person to be chosen, when `people_first` is set.
+    pub min_overlap: f64,
 }
 
 impl Default for OwlConfig {
@@ -134,7 +151,7 @@ impl Default for OwlConfig {
             input_size: 960,
             max_tokens: OWL_MAX_TOKENS,
             pad_token_id: None,
-            score_threshold: 0.1,
+            score_threshold: 0.3,
             query_thresholds: HashMap::new(),
             nms_iou: 0.3,
             max_per_query: 16,
@@ -142,6 +159,10 @@ impl Default for OwlConfig {
             intra_threads: None,
             max_cached_prompts: 256,
             names: OwlTensorNames::default(),
+            people_first: true,
+            person_prompt: PERSON_PROMPT.into(),
+            person_threshold: 0.15,
+            min_overlap: 0.45,
         }
     }
 }
@@ -156,7 +177,11 @@ impl OwlConfig {
             && self.query_thresholds.values().all(|&t| unit(t))
             && (0.0..=1.0).contains(&self.nms_iou)
             && self.max_per_query >= 1
-            && self.max_cached_prompts >= 1;
+            && self.max_cached_prompts >= 1
+            && unit(self.person_threshold)
+            && self.min_overlap > 0.0
+            && self.min_overlap <= 1.0
+            && !self.person_prompt.trim().is_empty();
         if ok {
             Ok(())
         } else {
@@ -529,6 +554,48 @@ impl Detector for OnnxOwlDetector {
         if queries.is_empty() {
             return Ok(Vec::new());
         }
+        let threshold = |id: &QueryId| {
+            *self
+                .config
+                .query_thresholds
+                .get(id)
+                .unwrap_or(&self.config.score_threshold)
+        };
+        if !self.config.people_first {
+            let thresholds = queries.iter().map(|q| threshold(&q.id)).collect();
+            let max = self.config.max_per_query;
+            return self.detect_queries(frame, queries, thresholds, max);
+        }
+        let plan = MatchPlan::new(
+            queries,
+            threshold,
+            MatchParams {
+                person_prompt: self.config.person_prompt.clone(),
+                person_threshold: self.config.person_threshold,
+                min_overlap: self.config.min_overlap,
+                max_per_query: self.config.max_per_query,
+            },
+        );
+        // Keep enough people for a crowd; the plan caps each query again.
+        let max = self.config.max_per_query.max(MAX_PEOPLE);
+        let found = self.detect_queries(frame, plan.queries(), plan.thresholds().to_vec(), max)?;
+        Ok(plan.assign(&found))
+    }
+}
+
+/// Most people kept per pass when `people_first` is set.
+const MAX_PEOPLE: usize = 64;
+
+impl OnnxOwlDetector {
+    /// Runs the model for `queries` and decodes each query's boxes at its
+    /// threshold, keeping at most `max_per_query` per query.
+    fn detect_queries(
+        &mut self,
+        frame: &VideoFrame,
+        queries: &[PromptQuery],
+        thresholds: Vec<f32>,
+        max_per_query: usize,
+    ) -> Result<Vec<Detection>, VisionError> {
         let letterbox = preprocess_into(frame, self.config.input_size, &mut self.pixels)?;
         let keys: Vec<String> = queries
             .iter()
@@ -536,18 +603,9 @@ impl Detector for OnnxOwlDetector {
             .collect();
         let (logits, boxes, patches) = self.run_image(&keys)?;
         let params = DecodeParams {
-            thresholds: queries
-                .iter()
-                .map(|q| {
-                    *self
-                        .config
-                        .query_thresholds
-                        .get(&q.id)
-                        .unwrap_or(&self.config.score_threshold)
-                })
-                .collect(),
+            thresholds,
             nms_iou: self.config.nms_iou,
-            max_per_query: self.config.max_per_query,
+            max_per_query,
         };
         let outputs = OwlOutputs {
             logits: &logits,

@@ -11,6 +11,7 @@ depend on a model runtime.
 | `ScriptedDetector` | Detections from a closure or keyframe table, for tests and demos |
 | `OnnxOwlDetector` | OWLv2 / OWL-ViT on ONNX Runtime, feature `onnx` (off by default) |
 | `owl::*` | Pure OWL pre/post-processing: letterbox, CLIP normalization, sigmoid, box decoding, token packing |
+| `matching::*` | People-first prompt matching: parse a prompt's object, pick the people holding it |
 | `boxes::*` | `clamp_box`, `cxcywh_to_rect`, `nms_indices`, class-aware `nms` |
 
 All boxes are normalized source coordinates (`ac_core::Rect`), clipped to the
@@ -134,20 +135,48 @@ cargo run --release -p ac-vision --features onnx --example owl_detect -- \
 
 `AC_OWL_CPU=1` skips CoreML; `AC_OWL_THRESHOLD` sets the score threshold.
 
-### Prompts
+### Prompts: people first
 
-OWLv2 boxes the thing a prompt names. On wide stage shots (the speaker about
-a third of the frame high), "a person speaking at a lectern" boxed lecterns,
-tables and microphone stands rather than the speaker, "a man holding a
-microphone" boxed the microphone, and "a person playing guitar" or "a
-guitarist" boxed each guitarist's guitar and torso (scores 0.25 to 0.67)
-while also firing on amplifiers and on photos on the projection screen.
-"a person", "a person speaking" and "a preacher" boxed whole people (scores
-around 0.2 to 0.27). Prompts that name the person, not an object they hold,
-give boxes that frame the person. In the engine with `config/file-source.example.toml`'s
-prompts on the sermon rehearsal (no guitarist on stage), the Speaker query
-admitted no one in five minutes and the Guitarist query admitted five
-"subjects", all instruments on stands or photos on the screen.
+OWLv2 boxes the thing a prompt names: "a person playing guitar" boxes guitars
+(also guitars on stands and in photos on a projection screen), "a person
+speaking at a lectern" boxes lecterns, tables and microphone stands. So the
+detector does not return a prompt's own boxes. By default
+(`OwlConfig::people_first`, `people_first` in a studio's `[detector]`) every
+pass also asks for "a person" and for the object each prompt names, and a
+prompt picks the people whose box holds its object; the detections are whole
+people. "a person playing guitar" asks for "a guitar", "a man in a red shirt"
+for "a red shirt". A prompt with no person word ("a guitarist") or no object
+("a woman") attaches its own boxes; "a person" or "people" picks everyone. See
+the `matching` module for the rules and their tests.
+
+Thresholds: people need an "a person" score of `person_threshold` (0.15); the
+object needs `score_threshold` (now 0.3 by default: real guitars score 0.6 to
+0.75, nothing else above 0.26) and at least 45% of its box inside the
+person's. A "person" box holding two or more other people is a group and is
+dropped. The extra queries cost nothing measurable: 183–185 ms per pass on
+CoreML for 2, 3, 5 or 9 queries.
+
+How the strategies compared, on 20 frames each of a band (three guitarists,
+a singer, a drummer, a keyboard player) and a sermon rehearsal (one speaker
+walking the stage, guitars on stands), with the speaker and every guitarist
+hand-checked; a chosen person is a hit when its box has IoU ≥ 0.5 with a
+labelled one (Python reference on CPU, best thresholds for each):
+
+| Strategy | Guitarists found (of 60) | False subjects | Speaker found (of 20) |
+|---|---|---|---|
+| The prompt's own boxes (before) | boxes on guitars, not people | many | 0 |
+| Prompt score on each person's own box | 58 | 65 | 0 |
+| Prompt's own boxes attached to people | 58 | 9 | 0 |
+| Object ("a guitar") attached to people | 60 | 2 | 1 |
+| Both attached | 60 | 2 | 1 |
+| Object attached, in Rust on CoreML, with the group rule | 59 | 2 | 1 |
+
+The two remaining false subjects are the speaker walking right in front of a
+guitar on a stand. The speaker is found once: OWLv2 sees objects, not
+actions, and he never stands at the lectern. "Speaking", "singing" and
+"holding a microphone" (the band's guitarists sing into stand microphones)
+cannot be told apart from boxes; that would take an action- or audio-aware
+model. Prompts work best when they name something visible on the person.
 
 ### Expected tensors
 

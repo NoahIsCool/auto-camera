@@ -170,6 +170,13 @@ pub enum DetectorSettings {
         /// Try CoreML on macOS.
         #[serde(default)]
         use_coreml: Option<bool>,
+        /// Return whole people chosen by each prompt (the default) instead
+        /// of the prompt's own boxes; see `ac_vision::matching`.
+        #[serde(default)]
+        people_first: Option<bool>,
+        /// Lowest "a person" score kept when matching people first.
+        #[serde(default)]
+        person_threshold: Option<f32>,
     },
 }
 
@@ -188,6 +195,7 @@ impl DetectorSettings {
             DetectorSettings::Owl {
                 input_size,
                 score_threshold,
+                person_threshold,
                 ..
             } => {
                 if input_size.is_some_and(|s| !(32..=4096).contains(&s)) {
@@ -195,6 +203,9 @@ impl DetectorSettings {
                 }
                 if score_threshold.is_some_and(|t| !(0.0..=1.0).contains(&t)) {
                     return Err("detector.score_threshold must be in 0..=1".into());
+                }
+                if person_threshold.is_some_and(|t| !(0.0..=1.0).contains(&t)) {
+                    return Err("detector.person_threshold must be in 0..=1".into());
                 }
                 Ok(())
             }
