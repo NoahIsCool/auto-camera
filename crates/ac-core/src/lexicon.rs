@@ -1,0 +1,469 @@
+//! The prompt parser's vocabulary, held as data: shot words, role words and
+//! person words.
+//!
+//! # Theory
+//!
+//! An operator's prompt such as "speaker upper body" asks two questions at
+//! once: *who* to frame ("speaker") and *what shot* to make ("upper body").
+//! No detector answers both (SAM 3.1 found nothing for "speaker upper body",
+//! and OWLv2 boxes objects, not shots; `/mnt/project-files/research/
+//! model-picker-design.md` §1 and §4.2). [`crate::prompt`] splits the two,
+//! and this module holds the words it splits by, so the mappings can be
+//! reviewed, benchmarked and changed without touching the parser:
+//!
+//! * [`ShotWord`]s map phrases ("close-up", "upper body") to
+//!   [`ShotSize`]s. The built-in table is design §4.2's; Noah decides the
+//!   mappings.
+//! * [`RoleWord`]s rewrite a role ("speaker") into the phrase a detector
+//!   understands ("a person speaking"). Every entry is a hypothesis until it
+//!   is benchmarked: "a person speaking" is measured on SAM 3.1 only (10/20
+//!   frames, 0 false, `sam31-vs-owlv2.md`), "a person playing guitar" on
+//!   both models, the others on neither. To OWLv2 the bare word "speaker"
+//!   most likely means a loudspeaker, which is why the rewrite matters.
+//! * Person words ("woman", "player") name people. A subject whose head
+//!   noun is a person or role word is framed on the person basis.
+//!
+//! The parser's grammar words (articles, prepositions, "and", "shot") are
+//! not data: they steer the parse and live in the parser.
+//!
+//! # Invariants
+//!
+//! * Phrases compare by key: lowercase, apostrophes folded, spaces and
+//!   hyphens removed, so "close-up", "Close Up" and "closeup" are one
+//!   phrase. A later entry with the same key replaces an earlier one, both
+//!   in the parser and in [`Lexicon::set_shot`] and [`Lexicon::set_role`].
+//! * [`Lexicon::validate`] states what a well-formed lexicon is. The parser
+//!   never fails on a malformed one: it skips the entries `validate` rejects.
+//! * Built-in data only; nothing here reads files. A configuration may build
+//!   on [`Lexicon::builtin`] with the `set_*` methods.
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::model::ShotSize;
+use crate::prompt::words::{is_grammar_word, phrase_key};
+
+/// Where in a prompt a shot word counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    /// At the start or the end of the prompt, or right after a possessive.
+    #[default]
+    Anywhere,
+    /// Only after the subject ("drummer wide"): before a noun the word reads
+    /// as an adjective ("wide stage").
+    AfterSubject,
+}
+
+/// A phrase that names shot sizes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShotWord {
+    /// The phrase, such as "close-up".
+    pub phrase: String,
+    /// The sizes it asks for, in order; never empty and never
+    /// [`ShotSize::Wide`] (a source's wide shot is not a subject's shot).
+    pub sizes: Vec<ShotSize>,
+    /// Where the phrase counts.
+    #[serde(default)]
+    pub placement: Placement,
+    /// A caveat shown to the operator whenever the phrase is used.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// A role and the phrase a detector is asked for instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleWord {
+    /// The role, such as "speaker". Its plural ("speakers") matches too.
+    pub word: String,
+    /// The detector phrase, such as "a person speaking".
+    pub phrase: String,
+}
+
+/// The parser's vocabulary; see the module docs.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lexicon {
+    /// Shot words; later entries replace earlier ones with the same key.
+    #[serde(default)]
+    pub shots: Vec<ShotWord>,
+    /// Role words; later entries replace earlier ones with the same key.
+    #[serde(default)]
+    pub roles: Vec<RoleWord>,
+    /// Nouns that name a person ("woman", "player"); plurals formed with
+    /// "s" or "es" match too, irregular ones are listed.
+    #[serde(default)]
+    pub person_words: Vec<String>,
+}
+
+/// A malformed lexicon entry.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LexiconError {
+    /// A shot word or role word has no letters or digits.
+    #[error("lexicon entry {0:?} has no words")]
+    NoWords(String),
+    /// A shot word lists no sizes, or lists the source-wide size.
+    #[error("shot word {0:?} must name at least one subject shot size (not wide)")]
+    BadSizes(String),
+    /// An entry claims a word the parser steers by ("the", "of", "shot").
+    #[error("lexicon entry {0:?} is a grammar word the parser reserves")]
+    GrammarWord(String),
+    /// A role word rewrites to an empty detector phrase.
+    #[error("role word {0:?} has an empty detector phrase")]
+    EmptyPhrase(String),
+}
+
+/// Built-in shot words: design §4.2's table. Cut lines and head-height
+/// multiples behind each size are estimates (see `ShotSize`); the word
+/// lists are proposals until Noah confirms them. "medium close-up" is
+/// listed so that, with hyphens optional, the longest match beats
+/// "close-up" in "speaker medium close-up".
+const SHOT_WORDS: &[(&str, &[ShotSize])] = {
+    use ShotSize::{Close, Full, Medium, MediumClose};
+    &[
+        ("close", &[Close]),
+        ("close-up", &[Close]),
+        ("cu", &[Close]),
+        ("head and shoulders", &[Close]),
+        ("headshot", &[Close]),
+        ("tight", &[Close]),
+        ("face", &[Close]),
+        ("medium close", &[MediumClose]),
+        ("medium close-up", &[MediumClose]),
+        ("mcu", &[MediumClose]),
+        ("chest up", &[MediumClose]),
+        ("bust", &[MediumClose]),
+        ("medium", &[Medium]),
+        ("mid shot", &[Medium]),
+        ("ms", &[Medium]),
+        ("waist up", &[Medium]),
+        // Waist-up and chest-up both, until Noah picks one (design §8 item 6).
+        ("upper body", &[Medium, MediumClose]),
+        ("half body", &[Medium, MediumClose]),
+        ("full", &[Full]),
+        ("full body", &[Full]),
+        ("full length", &[Full]),
+        ("head to toe", &[Full]),
+        ("long shot", &[Full]),
+        ("fs", &[Full]),
+    ]
+};
+
+/// "wide" after a subject ("drummer wide"): today a full shot of the
+/// subject alone. Design §4.2 asks for the subject together with its
+/// attached objects (spec V4, "drum kit with drummer's head"), which needs
+/// attachment boxes and is later work. The camera's own wide shot stays the
+/// source's Wide shot.
+const WIDE: &str = "wide";
+
+/// The caveat shown whenever "wide" is used.
+const WIDE_NOTE: &str = "frames the full body for now; framing the subject together with its \
+                         instrument or kit is later work";
+
+/// Built-in roles: design §4.2's role lexicon. Every entry is a hypothesis
+/// until benchmarked on the rehearsal footage.
+const ROLE_WORDS: &[(&str, &str)] = &[
+    ("speaker", "a person speaking"),
+    ("pastor", "a person speaking"),
+    ("preacher", "a person speaking"),
+    ("guitarist", "a person playing guitar"),
+    ("drummer", "a person playing drums"),
+    ("singer", "a person singing"),
+];
+
+/// Built-in person words: the people-first matcher's person words
+/// (`ac_vision::matching`) and common names for band members.
+const PERSON_WORDS: &[&str] = &[
+    "person",
+    "people",
+    "man",
+    "men",
+    "woman",
+    "women",
+    "someone",
+    "somebody",
+    "guy",
+    "girl",
+    "boy",
+    "kid",
+    "child",
+    "children",
+    "human",
+    "lady",
+    "ladies",
+    "individual",
+    "player",
+    "musician",
+    "performer",
+    "vocalist",
+    "bassist",
+    "pianist",
+    "keyboardist",
+    "leader",
+];
+
+impl Lexicon {
+    /// The built-in vocabulary; see the module docs.
+    pub fn builtin() -> Self {
+        let mut lexicon = Self {
+            shots: SHOT_WORDS
+                .iter()
+                .map(|(phrase, sizes)| ShotWord {
+                    phrase: (*phrase).into(),
+                    sizes: sizes.to_vec(),
+                    placement: Placement::Anywhere,
+                    note: None,
+                })
+                .collect(),
+            roles: ROLE_WORDS
+                .iter()
+                .map(|(word, phrase)| RoleWord {
+                    word: (*word).into(),
+                    phrase: (*phrase).into(),
+                })
+                .collect(),
+            person_words: PERSON_WORDS.iter().map(|w| (*w).into()).collect(),
+        };
+        lexicon.shots.push(ShotWord {
+            phrase: WIDE.into(),
+            sizes: vec![ShotSize::Full],
+            placement: Placement::AfterSubject,
+            note: Some(WIDE_NOTE.into()),
+        });
+        lexicon
+    }
+
+    /// Adds `word`, replacing any shot word with the same key.
+    pub fn set_shot(&mut self, word: ShotWord) {
+        let key = phrase_key(&word.phrase);
+        self.shots.retain(|w| phrase_key(&w.phrase) != key);
+        self.shots.push(word);
+    }
+
+    /// Adds `role`, replacing any role word with the same key.
+    pub fn set_role(&mut self, role: RoleWord) {
+        let key = phrase_key(&role.word);
+        self.roles.retain(|r| phrase_key(&r.word) != key);
+        self.roles.push(role);
+    }
+
+    /// Adds a person word unless it is already listed.
+    pub fn add_person_word(&mut self, word: &str) {
+        let key = phrase_key(word);
+        if !self.person_words.iter().any(|w| phrase_key(w) == key) {
+            self.person_words.push(word.into());
+        }
+    }
+
+    /// Checks every entry; the first problem found is returned.
+    pub fn validate(&self) -> Result<(), LexiconError> {
+        for shot in &self.shots {
+            check_entry(&shot.phrase)?;
+            if shot.sizes.is_empty() || shot.sizes.contains(&ShotSize::Wide) {
+                return Err(LexiconError::BadSizes(shot.phrase.clone()));
+            }
+        }
+        for role in &self.roles {
+            check_entry(&role.word)?;
+            if role.phrase.trim().is_empty() {
+                return Err(LexiconError::EmptyPhrase(role.word.clone()));
+            }
+        }
+        self.person_words.iter().try_for_each(|w| check_entry(w))
+    }
+}
+
+/// Checks that an entry has words and claims no grammar word.
+fn check_entry(phrase: &str) -> Result<(), LexiconError> {
+    let key = phrase_key(phrase);
+    if key.is_empty() {
+        Err(LexiconError::NoWords(phrase.into()))
+    } else if is_grammar_word(&key) {
+        Err(LexiconError::GrammarWord(phrase.into()))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ShotSize::{Close, Full, Medium, MediumClose};
+
+    /// The shot word with `phrase`'s key.
+    fn shot<'a>(lexicon: &'a Lexicon, phrase: &str) -> Option<&'a ShotWord> {
+        let key = phrase_key(phrase);
+        lexicon.shots.iter().find(|w| phrase_key(&w.phrase) == key)
+    }
+
+    #[test]
+    fn builtin_is_valid() {
+        assert_eq!(Lexicon::builtin().validate(), Ok(()));
+        assert_eq!(Lexicon::default().validate(), Ok(()));
+    }
+
+    #[test]
+    fn builtin_holds_the_design_table() {
+        let lexicon = Lexicon::builtin();
+        let rows: &[(&[&str], &[ShotSize])] = &[
+            (
+                &[
+                    "close",
+                    "close-up",
+                    "cu",
+                    "head and shoulders",
+                    "headshot",
+                    "tight",
+                    "face",
+                ],
+                &[Close],
+            ),
+            (&["medium close", "mcu", "chest up", "bust"], &[MediumClose]),
+            (&["medium", "mid shot", "ms", "waist up"], &[Medium]),
+            (&["upper body", "half body"], &[Medium, MediumClose]),
+            (
+                &[
+                    "full",
+                    "full body",
+                    "full length",
+                    "head to toe",
+                    "long shot",
+                    "fs",
+                ],
+                &[Full],
+            ),
+        ];
+        for (phrases, sizes) in rows {
+            for phrase in *phrases {
+                let word = shot(&lexicon, phrase).unwrap_or_else(|| panic!("{phrase}"));
+                assert_eq!(word.sizes, *sizes, "{phrase}");
+                assert_eq!(word.placement, Placement::Anywhere, "{phrase}");
+            }
+        }
+        let wide = shot(&lexicon, "wide").expect("wide");
+        assert_eq!(wide.sizes, [Full]);
+        assert_eq!(wide.placement, Placement::AfterSubject);
+        assert!(wide.note.as_deref().is_some_and(|n| n.contains("later")));
+    }
+
+    #[test]
+    fn builtin_holds_the_role_lexicon() {
+        let lexicon = Lexicon::builtin();
+        let phrase = |word: &str| {
+            lexicon
+                .roles
+                .iter()
+                .find(|r| r.word == word)
+                .map(|r| r.phrase.as_str())
+        };
+        for word in ["speaker", "pastor", "preacher"] {
+            assert_eq!(phrase(word), Some("a person speaking"));
+        }
+        assert_eq!(phrase("guitarist"), Some("a person playing guitar"));
+        assert_eq!(phrase("drummer"), Some("a person playing drums"));
+        assert_eq!(phrase("singer"), Some("a person singing"));
+        assert_eq!(phrase("bassist"), None);
+    }
+
+    #[test]
+    fn set_shot_replaces_by_key() {
+        let mut lexicon = Lexicon::builtin();
+        let before = lexicon.shots.len();
+        lexicon.set_shot(ShotWord {
+            phrase: "Close Up".into(),
+            sizes: vec![MediumClose],
+            placement: Placement::Anywhere,
+            note: None,
+        });
+        assert_eq!(lexicon.shots.len(), before);
+        assert_eq!(
+            shot(&lexicon, "close-up").map(|w| &w.sizes[..]),
+            Some(&[MediumClose][..])
+        );
+        lexicon.set_shot(ShotWord {
+            phrase: "cowboy".into(),
+            sizes: vec![Medium],
+            placement: Placement::Anywhere,
+            note: None,
+        });
+        assert_eq!(lexicon.shots.len(), before + 1);
+    }
+
+    #[test]
+    fn set_role_and_person_words_replace_by_key() {
+        let mut lexicon = Lexicon::builtin();
+        let roles = lexicon.roles.len();
+        lexicon.set_role(RoleWord {
+            word: "Speaker".into(),
+            phrase: "a person at a lectern".into(),
+        });
+        assert_eq!(lexicon.roles.len(), roles);
+        assert_eq!(
+            lexicon.roles.last().map(|r| r.phrase.as_str()),
+            Some("a person at a lectern")
+        );
+        let people = lexicon.person_words.len();
+        lexicon.add_person_word("WOMAN");
+        assert_eq!(lexicon.person_words.len(), people);
+        lexicon.add_person_word("organist");
+        assert_eq!(lexicon.person_words.len(), people + 1);
+    }
+
+    #[test]
+    fn validate_rejects_malformed_entries() {
+        let word = |phrase: &str, sizes: &[ShotSize]| ShotWord {
+            phrase: phrase.into(),
+            sizes: sizes.to_vec(),
+            placement: Placement::Anywhere,
+            note: None,
+        };
+        let with_shot = |w: ShotWord| Lexicon {
+            shots: vec![w],
+            ..Lexicon::default()
+        };
+        assert_eq!(
+            with_shot(word(" - ", &[Close])).validate(),
+            Err(LexiconError::NoWords(" - ".into()))
+        );
+        assert_eq!(
+            with_shot(word("snug", &[])).validate(),
+            Err(LexiconError::BadSizes("snug".into()))
+        );
+        assert_eq!(
+            with_shot(word("snug", &[ShotSize::Wide])).validate(),
+            Err(LexiconError::BadSizes("snug".into()))
+        );
+        assert_eq!(
+            with_shot(word("Shot", &[Close])).validate(),
+            Err(LexiconError::GrammarWord("Shot".into()))
+        );
+        let with_role = |word: &str, phrase: &str| Lexicon {
+            roles: vec![RoleWord {
+                word: word.into(),
+                phrase: phrase.into(),
+            }],
+            ..Lexicon::default()
+        };
+        assert_eq!(
+            with_role("host", "  ").validate(),
+            Err(LexiconError::EmptyPhrase("host".into()))
+        );
+        assert_eq!(
+            with_role("the", "a person").validate(),
+            Err(LexiconError::GrammarWord("the".into()))
+        );
+        let people = Lexicon {
+            person_words: vec!["".into()],
+            ..Lexicon::default()
+        };
+        assert_eq!(people.validate(), Err(LexiconError::NoWords("".into())));
+    }
+
+    #[test]
+    fn errors_read_as_sentences() {
+        let text = LexiconError::BadSizes("snug".into()).to_string();
+        assert!(text.contains("snug") && text.contains("not wide"));
+    }
+}
