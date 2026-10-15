@@ -17,9 +17,15 @@
 //! changes meaning.
 //!
 //! Each subject shot owns a [`ShotFramer`]. Per tick, [`Catalog::step`]
-//! feeds it the ideal crop from [`compose`] while the subject is tracking and
-//! nothing while it is lost (the framer then holds). It also scores the
-//! shot for the director:
+//! asks it to aim at the subject's box and extent ([`ShotFramer::aim`]:
+//! the fill rule for objects, body cut lines for whole people, with the
+//! shot's remembered head height) while the subject is tracking, and feeds
+//! it nothing while it is lost (the framer then holds). A new shot starts
+//! framed on its subject the same way ([`compose_subject`]). Each entry
+//! reports whether its shot is held back by its preset's zoom ceiling
+//! ([`ShotEntry::limited_by_zoom`]), so the operator sees a close-up that
+//! cannot be one labelled as such. It also scores the shot for the
+//! director:
 //!
 //! ```text
 //! settled = clamp(1 - max(|dx| / w, |dy| / h, |ln(w* / w)|) / SETTLE_TOLERANCE, 0, 1)
@@ -35,8 +41,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use ac_core::{Point, Preset, Rect, Shot, ShotId, ShotTarget, SourceId, SubjectId};
-use ac_framing::{Composition, FramerConfig, ShotFramer, compose};
+use ac_core::{Extent, Point, Preset, Rect, Shot, ShotId, ShotTarget, SourceId, SubjectId};
+use ac_framing::{Composition, FramerConfig, ShotFramer, SubjectGeometry, compose_subject};
 use serde::{Deserialize, Serialize};
 
 /// Framing error, in crop sizes, at which a shot counts as fully unsettled.
@@ -77,6 +83,8 @@ pub struct ShotSpec {
     pub preset: Option<Preset>,
     /// The subject's box when the shot is created.
     pub initial: Rect,
+    /// What `initial` covers.
+    pub extent: Extent,
 }
 
 /// A subject as the catalog needs it.
@@ -86,6 +94,8 @@ pub struct SubjectShots<'a> {
     pub id: SubjectId,
     /// Its current box.
     pub bbox: Rect,
+    /// What the box covers.
+    pub extent: Extent,
     /// Name of its primary query (its id, for an on-air orphan).
     pub query_name: &'a str,
     /// Presets to make shots for: its primary query's, plus, while it is on
@@ -126,6 +136,7 @@ pub fn desired_shots(sources: &[SourceShots<'_>]) -> Vec<ShotSpec> {
             source: index,
             preset: None,
             initial: Rect::FULL,
+            extent: Extent::Object,
         });
         for subject in &s.subjects {
             for preset in subject.presets {
@@ -148,6 +159,7 @@ pub fn desired_shots(sources: &[SourceShots<'_>]) -> Vec<ShotSpec> {
                     source: index,
                     preset: Some(preset.clone()),
                     initial: subject.bbox,
+                    extent: subject.extent,
                 });
             }
         }
@@ -169,6 +181,8 @@ pub struct SourceFacts {
 pub struct SubjectFacts {
     /// Current box.
     pub bbox: Rect,
+    /// What the box covers.
+    pub extent: Extent,
     /// The subject is tracking (not lost).
     pub tracking: bool,
     /// Latest tracker (or detector) confidence in `0..=1`.
@@ -192,6 +206,10 @@ pub struct ShotEntry {
     pub crop: Rect,
     /// How close the crop is to its ideal, in `0..=1`.
     pub settled: f64,
+    /// The preset's zoom ceiling keeps the shot looser than its size (the
+    /// newest ideal crop's verdict, held while the subject is lost). Always
+    /// false for wides.
+    pub limited_by_zoom: bool,
     /// Director quality in `0..=1`.
     pub quality: f32,
     /// The shot can be put on air.
@@ -217,6 +235,7 @@ pub fn wide_crop(source_aspect: f64, output_aspect: f64) -> Rect {
     Composition {
         center: Point { x: 0.5, y: 0.5 },
         width: ac_framing::compose::max_width(source_aspect, output_aspect),
+        limited_by_zoom: false,
     }
     .rect(source_aspect, output_aspect)
 }
@@ -341,9 +360,10 @@ impl Catalog {
             let facts = e.subject.and_then(|id| subject(e.source, id));
             match (&mut e.framer, &e.preset, facts) {
                 (Some(framer), Some(preset), Some(f)) if f.tracking => {
-                    let target = compose(&f.bbox, preset, src.aspect, output_aspect);
+                    let target = framer.aim(&f.bbox, f.extent, preset, dt);
                     let current = framer.step(Some(target), dt);
                     e.crop = current.rect(src.aspect, output_aspect);
+                    e.limited_by_zoom = current.limited_by_zoom;
                     e.settled = settledness(current, target, src.aspect, output_aspect);
                     e.quality = (f.confidence.clamp(0.0, 1.0) as f64 * e.settled) as f32;
                     e.status = ShotStatus::Tracking;
@@ -351,12 +371,14 @@ impl Catalog {
                 (Some(framer), _, _) => {
                     let current = framer.step(None, dt);
                     e.crop = current.rect(src.aspect, output_aspect);
+                    e.limited_by_zoom = current.limited_by_zoom;
                     e.settled = 0.0;
                     e.quality = 0.0;
                     e.status = ShotStatus::Lost;
                 }
                 (None, _, _) => {
                     e.crop = wide_crop(src.aspect, output_aspect);
+                    e.limited_by_zoom = false;
                     e.settled = 1.0;
                     e.quality = 1.0;
                     e.status = ShotStatus::Wide;
@@ -384,9 +406,11 @@ fn new_entry(
         ShotTarget::Wide { .. } => None,
     };
     let framer = spec.preset.as_ref().map(|p| {
-        let initial = compose(&spec.initial, p, aspect, output_aspect);
+        let subject = SubjectGeometry::new(spec.initial, spec.extent);
+        let initial = compose_subject(&subject, p, aspect, output_aspect);
         ShotFramer::new(*framing, initial, aspect, output_aspect)
     });
+    let limited_by_zoom = framer.as_ref().is_some_and(|f| f.current().limited_by_zoom);
     let crop = match &framer {
         Some(f) => f.current().rect(aspect, output_aspect),
         None => wide_crop(aspect, output_aspect),
@@ -399,6 +423,7 @@ fn new_entry(
         framer,
         crop,
         settled: 1.0,
+        limited_by_zoom,
         quality: 0.0,
         available: false,
         status: ShotStatus::Unavailable,

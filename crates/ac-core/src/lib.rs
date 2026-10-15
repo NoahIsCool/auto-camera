@@ -5,7 +5,9 @@
 //! * A [`Source`] is a video input (camera, capture card, network feed or file).
 //! * A [`Query`] is a named text prompt, such as "person's upper body", with the
 //!   framing [`Preset`]s that apply to every subject it matches.
-//! * A [`Subject`] is one tracked entity that a query matched on one source.
+//! * A [`Subject`] is one tracked entity that a query matched on one source;
+//!   its [`Extent`] says whether its box is a whole person or the object
+//!   itself, which decides how its shots are composed.
 //! * A [`Shot`] is a virtual camera: a subject framed by a preset, or a source wide.
 //!
 //! All geometry is in normalized source coordinates (`0.0..=1.0` on both axes,
@@ -14,7 +16,7 @@
 pub mod geometry;
 pub mod model;
 
-pub use geometry::{Point, Rect};
+pub use geometry::{Extent, Point, Rect};
 pub use model::{
     Preset, Query, QueryId, Shot, ShotId, ShotSize, ShotTarget, Source, SourceId, Subject,
     SubjectId, TrackState,

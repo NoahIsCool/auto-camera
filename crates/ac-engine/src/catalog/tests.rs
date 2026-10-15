@@ -27,6 +27,7 @@ fn specs(ids: &[u32], presets: &[Preset]) -> Vec<ShotSpec> {
         .map(|&i| SubjectShots {
             id: SubjectId(i),
             bbox: person(0.2 + 0.1 * i as f64),
+            extent: Extent::Object,
             query_name: "Person",
             presets,
         })
@@ -118,6 +119,7 @@ fn tracking_shots_follow_their_subject_and_settle() {
     let facts = |_: usize, _: SubjectId| {
         Some(SubjectFacts {
             bbox: moved,
+            extent: Extent::Object,
             tracking: true,
             confidence: 0.9,
         })
@@ -137,6 +139,46 @@ fn tracking_shots_follow_their_subject_and_settle() {
 }
 
 #[test]
+fn whole_people_too_small_for_their_size_are_flagged_from_the_start() {
+    let p = presets();
+    let source = SourceId("cam".into());
+    let subject = |extent| SubjectShots {
+        id: SubjectId(1),
+        bbox: person(0.4),
+        extent,
+        query_name: "Person",
+        presets: &p,
+    };
+    let sync = |extent| {
+        let mut c = Catalog::new();
+        let specs = desired_shots(&[SourceShots {
+            id: &source,
+            name: "Stage",
+            subjects: vec![subject(extent)],
+        }]);
+        c.sync(specs, &[A], A, &FramerConfig::default());
+        c
+    };
+    let close = ShotId("cam/1/close".into());
+    // A whole person 0.3 high needs about 16x for a close-up; 4x is the cap.
+    let mut c = sync(Extent::Person);
+    assert!(c.get(&close).unwrap().limited_by_zoom);
+    let facts = |_: usize, _: SubjectId| {
+        Some(SubjectFacts {
+            bbox: person(0.4),
+            extent: Extent::Person,
+            tracking: true,
+            confidence: 0.9,
+        })
+    };
+    c.step(1.0 / 30.0, &[live(0)], facts, A);
+    assert!(c.get(&close).unwrap().limited_by_zoom);
+    assert!(!c.get(&ShotId("cam/wide".into())).unwrap().limited_by_zoom);
+    // The same box as an object fills the frame by the fill rule.
+    assert!(!sync(Extent::Object).get(&close).unwrap().limited_by_zoom);
+}
+
+#[test]
 fn lost_subjects_hold_and_score_zero() {
     let p = presets();
     let mut c = Catalog::new();
@@ -145,6 +187,7 @@ fn lost_subjects_hold_and_score_zero() {
     let lost = |_: usize, _: SubjectId| {
         Some(SubjectFacts {
             bbox: person(0.9),
+            extent: Extent::Object,
             tracking: false,
             confidence: 0.9,
         })
@@ -193,6 +236,7 @@ fn settledness_is_one_on_target_and_falls_with_error() {
     let at = |x: f64, w: f64| Composition {
         center: Point { x, y: 0.5 },
         width: w,
+        limited_by_zoom: false,
     };
     assert_eq!(settledness(at(0.5, 0.4), at(0.5, 0.4), A, A), 1.0);
     let half = settledness(at(0.5, 0.4), at(0.55, 0.4), A, A);

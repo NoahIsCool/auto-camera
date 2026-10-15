@@ -156,7 +156,7 @@ not guitars (see "Prompts" in the crate README).
 | `ac-sources` | File (ffmpeg) and synthetic sources; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector |
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
-| `ac-framing` | Ideal crops and per-shot smoothing |
+| `ac-framing` | Ideal crops (fill rule for objects, body cut lines for whole people, zoom-limit flags) and per-shot smoothing |
 | `ac-director` | Shot scoring, suggestions and opt-in auto-takes |
 | `ac-switcher` | Preview/program, cut/auto/T-bar transitions |
 | `ac-compositor` | CPU program compositor |

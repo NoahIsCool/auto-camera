@@ -3,8 +3,9 @@
 //! Tiles follow broadcast multiview conventions: a **red** border marks a
 //! shot visible on program (both shots during a mix), **green** the shot
 //! staged on preview, and an unavailable shot is dimmed with "no signal".
-//! The caption carries the tile's shortcut number (1–9), the shot name, its
-//! tracking status and a quality bar.
+//! The caption carries the tile's shortcut number (1–9), the shot name
+//! (marked "(limited)" when the preset's zoom ceiling keeps the shot looser
+//! than its size), its tracking status and a quality bar.
 //!
 //! Interaction: a click stages the shot on preview; a double click stages
 //! and cuts it to program. The right-click menu of a subject shot pins,
@@ -20,7 +21,7 @@ use eframe::egui::{
 
 use super::keys::tile_label;
 use super::layout::{CAPTION, grid};
-use super::text::shot_status;
+use super::text::{shot_hover, shot_status, shot_title};
 use super::textures::Textures;
 
 /// Program tally colour.
@@ -102,8 +103,7 @@ pub fn show(
                 if shot.kind == CandidateKind::Subject {
                     response.context_menu(|ui| subject_menu(ui, snap, shot, &mut commands));
                 }
-                response
-                    .on_hover_text(format!("{}\nclick: preview · double-click: cut", shot.id.0));
+                response.on_hover_text(shot_hover(shot));
             }
         });
     commands
@@ -146,8 +146,8 @@ fn draw_tile(
     let caption = Rect::from_min_size(picture.left_bottom(), vec2(picture.width(), CAPTION));
     painter.rect_filled(caption, CornerRadius::ZERO, Color32::from_gray(30));
     let label = match tile_label(index) {
-        Some(n) => format!("{n}  {}", shot.name),
-        None => shot.name.clone(),
+        Some(n) => format!("{n}  {}", shot_title(shot)),
+        None => shot_title(shot),
     };
     let text = ui.visuals().strong_text_color();
     painter.text(

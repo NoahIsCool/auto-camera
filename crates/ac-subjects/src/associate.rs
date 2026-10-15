@@ -38,11 +38,14 @@
 //! the detection and the tracker is restarted there. Otherwise the detection
 //! becomes the new anchor and box, unless the tracker has already reported a
 //! newer box that agrees with it, which is kept because it is more recent.
+//! Either way the subject takes the detection's extent (whole person or
+//! object), since that is what its box now stands for; a detection older
+//! than the anchor changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
-use ac_core::{QueryId, Rect, SubjectId, TrackState};
+use ac_core::{Extent, QueryId, Rect, SubjectId, TrackState};
 
 use crate::assignment::match_pairs;
 use crate::event::{RetireReason, StoreEvent};
@@ -62,6 +65,8 @@ struct Clean<'a> {
     query: &'a QueryId,
     /// The sanitized box.
     bbox: Rect,
+    /// What the box covers.
+    extent: Extent,
     /// Detector confidence.
     score: f32,
 }
@@ -91,6 +96,7 @@ impl SubjectStore {
                 Some(Clean {
                     query: &d.query,
                     bbox: sanitize(&d.bbox)?,
+                    extent: d.extent,
                     score: d.score,
                 })
             })
@@ -203,6 +209,7 @@ impl SubjectStore {
         let events = &mut batch.events;
         if !rec.is_tracking() {
             rec.reseed(det.bbox, pts);
+            rec.subject.extent = det.extent;
             rec.subject.state = TrackState::Tracking;
             rec.lost_since = None;
             rec.tracker_running = true;
@@ -220,6 +227,7 @@ impl SubjectStore {
             // before an operator fix): it confirms the subject, nothing more.
             return;
         }
+        rec.subject.extent = det.extent;
         let agrees = rec.predicted(pts).iou(&det.bbox) >= reseed_iou;
         if !agrees || !rec.tracker_running {
             rec.reseed(det.bbox, pts);
@@ -349,6 +357,7 @@ impl SubjectStore {
             self.source.clone(),
             det.query.clone(),
             det.bbox,
+            det.extent,
             det.score,
             pts,
         );

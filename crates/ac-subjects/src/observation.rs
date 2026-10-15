@@ -10,8 +10,12 @@
 //! The store does not depend on the vision crate. The engine converts the
 //! detector's output into [`Detection`]s and the tracker's into
 //! [`TrackObservation`]s.
+//!
+//! A detection says what its box covers ([`Extent`]); a track observation
+//! does not, because the tracker follows the box it was started on at that
+//! box's scale, so the subject keeps the extent of its newest detection.
 
-use ac_core::{QueryId, Rect, SubjectId};
+use ac_core::{Extent, QueryId, Rect, SubjectId};
 use serde::{Deserialize, Serialize};
 
 /// One box from the slow open-vocabulary detector.
@@ -23,6 +27,10 @@ pub struct Detection {
     pub bbox: Rect,
     /// Detector confidence in `0.0..=1.0`.
     pub score: f32,
+    /// What `bbox` covers. Absent in older data, where it reads as
+    /// [`Extent::Object`].
+    #[serde(default)]
+    pub extent: Extent,
 }
 
 /// One box from a subject's fast per-frame tracker.

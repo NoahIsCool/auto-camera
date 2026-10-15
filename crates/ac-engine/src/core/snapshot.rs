@@ -54,6 +54,7 @@ impl EngineCore {
                     crop: e.crop,
                     quality: e.quality,
                     settled: e.settled,
+                    limited_by_zoom: e.limited_by_zoom,
                     status: e.status,
                     available: e.available,
                     tally: Tally {

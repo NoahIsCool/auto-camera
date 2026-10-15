@@ -17,10 +17,10 @@
 //!   `logits`, `pred_boxes`). Text embeddings are cached per normalized prompt,
 //!   so steady-state detection runs only the image side.
 //!
-//! By default (`OwlConfig::people_first`) the detector returns whole people:
-//! each pass asks the model for people and for the objects the prompts name,
-//! and [`crate::matching`] picks, per prompt, the people holding its object.
-//! With `people_first` off it returns each prompt's own boxes.
+//! By default (`OwlConfig::people_first`) the detector returns whole people
+//! (`Extent::Person`): each pass asks for people and the prompts' objects, and
+//! [`crate::matching`] picks, per prompt, the people holding its object. With
+//! `people_first` off it returns each prompt's own boxes (`Extent::Object`).
 //!
 //! The execution provider is CoreML on macOS when the loaded ONNX Runtime has
 //! it (unsupported nodes fall back to the CPU), and the CPU elsewhere. CoreML

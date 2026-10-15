@@ -47,6 +47,7 @@ pub fn subject_shot(id: &str, status: ShotStatus, quality: f32) -> ShotView {
         crop: Rect::new(0.25, 0.25, 0.5, 0.5),
         quality,
         settled: 1.0,
+        limited_by_zoom: false,
         status,
         available: status != ShotStatus::Unavailable,
         tally: Tally::default(),

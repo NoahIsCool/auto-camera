@@ -40,6 +40,7 @@ use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use ac_core::Extent;
 use ac_media::VideoFrame;
 use ac_sources::{SourceConfig, SyntheticPattern};
 use ac_vision::{Detection, Detector, PromptQuery, ScriptedDetector};
@@ -103,6 +104,13 @@ pub fn staleness(
 /// A detector answering every query with every subject of a synthetic
 /// pattern, at `score`. The pattern must match the source's parameters; it
 /// is a pure function of PTS, so the boxes are the exact ground truth.
+///
+/// The boxes are marked [`Extent::Object`], so their shots keep the fill
+/// rule. The movers are coloured rectangles that cross the frame in four
+/// to seven seconds; cut at body lines as whole people, their shots would
+/// be zoom-limited and too tight to follow them under the pan speed cap,
+/// and the demo studio would no longer behave as it did. Scripts that
+/// stand in for people mark their boxes [`Extent::Person`] instead.
 pub fn synthetic_detector(pattern: SyntheticPattern, score: f32) -> ScriptedDetector {
     ScriptedDetector::from_fn("synthetic-ground-truth", move |frame, queries| {
         let truth = pattern.ground_truth(frame.pts);
@@ -113,6 +121,7 @@ pub fn synthetic_detector(pattern: SyntheticPattern, score: f32) -> ScriptedDete
                     query: q.id.clone(),
                     bbox: g.bbox,
                     score,
+                    extent: Extent::Object,
                 })
             })
             .collect())
@@ -341,6 +350,7 @@ mod tests {
         assert_eq!(out[0].bbox, truth[0].bbox);
         assert_eq!(out[3].query, QueryId("b".into()));
         assert!(out.iter().all(|d| d.score == 0.8));
+        assert!(out.iter().all(|d| d.extent == Extent::Object));
         assert!(d.detect(&f, &[]).unwrap().is_empty());
     }
 
@@ -392,6 +402,7 @@ mod tests {
                 query: queries[0].id.clone(),
                 bbox: Rect::new(0.1, 0.1, 0.2, 0.2),
                 score: 0.5,
+                extent: Extent::Object,
             }])
         });
         let mut w = DiscoveryWorker::spawn(3, "t", ready(Box::new(detector)), tx).unwrap();

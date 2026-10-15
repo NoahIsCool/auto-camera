@@ -70,6 +70,7 @@ impl EngineCore {
                         Some(SubjectShots {
                             id,
                             bbox: r.subject.bbox,
+                            extent: r.subject.extent,
                             query_name: query.map_or(r.subject.query.0.as_str(), |q| &q.name),
                             presets,
                         })
@@ -142,6 +143,7 @@ impl EngineCore {
                 let subject = s.vision.store().get(id)?;
                 Some(SubjectFacts {
                     bbox: subject.bbox,
+                    extent: subject.extent,
                     tracking: subject.state == TrackState::Tracking,
                     confidence: s.vision.confidence(id),
                 })

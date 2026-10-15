@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use ac_core::{Rect, SubjectId, TrackState};
+use ac_core::{Extent, Rect, SubjectId, TrackState};
 
 use crate::testkit::*;
 use crate::{Detection, RetireReason, StoreConfig, StoreEvent, SubjectStore};
@@ -331,6 +331,34 @@ fn a_late_detection_that_disagrees_restarts_the_tracker_at_its_own_pts() {
             .len(),
         1
     );
+}
+
+#[test]
+fn subjects_take_the_extent_of_their_newest_applied_detection() {
+    let mut s = store();
+    let id = SubjectId(1);
+    let extent = |s: &SubjectStore| s.get(id).unwrap().extent;
+    s.ingest_detections(t(0.0), &[person_det("person", person(0.4, 0.5))]);
+    assert_eq!(extent(&s), Extent::Person, "created as a whole person");
+    // Tracks and operator fixes move the box at the detected scale.
+    s.ingest_tracks(t(0.5), &[track(id, person(0.41, 0.5))]);
+    s.reacquire(id, person(0.42, 0.5), t(0.6)).unwrap();
+    assert_eq!(extent(&s), Extent::Person);
+    // A detection older than the anchor only confirms.
+    s.ingest_detections(t(0.55), &[det("person", person(0.42, 0.5))]);
+    assert_eq!(extent(&s), Extent::Person);
+    // A newer one is what the box stands for now.
+    s.ingest_detections(t(0.7), &[det("person", person(0.42, 0.5))]);
+    assert_eq!(extent(&s), Extent::Object);
+    // Recovery after loss, and an alias query, apply theirs too.
+    s.tick(t(2.0));
+    assert_eq!(s.get(id).unwrap().state, TrackState::Lost);
+    s.ingest_detections(t(2.5), &[person_det("person", person(0.42, 0.5))]);
+    assert_eq!(extent(&s), Extent::Person);
+    s.ingest_tracks(t(2.6), &[track(id, person(0.42, 0.5))]);
+    s.ingest_detections(t(2.7), &[det("guitarist", person(0.42, 0.5))]);
+    assert!(s.record(id).unwrap().answers(&q("guitarist")));
+    assert_eq!(extent(&s), Extent::Object);
 }
 
 #[test]

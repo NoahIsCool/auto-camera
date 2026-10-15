@@ -104,6 +104,11 @@ thumb_rate_hz = 5.0
     assert_eq!(c.tracker.work_width, 320);
     assert_eq!(c.tracker.template_size, 32);
     assert_eq!(c.framing.pan_half_life, 1.0);
+    assert_eq!(
+        c.framing.head_half_life,
+        FramerConfig::default().head_half_life,
+        "keys not given keep their defaults"
+    );
     assert_eq!(c.director.mode, ac_director::DirectorMode::Auto);
     assert_eq!(
         c.store_config().unwrap().lost_after,
@@ -214,6 +219,7 @@ fn invalid_values_are_rejected_with_a_message() {
         ("cap", Box::new(|c| c.subjects.max_subjects = 99)),
         ("tracker", Box::new(|c| c.tracker.work_width = 0)),
         ("framing", Box::new(|c| c.framing.pan_half_life = f64::NAN)),
+        ("head memory", Box::new(|c| c.framing.head_half_life = 0.0)),
         ("duration", Box::new(|c| c.switcher.duration = 0.0)),
         ("monitor", Box::new(|c| c.monitors.width = 4)),
         (
