@@ -29,7 +29,7 @@ channels, and the operator sees it only through immutable snapshots.
 | UI (`main`) or headless runner | `apps/auto-camera` | Reads snapshots, posts commands. Never touches engine state. |
 | `ac-engine` | `Engine` | The master clock loop: applies commands, runs one `EngineCore::tick` per output frame, pushes program to the encoder, publishes a snapshot. |
 | source workers (`ac-synthetic-<id>`, file decoders) | each `VideoSource` | Decode or generate frames at the source rate; publish into the source's frame mailbox and a small bounded audio queue. |
-| `ac-discovery-<source>` | `DiscoveryWorker`, one per source with a detector | Runs the open-vocabulary detector on the newest frame it was handed. |
+| `ac-discovery-<source>` | `DiscoveryWorker`, one per source with a detector | Loads the detector (a CoreML compile can take minutes), then runs it on the newest frame it was handed. |
 | `ac-output-start`, `ac-output-finish` | `OutputController` | Start ffmpeg (probing encoders) and finish it (flushing the recording) off the engine thread, since both can take seconds. |
 | `ac-output-video/-audio/-progress/-stderr` and the `ffmpeg` child | `ProgramEncoder` | Feed and watch the single program encode (RTMP and MP4 from one encode, ADR 0001). |
 | rayon pool | process | Data-parallel per-pixel kernels (tracker pyramid, compositor) *inside* a tick; holds no state. |
@@ -106,7 +106,8 @@ air.
 
 `Shutdown` (or dropping `Engine`, or a closed command channel) makes the
 engine thread stop the discovery workers (joining them after a pass in
-progress), shut the output down (finishing a running recording
+progress; a worker still loading its model is detached and exits when the
+load ends), shut the output down (finishing a running recording
 synchronously, joining every helper, reaping ffmpeg), stop the sources
 (joining their workers) and publish a final snapshot with `running = false`.
 `Engine::shutdown` then joins the engine thread and reports the ticks run and

@@ -18,9 +18,24 @@
 //!
 //! A panicking detector does not take the engine down: the panic is caught
 //! and reported as an error result, and the worker keeps serving.
+//!
+//! The detector is *loaded* on the worker thread too. [`build_detector`]
+//! checks the settings and that the model files exist (so a bad config still
+//! fails `Engine::start`), and returns a [`DetectorLoader`] that the worker
+//! runs first. Loading a real model can take minutes (CoreML compiles OWLv2
+//! on first use); done on the engine thread it would hold the window and the
+//! first picture back that long while the sources ran unread. Until the
+//! detector is ready, requests wait in the slot (each replaced by the newest)
+//! and the engine counts them as timed out after `discovery.timeout_s`; a
+//! loader that fails turns every later request into an error result carrying
+//! its message. Stopping a worker that is still loading does not wait for
+//! the load: the thread is detached and exits by itself when the load ends
+//! (its slot is closed by then), so quitting is never held up by a compile.
+//! A worker that has loaded is joined, after any pass in progress.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -104,11 +119,20 @@ pub fn synthetic_detector(pattern: SyntheticPattern, score: f32) -> ScriptedDete
     })
 }
 
-/// Builds the detector for one source, or `None` when discovery is off.
+/// Loads a detector on the discovery thread; see the module docs.
+pub type DetectorLoader = Box<dyn FnOnce() -> Result<Box<dyn Detector>, String> + Send>;
+
+/// Wraps an already built detector as a loader.
+fn ready(detector: Box<dyn Detector>) -> DetectorLoader {
+    Box::new(move || Ok(detector))
+}
+
+/// Checks the settings for one source and returns its detector loader, or
+/// `None` when discovery is off.
 pub fn build_detector(
     settings: &DetectorSettings,
     source: &SourceConfig,
-) -> Result<Option<Box<dyn Detector>>, String> {
+) -> Result<Option<DetectorLoader>, String> {
     match settings {
         DetectorSettings::None => Ok(None),
         DetectorSettings::Synthetic { score } => match source {
@@ -120,7 +144,7 @@ pub fn build_detector(
             } => {
                 let pattern = SyntheticPattern::new(*width, *height, *fps, *subjects)
                     .map_err(|e| e.to_string())?;
-                Ok(Some(Box::new(synthetic_detector(pattern, *score))))
+                Ok(Some(ready(Box::new(synthetic_detector(pattern, *score)))))
             }
             SourceConfig::File { .. } => {
                 Err("the synthetic detector only works on synthetic sources".into())
@@ -130,9 +154,10 @@ pub fn build_detector(
     }
 }
 
-/// Builds the OWL detector (feature `onnx`).
+/// Checks the OWL settings and model files and returns the loader (feature
+/// `onnx`).
 #[cfg(feature = "onnx")]
-fn build_owl(settings: &DetectorSettings) -> Result<Box<dyn Detector>, String> {
+fn build_owl(settings: &DetectorSettings) -> Result<DetectorLoader, String> {
     use ac_vision::{OnnxOwlDetector, OwlConfig, OwlModel};
     let DetectorSettings::Owl {
         model,
@@ -145,6 +170,10 @@ fn build_owl(settings: &DetectorSettings) -> Result<Box<dyn Detector>, String> {
     else {
         return Err("not an OWL detector config".into());
     };
+    let files = [Some(model), text_encoder.as_ref(), Some(tokenizer)];
+    if let Some(missing) = files.into_iter().flatten().find(|f| !f.is_file()) {
+        return Err(format!("model file not found: {}", missing.display()));
+    }
     let model = match text_encoder {
         Some(text_encoder) => OwlModel::Split {
             text_encoder: text_encoder.clone(),
@@ -161,13 +190,17 @@ fn build_owl(settings: &DetectorSettings) -> Result<Box<dyn Detector>, String> {
         use_coreml: use_coreml.unwrap_or(defaults.use_coreml),
         ..defaults
     };
-    let detector = OnnxOwlDetector::load(model, tokenizer, config).map_err(|e| e.to_string())?;
-    Ok(Box::new(detector))
+    let tokenizer = tokenizer.clone();
+    Ok(Box::new(move || {
+        let detector =
+            OnnxOwlDetector::load(model, &tokenizer, config).map_err(|e| e.to_string())?;
+        Ok(Box::new(detector) as Box<dyn Detector>)
+    }))
 }
 
-/// Builds the OWL detector (feature `onnx`).
+/// Rejects the OWL detector: this build lacks the `onnx` feature.
 #[cfg(not(feature = "onnx"))]
-fn build_owl(_: &DetectorSettings) -> Result<Box<dyn Detector>, String> {
+fn build_owl(_: &DetectorSettings) -> Result<DetectorLoader, String> {
     Err("detector kind \"owl\" needs auto-camera built with `--features onnx`".into())
 }
 
@@ -176,23 +209,33 @@ fn build_owl(_: &DetectorSettings) -> Result<Box<dyn Detector>, String> {
 pub struct DiscoveryWorker {
     /// Newest-request mailbox shared with the thread.
     slot: Arc<Slot<DiscoveryRequest>>,
-    /// The thread, joined by [`DiscoveryWorker::stop`].
+    /// The thread, joined (or detached while loading) by
+    /// [`DiscoveryWorker::stop`].
     thread: Option<JoinHandle<()>>,
+    /// True while the thread is still running its loader.
+    loading: Arc<AtomicBool>,
 }
 
 impl DiscoveryWorker {
-    /// Starts a worker for source `index` that answers on `results`.
+    /// Starts a worker for source `index` that loads its detector with
+    /// `loader` and answers on `results`.
     pub fn spawn(
         index: usize,
         name: &str,
-        mut detector: Box<dyn Detector>,
+        loader: DetectorLoader,
         results: Sender<DiscoveryResult>,
     ) -> std::io::Result<Self> {
         let slot: Arc<Slot<DiscoveryRequest>> = Arc::new(Slot::new());
         let inbox = slot.clone();
+        let loading = Arc::new(AtomicBool::new(true));
+        let loaded = loading.clone();
         let thread = std::thread::Builder::new()
             .name(format!("ac-discovery-{name}"))
             .spawn(move || {
+                let mut detector = catch_unwind(AssertUnwindSafe(loader))
+                    .unwrap_or_else(|_| Err("loading the detector panicked".into()))
+                    .map_err(|e| format!("the detector failed to load: {e}"));
+                loaded.store(false, Ordering::Release);
                 loop {
                     let request = match inbox.take(WORKER_POLL) {
                         Ok(r) => r,
@@ -200,13 +243,16 @@ impl DiscoveryWorker {
                         Err(TakeError::Closed) => break,
                     };
                     let started = Instant::now();
-                    let outcome = catch_unwind(AssertUnwindSafe(|| {
-                        detector.detect(&request.frame, &request.queries)
-                    }))
-                    .unwrap_or_else(|_| {
-                        Err(ac_vision::VisionError::Model("detector panicked".into()))
-                    })
-                    .map_err(|e| e.to_string());
+                    let outcome = match &mut detector {
+                        Ok(detector) => catch_unwind(AssertUnwindSafe(|| {
+                            detector.detect(&request.frame, &request.queries)
+                        }))
+                        .unwrap_or_else(|_| {
+                            Err(ac_vision::VisionError::Model("detector panicked".into()))
+                        })
+                        .map_err(|e| e.to_string()),
+                        Err(message) => Err(message.clone()),
+                    };
                     let result = DiscoveryResult {
                         source: index,
                         frame: request.frame,
@@ -221,6 +267,7 @@ impl DiscoveryWorker {
         Ok(Self {
             slot,
             thread: Some(thread),
+            loading,
         })
     }
 
@@ -229,19 +276,24 @@ impl DiscoveryWorker {
         self.slot.put(request);
     }
 
-    /// Stops the worker and joins its thread (after a pass in progress
-    /// finishes). Idempotent.
-    pub fn stop(&mut self) {
+    /// Stops the worker: joins its thread after a pass in progress, or
+    /// detaches it while it is still loading (see the module docs). Returns
+    /// true when a thread was joined. Idempotent.
+    pub fn stop(&mut self) -> bool {
         self.slot.close();
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        let Some(t) = self.thread.take() else {
+            return false;
+        };
+        if self.loading.load(Ordering::Acquire) {
+            return false;
         }
+        t.join().is_ok()
     }
 }
 
 impl Drop for DiscoveryWorker {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
     }
 }
 
@@ -336,7 +388,7 @@ mod tests {
                 score: 0.5,
             }])
         });
-        let mut w = DiscoveryWorker::spawn(3, "t", Box::new(detector), tx).unwrap();
+        let mut w = DiscoveryWorker::spawn(3, "t", ready(Box::new(detector)), tx).unwrap();
         let p = SyntheticPattern::new(16, 9, 30.0, 0).unwrap();
         let queries = vec![PromptQuery::new("q", "thing")];
         for seq in [7, 8] {
@@ -355,5 +407,65 @@ mod tests {
         w.stop();
         w.stop();
         assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn a_worker_whose_loader_fails_answers_every_request_with_the_reason() {
+        let (tx, rx) = channel();
+        let loader: DetectorLoader = Box::new(|| Err("no such model".into()));
+        let mut w = DiscoveryWorker::spawn(0, "t", loader, tx).unwrap();
+        let p = SyntheticPattern::new(16, 9, 30.0, 0).unwrap();
+        for seq in [1, 2] {
+            w.submit(DiscoveryRequest {
+                frame: p.frame(&SourceId("s".into()), seq),
+                queries: vec![PromptQuery::new("q", "thing")],
+            });
+            let r = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert_eq!(r.frame.seq, seq);
+            let message = r.outcome.unwrap_err();
+            assert!(message.contains("failed to load") && message.contains("no such model"));
+        }
+        w.stop();
+    }
+
+    #[test]
+    fn stopping_a_loading_worker_does_not_wait_for_the_load() {
+        let (tx, _rx) = channel();
+        let (release, gate) = channel::<()>();
+        let loader: DetectorLoader = Box::new(move || {
+            let _ = gate.recv_timeout(Duration::from_secs(30));
+            Err("released".into())
+        });
+        let mut w = DiscoveryWorker::spawn(0, "t", loader, tx).unwrap();
+        let started = Instant::now();
+        assert!(!w.stop(), "a loading worker is detached, not joined");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        release.send(()).unwrap();
+    }
+
+    #[test]
+    fn stopping_a_loaded_worker_joins_it() {
+        let (tx, _rx) = channel();
+        let loader: DetectorLoader = Box::new(|| Err("none".into()));
+        let mut w = DiscoveryWorker::spawn(0, "t", loader, tx).unwrap();
+        while w.loading.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(w.stop());
+        assert!(!w.stop(), "already stopped");
+    }
+
+    #[test]
+    fn a_panicking_loader_does_not_take_the_worker_down() {
+        let (tx, rx) = channel();
+        let loader: DetectorLoader = Box::new(|| panic!("boom"));
+        let w = DiscoveryWorker::spawn(0, "t", loader, tx).unwrap();
+        let p = SyntheticPattern::new(16, 9, 30.0, 0).unwrap();
+        w.submit(DiscoveryRequest {
+            frame: p.frame(&SourceId("s".into()), 1),
+            queries: vec![PromptQuery::new("q", "thing")],
+        });
+        let r = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(r.outcome.unwrap_err().contains("panicked"));
     }
 }

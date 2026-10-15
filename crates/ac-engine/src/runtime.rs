@@ -581,8 +581,7 @@ impl Runtime {
     fn shutdown(mut self) -> EngineReport {
         let mut joined = 0;
         for w in self.workers.iter_mut().flatten() {
-            w.stop();
-            joined += 1;
+            joined += usize::from(w.stop());
         }
         joined += self.output.shutdown();
         for s in &mut self.sources {
