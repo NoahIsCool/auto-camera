@@ -152,13 +152,25 @@ next to a woman"), also attaches its own boxes, so it never picks the other
 person. "a person" or "people" picks everyone. See the `matching` module for
 the rules and their tests.
 
+A detector never sees the operator's prompt. The engine reads each query's
+prompt once, when the query is created, with `ac_core::parse_prompt`, and
+sends the parsed phrase (`PromptQuery::prompt`): shot words are cut off and
+whole role words rewritten, so "speaker upper body" arrives here as "a
+person speaking", a described person, and "guitarist close-up" as "a person
+playing guitar", an object prompt for "a guitar". How well OWLv2 finds "a
+person speaking" is unmeasured (benchmark B0 in the model-picker design).
+See [ADR 0003](../../docs/adr/0003-shot-words-in-prompts.md).
+
 Every detection says what its box covers (`Detection::extent`). People-first
 detections are `Extent::Person`, whole bodies, and framing cuts their shots
 at body lines measured in head heights from the crown, so "Close" on a
 distant speaker is a head-and-shoulders crop (labelled "(limited)" in the
-multiview when the zoom ceiling cannot reach it), not a full-length shot.
-With `people_first` off, and for scripted boxes not marked as people, the
-boxes are `Extent::Object` and keep the fill rule. See `ac_framing::person`.
+multiview when the zoom ceiling cannot reach it), not a full-length shot,
+as long as the query asks for a person (`ac_core::Query::framing_extent`):
+an object prompt answered with the person holding the object keeps the fill
+rule. With `people_first` off, and for scripted boxes not marked as people,
+the boxes are `Extent::Object` and keep the fill rule. See
+`ac_framing::person`.
 
 Thresholds come on two scales. OWLv2 scores a named object high and any
 description of a person low, however well it fits. So objects need

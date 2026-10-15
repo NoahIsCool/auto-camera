@@ -34,8 +34,13 @@ multiview of every shot with tally borders, tracking status and quality.
 On the right: the director (mode Off/Suggest/Auto, profile Talk/Music, the
 current suggestion and why, Accept), the queries (add a prompt with its
 framings, remove one; pin, hide or show subjects) and the output (RTMP URL,
-recording path, start/stop, encoder statistics). The status bar shows
-source frame rates, tick timing and dropped frames.
+recording path, start/stop, encoder statistics). Under the prompt a live
+line says how it reads, for example "Detector sees: a person speaking ·
+Framing: Medium, Medium close (person)", and the framing checkboxes follow
+the prompt's shot words until you tick one yourself (see
+[Prompts](#prompts)). A tile whose preset's zoom ceiling keeps it looser
+than its size is labelled, for example "Speaker 1 Close (limited)". The
+status bar shows source frame rates, tick timing and dropped frames.
 
 | Input | Action |
 |---|---|
@@ -67,6 +72,8 @@ shuts down and prints a JSON summary on stdout:
   "ok": true,
   "ticks": 160,
   "sources": [{ "id": "stage", "fps": 31.0, "frames": 155, "missed": 3, "discovery_applied": 40 }],
+  "queries": [{ "prompt": "person", "detector_phrase": "person", "presets": ["medium", "close"], "basis": "person",
+                "parse": "Detector sees: person · Framing: no shot words (person)" }],
   "max_subjects": 3,
   "program": { "last": "stage/wide", "changes": 1, "log": [[0.23, "stage/wide"]] },
   "director": { "mode": "suggest", "profile": "talk", "takes": 0, "reason": "best available shot" },
@@ -103,6 +110,11 @@ prompt = "a person speaking at a lectern"
 presets = ["medium", "close"]  # wide is always there; also full, medium_close,
                                # or { id, name, size, headroom, max_zoom }
 
+[[queries]]
+name = "Drummer"
+prompt = "drummer wide"        # no presets: the shot word "wide" picks Full, and
+                               # the detector is asked for "a person playing drums"
+
 [detector]
 kind = "owl"                 # "synthetic" (ground truth) or "none"
 model = "../models/owlv2-base-onnx/model.onnx"
@@ -125,8 +137,50 @@ record_path = "../recordings/show.mp4"
 ```
 
 Further sections tune the `tracker`, `subjects` (limits and lost/retire
-times), `framing`, `switcher` (default transition) and `monitors` (monitor
-and multiview tile sizes and rates); see `crates/ac-engine/src/config.rs`.
+times), `framing`, `switcher` (default transition), `monitors` (monitor
+and multiview tile sizes and rates) and `lexicon` (below); see
+`crates/ac-engine/src/config.rs`.
+
+## Prompts
+
+A prompt says who or what to frame, and may also say what shots to make
+([ADR 0003](docs/adr/0003-shot-words-in-prompts.md), proposed). The prompt
+is read once, when the query is created, and the detector never sees the
+operator's text, only what the parser makes of it:
+
+| Prompt | Detector sees | Framing |
+|---|---|---|
+| `speaker upper body` | a person speaking | Medium, Medium close (person) |
+| `speaker's upper body at the lectern` | speaker at the lectern | Medium, Medium close (person) |
+| `guitarist close-up` | a person playing guitar | Close (person) |
+| `guitar close-up` | guitar | Close (object) |
+| `drummer wide` | a person playing drums | Full (person) |
+| `a person playing guitar` | a person playing guitar | the query's presets (person) |
+
+- **Shot words** count at either end of the prompt or right after a
+  possessive, in any case, with or without hyphens: close, close-up, CU,
+  head and shoulders, headshot, tight, face (Close); medium close, MCU,
+  chest up, bust (Medium close); medium, mid shot, MS, waist up (Medium);
+  upper body, half body (Medium and Medium close, until Noah picks one);
+  full, full body, full length, head to toe, long shot, FS (Full); and
+  "wide" after a subject (Full for now; framing the subject with its kit is
+  later work). A prompt that is only shot words is refused.
+- **Role words** are rewritten when they are the whole subject: speaker,
+  pastor and preacher become "a person speaking", guitarist "a person
+  playing guitar", drummer "a person playing drums", singer "a person
+  singing". Each is a hypothesis until it is benchmarked on footage.
+- **Basis.** A subject whose head noun is a person or role word is framed
+  as a person: on a whole-person box, shots are cut at body lines measured
+  in head heights from the crown (Close at the shoulders, Medium at the
+  waist), with the head estimated from body proportions. Anything else
+  ("guitar close-up") scales its box, as before.
+- **Presets.** A query's explicit `presets` always win over its shot words;
+  with neither it gets medium and close. `literal = true` sends the prompt
+  as typed. Prompts without shot or role words behave as they always did.
+- **Lexicon.** The words are data. A `[lexicon]` table adds entries or
+  replaces built-in ones: `roles = [{ word = "worship leader", phrase = "a
+  person singing" }]`, `shots = [{ phrase = "upper body", sizes =
+  ["medium"] }]`, `person_words = ["organist"]`.
 
 ## The ONNX detector
 
@@ -151,7 +205,7 @@ not guitars (see "Prompts" in the crate README).
 
 | Crate | Role |
 |---|---|
-| `ac-core` | Domain model (sources, queries, subjects, presets, shots) and normalized geometry |
+| `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
 | `ac-media` | Frames, audio blocks and the source trait, with latest-frame mailboxes |
 | `ac-sources` | File (ffmpeg) and synthetic sources; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector |
