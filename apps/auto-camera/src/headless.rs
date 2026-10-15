@@ -109,6 +109,12 @@ pub struct SourceSummary {
     pub discovery_stale: u64,
     /// Detector errors.
     pub discovery_errors: u64,
+    /// Requests abandoned after the timeout.
+    pub discovery_timeouts: u64,
+    /// Latency of the newest discovery result, in milliseconds.
+    pub discovery_last_ms: Option<f64>,
+    /// Newest detector error.
+    pub discovery_last_error: Option<String>,
     /// Subjects admitted over the run.
     pub subjects_created: u64,
     /// Subjects retired over the run.
@@ -390,6 +396,12 @@ fn summarize(
                     discovery_applied: v.discovery.applied,
                     discovery_stale: v.discovery.stale,
                     discovery_errors: v.discovery.errors,
+                    discovery_timeouts: v.discovery.timeouts,
+                    discovery_last_ms: v
+                        .discovery
+                        .last_latency
+                        .map(|d| round(d.as_secs_f64() * 1e3, 1)),
+                    discovery_last_error: v.discovery.last_error.clone(),
                     subjects_created: v.vision.created,
                     subjects_retired: v.vision.retired,
                 })
