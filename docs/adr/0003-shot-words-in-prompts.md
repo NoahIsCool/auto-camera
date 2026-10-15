@@ -5,7 +5,7 @@ default the code follows.
 
 ## Context
 
-Noah, on why he chose SAM 3 and what the prompts are for:
+Noah, on why they chose SAM 3 and what the prompts are for:
 
 > "I liked that it took arbitrary input prompts. This is why I chose SAM 3.
 > Also, part of that was to zoom in to the upper body, so we can say
