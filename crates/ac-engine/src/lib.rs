@@ -54,8 +54,8 @@ pub mod vision;
 pub use catalog::{ShotStatus, subject_shot_id, wide_shot_id};
 pub use command::{CommandError, CommandReply, EngineCommand};
 pub use config::{
-    ConfigError, DetectorSettings, MonitorSettings, OutputSettings, PresetSpec, QuerySettings,
-    SourceEntry, StudioConfig, preset_for,
+    ConfigError, DetectorSettings, EncoderSetting, MonitorSettings, OutputSettings, PresetSpec,
+    QuerySettings, SourceEntry, StudioConfig, preset_for,
 };
 pub use core::{EngineCore, SourceFeed, TickOutput};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};

@@ -9,7 +9,10 @@
 //! 1. The frame is converted to luma and downscaled (area filter) to a working
 //!    width of about 320 to 480 px, never enlarged. A mean pyramid (2x2
 //!    averaging) with integral images is built on top. One pyramid serves
-//!    every subject on the frame.
+//!    every subject on the frame: the tracker keeps the pyramid of the newest
+//!    frame it saw (keyed by source, sequence number and PTS), so the update
+//!    and any number of starts on the same frame (a detection batch that
+//!    admits or reseeds several subjects) convert it once.
 //! 2. Each subject predicts its centre with a constant-velocity model:
 //!    `c' = c + v · dt`, where `dt` comes from the frames' presentation
 //!    timestamps (frames skipped by a latest-frame mailbox are accounted for).
@@ -73,6 +76,7 @@
 //! * Reported boxes are the visible part of the subject, inside the frame.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ac_core::{Point, Rect, SourceId, SubjectId};
@@ -149,6 +153,15 @@ struct Match {
     ambiguous: bool,
 }
 
+/// The pyramid of one frame, kept for reuse on that frame.
+#[derive(Debug, Clone)]
+struct CachedPyramid {
+    /// The frame it was built from: source, sequence number and PTS.
+    key: (SourceId, u64, Duration),
+    /// The pyramid.
+    pyramid: Arc<Pyramid>,
+}
+
 /// Per-frame NCC template tracker; see the [module docs](self).
 #[derive(Debug, Clone, Default)]
 pub struct TemplateTracker {
@@ -158,6 +171,10 @@ pub struct TemplateTracker {
     source: Option<SourceId>,
     /// Subjects by id.
     tracks: BTreeMap<SubjectId, Track>,
+    /// Pyramid of the newest frame converted.
+    cache: Option<CachedPyramid>,
+    /// Pyramids built so far (one per distinct frame worked on).
+    pyramids_built: u64,
 }
 
 impl TemplateTracker {
@@ -192,15 +209,33 @@ impl TemplateTracker {
             .collect()
     }
 
-    /// Builds the working-resolution pyramid of `frame`.
-    fn pyramid(&self, frame: &VideoFrame) -> Pyramid {
+    /// Pyramids built so far: one per distinct frame the tracker started
+    /// or updated subjects on, however many subjects that involved.
+    pub fn pyramids_built(&self) -> u64 {
+        self.pyramids_built
+    }
+
+    /// The working-resolution pyramid of `frame`, built once per frame.
+    fn pyramid(&mut self, frame: &VideoFrame) -> Arc<Pyramid> {
+        let key = (frame.source.clone(), frame.seq, frame.pts);
+        if let Some(c) = &self.cache
+            && c.key == key
+        {
+            return c.pyramid.clone();
+        }
         let w = frame.width.min(self.config.work_width) as usize;
         let h = ((frame.height as f64 * w as f64 / frame.width as f64).round() as usize).max(1);
-        Pyramid::new(
+        let pyramid = Arc::new(Pyramid::new(
             GrayImage::from_frame(frame, w, h),
             MIN_LEVEL_SIDE,
             MAX_LEVELS,
-        )
+        ));
+        self.pyramids_built += 1;
+        self.cache = Some(CachedPyramid {
+            key,
+            pyramid: pyramid.clone(),
+        });
+        pyramid
     }
 
     /// Fails when `frame` belongs to another source than the bound one.
@@ -494,6 +529,7 @@ impl Tracker for TemplateTracker {
         self.tracks.remove(&id);
         if self.tracks.is_empty() {
             self.source = None;
+            self.cache = None;
         }
     }
 

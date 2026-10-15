@@ -9,7 +9,7 @@ use ac_core::{Rect, ShotId, SourceId};
 use ac_media::VideoFrame;
 use ac_switcher::Output;
 
-use super::Compositor;
+use super::{Compositor, TILE_GENERATIONS};
 use crate::{CompositorConfig, CompositorError, Layer, LayerIssue, Layers};
 
 /// A shot id.
@@ -492,6 +492,49 @@ fn tiles_do_not_disturb_program_rendering() {
         after.seq, 1,
         "tiles do not consume program sequence numbers"
     );
+}
+
+#[test]
+fn a_large_multiview_held_by_its_viewers_is_recycled() {
+    let src = pattern(32, 18);
+    let mut c = compositor(32, 18);
+    let shots = 30;
+    c.reserve_tiles(shots);
+    // Three generations held (engine, snapshot, window) while a fourth is
+    // rendered: from the fourth refresh on, every tile reuses a buffer.
+    let mut held: std::collections::VecDeque<Vec<VideoFrame>> = Default::default();
+    let mut fresh = 0;
+    for refresh in 0..12 {
+        let known: Vec<*const u8> = c.tiles.buffers().map(|b| b.as_ptr()).collect();
+        let set: Vec<VideoFrame> = (0..shots)
+            .map(|_| c.render_tile(&src, Rect::FULL, 8, 4).unwrap())
+            .collect();
+        if refresh >= TILE_GENERATIONS {
+            fresh += set
+                .iter()
+                .filter(|t| !known.contains(&t.data.as_ptr()))
+                .count();
+        }
+        // Monitors do not evict tiles, and tiles do not evict monitors.
+        let _monitor = c.render_monitor(&src, Rect::FULL, 16, 9).unwrap();
+        held.push_back(set);
+        if held.len() == TILE_GENERATIONS {
+            held.pop_front();
+        }
+    }
+    assert_eq!(fresh, 0, "tiles allocated after warm-up");
+}
+
+#[test]
+fn monitors_and_tiles_render_the_same_picture() {
+    let src = pattern(32, 18);
+    let mut c = compositor(32, 18);
+    let crop = Rect::new(0.25, 0.25, 0.5, 0.5);
+    let tile = c.render_tile(&src, crop, 16, 9).unwrap();
+    let monitor = c.render_monitor(&src, crop, 16, 9).unwrap();
+    assert_eq!(&*tile.data, &*monitor.data);
+    assert_eq!((monitor.seq, monitor.pts), (src.seq, src.pts));
+    assert!(c.render_monitor(&src, crop, 0, 9).is_err());
 }
 
 #[test]

@@ -358,3 +358,50 @@ fn admission_stops_when_ids_are_exhausted() {
     assert!(ev.is_empty(), "{ev:?}");
     assert_eq!(s.len(), 1);
 }
+
+#[test]
+fn a_failed_tracker_start_is_retried_by_the_next_matching_detection() {
+    let (mut s, id) = one();
+    s.tracker_failed(id);
+    let rec = s.record(id).unwrap();
+    assert!(rec.is_tracking() && !rec.tracker_running);
+    // Without a running tracker, track observations are ignored ...
+    assert!(
+        s.ingest_tracks(t(0.1), &[track(id, person(0.31, 0.5))])
+            .is_empty()
+    );
+    // ... and a detection that agrees with the prediction restarts it
+    // instead of only re-anchoring the box.
+    let bbox = person(0.3, 0.5);
+    let ev = s.ingest_detections(t(0.5), &[det("person", bbox)]);
+    assert!(
+        ev.contains(&StoreEvent::NeedsTrackerStart {
+            id,
+            bbox,
+            pts: t(0.5)
+        }),
+        "{ev:?}"
+    );
+    assert!(s.record(id).unwrap().tracker_running);
+    // A running tracker is not restarted by the next agreeing detection.
+    let ev = s.ingest_detections(t(1.0), &[det("person", bbox)]);
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e, StoreEvent::NeedsTrackerStart { .. })),
+        "{ev:?}"
+    );
+}
+
+#[test]
+fn a_lost_subject_whose_tracker_failed_asks_for_no_stop() {
+    let (mut s, id) = one();
+    s.tracker_failed(id);
+    // Unknown ids are ignored.
+    s.tracker_failed(SubjectId(42));
+    let ev = s.tick(t(5.0));
+    assert!(ev.contains(&StoreEvent::Lost { id }), "{ev:?}");
+    assert!(
+        !ev.contains(&StoreEvent::NeedsTrackerStop { id }),
+        "nothing runs, so nothing is stopped: {ev:?}"
+    );
+}

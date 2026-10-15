@@ -9,7 +9,10 @@
 //!
 //! Monitors (program and preview at monitor size) and multiview tiles exist
 //! only for the operator, so they are refreshed at their own configured
-//! rates, and not at all when the rate is zero (headless runs).
+//! rates, and not at all when the rate is zero (headless runs). Monitors
+//! come from their own buffer pool, and the tile pool is sized to the shot
+//! count before each refresh, so a large multiview held by the window
+//! recycles its buffers instead of allocating on the engine thread.
 
 use std::time::Duration;
 
@@ -83,13 +86,16 @@ impl EngineCore {
         }
         self.next_monitor_at = self.now + every;
         let (w, h) = (self.monitors.width, self.monitors.height);
-        self.program_monitor = self.compositor.render_tile(program, Rect::FULL, w, h).ok();
+        self.program_monitor = self
+            .compositor
+            .render_monitor(program, Rect::FULL, w, h)
+            .ok();
         let preview = self
             .switcher
             .preview()
             .and_then(|id| shot_picture(&self.catalog, &self.sources, id));
         self.preview_monitor = match preview {
-            Some((frame, crop)) => self.compositor.render_tile(frame, crop, w, h).ok(),
+            Some((frame, crop)) => self.compositor.render_monitor(frame, crop, w, h).ok(),
             None => None,
         };
     }
@@ -105,6 +111,7 @@ impl EngineCore {
         }
         self.next_thumbs_at = self.now + every;
         let (w, h) = (self.monitors.thumb_width, self.monitors.thumb_height);
+        self.compositor.reserve_tiles(self.catalog.len());
         for e in self.catalog.entries() {
             let Some(frame) = self.sources.get(e.source).and_then(|s| s.frame.as_ref()) else {
                 continue;

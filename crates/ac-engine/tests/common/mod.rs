@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use ac_core::ShotSize;
 use ac_director::DirectorMode;
 use ac_engine::{
-    DetectorSettings, Engine, EngineOptions, MonitorSettings, PresetSpec, QuerySettings,
-    StudioConfig,
+    DetectorSettings, EncoderSetting, Engine, EngineOptions, MonitorSettings, PresetSpec,
+    QuerySettings, StudioConfig,
 };
 use ac_sources::{Clock, SourceConfig};
 
@@ -40,6 +40,9 @@ pub fn studio(subjects: u32) -> StudioConfig {
     });
     c.output.width = 320;
     c.output.height = 180;
+    // These tests are not about the encoder: libx264 behaves the same on
+    // every machine, where VideoToolbox depends on the Mac it runs on.
+    c.output.encoder = EncoderSetting::Libx264;
     c.director.mode = DirectorMode::Off;
     c.monitors = MonitorSettings {
         width: 160,
@@ -92,14 +95,26 @@ pub fn start(config: StudioConfig) -> Engine {
     Engine::start_with(config, fast_time()).expect("engine starts")
 }
 
-/// True when an `ffmpeg` binary answers `-version`.
+/// Set (to anything but `0`) to make tests that need ffmpeg fail when it is
+/// missing instead of skipping; CI sets it.
+pub const REQUIRE_FFMPEG: &str = "AC_REQUIRE_FFMPEG";
+
+/// True when `tool` (ffmpeg or ffprobe) answers `-version`. When it does
+/// not and [`REQUIRE_FFMPEG`] is set, panics instead of letting the caller
+/// skip.
 pub fn have(tool: &str) -> bool {
-    std::process::Command::new(tool)
+    let found = std::process::Command::new(tool)
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+        .is_ok_and(|s| s.success());
+    let required = std::env::var_os(REQUIRE_FFMPEG).is_some_and(|v| !v.is_empty() && v != "0");
+    assert!(
+        found || !required,
+        "{tool} is not installed, and {REQUIRE_FFMPEG} says it must be"
+    );
+    found
 }
 
 /// A fresh, unique path in the temp directory (not created).

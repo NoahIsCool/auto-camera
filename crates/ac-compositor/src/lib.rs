@@ -63,7 +63,7 @@ use ac_core::{Rect, ShotId, SourceId};
 use ac_media::VideoFrame;
 use thiserror::Error;
 
-pub use compositor::Compositor;
+pub use compositor::{Compositor, TILE_GENERATIONS};
 
 /// Largest accepted output or tile dimension in pixels.
 pub const MAX_DIMENSION: u32 = 16_384;

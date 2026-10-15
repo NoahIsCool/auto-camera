@@ -74,14 +74,20 @@ pub fn sine(sample_rate: u32, channels: u16, hz: f32, seconds: f32) -> Vec<f32> 
 }
 
 /// True when ffmpeg (with libx264) and ffprobe are on the `PATH`; prints a
-/// skip notice otherwise.
+/// skip notice otherwise, or panics when `AC_REQUIRE_FFMPEG` is set (CI), so
+/// a runner without the tools cannot pass by skipping.
 pub fn have_ffmpeg() -> bool {
     let ffprobe = Command::new("ffprobe")
         .arg("-version")
         .output()
         .is_ok_and(|o| o.status.success());
     let x264 = ac_output::detect_encoder(Path::new("ffmpeg"), ac_output::Encoder::Libx264).is_ok();
+    let required = std::env::var_os("AC_REQUIRE_FFMPEG").is_some_and(|v| !v.is_empty() && v != "0");
     if !(ffprobe && x264) {
+        assert!(
+            !required,
+            "ffmpeg with libx264 and ffprobe are required (AC_REQUIRE_FFMPEG)"
+        );
         eprintln!("skipping: needs ffmpeg with libx264 and ffprobe on the PATH");
     }
     ffprobe && x264

@@ -28,20 +28,18 @@
 //! produces the same program, which is what the deterministic tests rely on.
 //! Commands are applied between ticks by [`EngineCore::apply`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use ac_compositor::{Compositor, CompositorConfig};
-use ac_core::{Preset, QueryId, ShotId, SourceId, SubjectId, TrackState};
+use ac_core::{Preset, QueryId, ShotId, SourceId};
 use ac_director::{Director, DirectorDecision};
 use ac_framing::FramerConfig;
 use ac_media::{SourceInfo, SourceState, VideoFrame};
 use ac_switcher::Switcher;
 use ac_vision::PromptQuery;
 
-use crate::catalog::{
-    Catalog, SourceFacts, SourceShots, SubjectFacts, SubjectShots, desired_shots,
-};
+use crate::catalog::Catalog;
 use crate::config::{DiscoverySettings, MonitorSettings, PresetSpec, StudioConfig};
 use crate::discovery::{DiscoveryRequest, DiscoveryResult, staleness};
 use crate::schedule::RateMeter;
@@ -51,6 +49,7 @@ use crate::vision::SourceVision;
 mod commands;
 mod directing;
 mod render;
+mod shots;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -368,24 +367,6 @@ impl EngineCore {
         }
     }
 
-    /// Pushes the program and preview subjects to their stores.
-    fn update_protection(&mut self) {
-        let mut sets = vec![HashSet::new(); self.sources.len()];
-        for id in [self.switcher.program(), self.switcher.preview()]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(e) = self.catalog.get(id)
-                && let Some(subject) = e.subject
-            {
-                sets[e.source].insert(subject);
-            }
-        }
-        for (s, set) in self.sources.iter_mut().zip(&sets) {
-            s.vision.set_protected(set);
-        }
-    }
-
     /// Applies one discovery result unless it is stale.
     fn apply_result(&mut self, r: DiscoveryResult) {
         let live: Vec<QueryId> = self.queries.iter().map(|q| q.id.clone()).collect();
@@ -438,87 +419,6 @@ impl EngineCore {
         s.frames += 1;
         s.rate.record(now);
         s.vision.on_frame(frame);
-    }
-
-    /// Re-derives the shot list from the stores and queries.
-    fn sync_catalog(&mut self) {
-        // Presets of shots that exist now, for on-air subjects whose query
-        // was removed (they keep their shots until they leave the air).
-        let mut held: HashMap<(usize, SubjectId), Vec<Preset>> = HashMap::new();
-        for e in self.catalog.entries() {
-            if let (Some(subject), Some(p)) = (e.subject, &e.preset) {
-                held.entry((e.source, subject)).or_default().push(p.clone());
-            }
-        }
-        let shots: Vec<SourceShots<'_>> = self
-            .sources
-            .iter()
-            .enumerate()
-            .map(|(i, s)| SourceShots {
-                id: &s.id,
-                name: &s.name,
-                subjects: s
-                    .vision
-                    .store()
-                    .records()
-                    .filter(|r| !r.hidden || r.protected)
-                    .filter_map(|r| {
-                        let id = r.subject.id;
-                        match self.queries.iter().find(|q| q.id == r.subject.query) {
-                            Some(q) => Some(SubjectShots {
-                                id,
-                                bbox: r.subject.bbox,
-                                query_name: &q.name,
-                                presets: &q.presets,
-                            }),
-                            None if r.protected => held.get(&(i, id)).map(|p| SubjectShots {
-                                id,
-                                bbox: r.subject.bbox,
-                                query_name: &r.subject.query.0,
-                                presets: p,
-                            }),
-                            None => None,
-                        }
-                    })
-                    .collect(),
-            })
-            .collect();
-        let specs = desired_shots(&shots);
-        let aspects: Vec<f64> = self.sources.iter().map(|s| s.aspect).collect();
-        let output_aspect = self.compositor.config().aspect();
-        self.catalog
-            .sync(specs, &aspects, output_aspect, &self.framing);
-        self.thumbnails
-            .retain(|id, _| self.catalog.get(id).is_some());
-    }
-
-    /// Steps every shot's framer by `dt` seconds.
-    fn step_framing(&mut self, dt: f64) {
-        let now = self.now;
-        let facts: Vec<SourceFacts> = self
-            .sources
-            .iter()
-            .map(|s| SourceFacts {
-                aspect: s.aspect,
-                available: s.available(now),
-            })
-            .collect();
-        let sources = &self.sources;
-        let output_aspect = self.compositor.config().aspect();
-        self.catalog.step(
-            dt,
-            &facts,
-            |i, id| {
-                let s = sources.get(i)?;
-                let subject = s.vision.store().get(id)?;
-                Some(SubjectFacts {
-                    bbox: subject.bbox,
-                    tracking: subject.state == TrackState::Tracking,
-                    confidence: s.vision.confidence(id),
-                })
-            },
-            output_aspect,
-        );
     }
 
     /// Issues discovery requests for sources that are due.

@@ -15,7 +15,11 @@
 //!   on (the detection frame when it is still at hand, else the newest frame)
 //!   and `NeedsTrackerStop` stops it. The tracker runs on this thread, in
 //!   step with the store, so no observation from a replaced track can arrive
-//!   late.
+//!   late. A start that fails (a flat or tiny box, for example on a dark
+//!   frame during a fade) is reported back with
+//!   [`SubjectStore::tracker_failed`], so the store's view of which trackers
+//!   run stays true and the subject's next matching detection retries the
+//!   start instead of merely re-anchoring a box nothing tracks.
 //!
 //! * **Detections vouch for existence.** A tracker that drifted onto
 //!   background or onto another subject can keep a high confidence
@@ -229,6 +233,7 @@ impl SourceVision {
                     } else {
                         self.tracker.stop(*id);
                         self.confidence.remove(id);
+                        self.store.tracker_failed(*id);
                         self.stats.tracker_start_failures += 1;
                     }
                 }
@@ -386,6 +391,53 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, StoreEvent::NeedsTrackerStop { .. }))
         );
+    }
+
+    #[test]
+    fn a_failed_tracker_start_is_retried_by_a_later_detection() {
+        let p = SyntheticPattern::new(320, 180, 30.0, 1).unwrap();
+        let mut v = vision();
+        let q = [QueryId("person".into())];
+        // First seen on a flat (faded to grey) frame: the box has no texture,
+        // so the tracker cannot start.
+        let flat = VideoFrame::new(
+            source(),
+            0,
+            Duration::ZERO,
+            320,
+            180,
+            vec![40u8; 320 * 180 * 4].into(),
+        )
+        .unwrap();
+        let f0 = p.frame(&source(), 0);
+        let truth0 = truth(&p, &f0);
+        v.on_frame(&flat);
+        v.on_detections(&flat, Some(&flat), &truth0, &q);
+        let id = SubjectId(1);
+        assert_eq!(v.stats().tracker_start_failures, 1);
+        assert!(v.tracker.tracked().is_empty());
+        assert!(!v.store().record(id).unwrap().tracker_running);
+        // The picture comes back and the detector agrees with the store's
+        // prediction: the tracker is started rather than the box re-anchored.
+        let f1 = p.frame(&source(), 1);
+        v.on_frame(&f1);
+        let events = v.on_detections(&f1, Some(&f1), &truth(&p, &f1), &q);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StoreEvent::NeedsTrackerStart { id: i, .. } if *i == id)),
+            "{events:?}"
+        );
+        assert_eq!(v.tracker.tracked(), vec![id]);
+        assert!(v.store().record(id).unwrap().tracker_running);
+        assert_eq!(v.stats().tracker_start_failures, 1);
+        // From then on it follows the subject between detections.
+        for seq in 2..20 {
+            v.on_frame(&p.frame(&source(), seq));
+        }
+        let gt = p.ground_truth(p.frame_rate().pts(19))[0].bbox;
+        let bbox = v.store().get(id).unwrap().bbox;
+        assert!(bbox.iou(&gt) > 0.5, "{bbox:?} vs {gt:?}");
     }
 
     #[test]

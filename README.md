@@ -15,10 +15,14 @@ Design decisions live in [`docs/adr/`](docs/adr/); the runtime architecture
 
 ## Demo
 
-Requires Rust 1.92 or newer, and `ffmpeg` on `PATH` for file sources and
-output. The demo studio ([`config/demo.toml`](config/demo.toml)) is one
-synthetic 720p camera with three moving subjects and a ground-truth
-detector, so it needs no camera, model or video file.
+Requires Rust 1.92 or newer, and `ffmpeg` for file sources and output:
+`AC_FFMPEG` / `AC_FFPROBE` name the executables, else they are looked up on
+`PATH`, and on macOS also in `/opt/homebrew/bin` and `/usr/local/bin` (an
+app started from Finder or the Dock gets a `PATH` without Homebrew). The
+demo studio ([`config/demo.toml`](config/demo.toml)) is one synthetic 720p
+camera with three moving subjects and a ground-truth detector, so it needs
+no camera, model or video file. Its director starts in Suggest mode: it
+proposes shots and the operator takes them.
 
 ```sh
 cargo run -p auto-camera                     # operator window on the demo studio
@@ -61,12 +65,12 @@ shuts down and prints a JSON summary on stdout:
 ```json
 {
   "ok": true,
-  "ticks": 158,
-  "sources": [{ "id": "stage", "fps": 31.0, "frames": 156, "missed": 0, "discovery_applied": 39 }],
+  "ticks": 160,
+  "sources": [{ "id": "stage", "fps": 31.0, "frames": 155, "missed": 3, "discovery_applied": 40 }],
   "max_subjects": 3,
-  "program": { "last": "stage/wide", "changes": 1, "log": [[0.9, "stage/wide"]] },
-  "director": { "mode": "auto", "profile": "talk", "takes": 1, "reason": "best available shot" },
-  "timing": { "budget_ms": 33.33, "avg_ms": 6.5, "max_ms": 18.84, "late_ticks": 0, "skipped_ticks": 0 },
+  "program": { "last": "stage/wide", "changes": 1, "log": [[0.23, "stage/wide"]] },
+  "director": { "mode": "suggest", "profile": "talk", "takes": 0, "reason": "best available shot" },
+  "timing": { "budget_ms": 33.33, "avg_ms": 6.52, "max_ms": 19.44, "late_ticks": 0, "skipped_ticks": 0 },
   "output": { "state": "finished", "frames_written": 151, "frames_dropped": 0, "encoder": "libx264", "exit_code": 0 }
 }
 ```
@@ -135,7 +139,8 @@ cargo run -p auto-camera --features onnx -- --config config/file-source.example.
 ```
 
 The `ort` crate downloads ONNX Runtime at build time, or links a local one
-(`ORT_LIB_LOCATION`). Exporting the model, the expected files and CoreML on
+(`ORT_LIB_LOCATION`, with `ORT_PREFER_DYNAMIC_LINK=1` for a shared
+library). Exporting the model, the expected files and CoreML on
 Apple Silicon are described in [`crates/ac-vision/README.md`](crates/ac-vision/README.md).
 Without the feature, a config with `kind = "owl"` fails at start with a
 message saying so.
@@ -166,3 +171,6 @@ cargo clippy --all-targets -- -D warnings
 cargo test                                   # no GPU, camera or network needed;
                                              # ffmpeg tests skip without ffmpeg
 ```
+
+Set `AC_REQUIRE_FFMPEG=1` to make the ffmpeg tests fail instead of skip when
+ffmpeg is missing; CI does, after installing it.

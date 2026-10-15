@@ -1,11 +1,13 @@
 //! Shutdown leaves nothing behind: no engine, source, discovery or output
-//! thread and no ffmpeg child. Linux only, since it reads `/proc/self`.
+//! thread and no ffmpeg child. Threads are listed from `/proc/self/task`, so
+//! they are checked on Linux only; children are checked on every Unix
+//! (procfs on Linux, `pgrep -P` elsewhere, which covers macOS).
 //!
 //! This binary holds a single test so no other test's threads are counted.
 //! Rayon's global pool is process-wide and persistent by design; it is named
 //! apart and not counted.
 
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 mod common;
 
@@ -16,7 +18,11 @@ use ac_engine::{EngineCommand, OutputState};
 
 use common::{WAIT, have, start, studio, temp_path};
 
-/// Names of this process's threads that belong to the pipeline.
+/// Threads can be listed by name on this platform.
+const LISTS_THREADS: bool = cfg!(target_os = "linux");
+
+/// Names of this process's threads that belong to the pipeline (Linux only;
+/// see [`LISTS_THREADS`]).
 fn pipeline_threads() -> Vec<String> {
     let mut names = Vec::new();
     for task in std::fs::read_dir("/proc/self/task").expect("procfs") {
@@ -31,6 +37,7 @@ fn pipeline_threads() -> Vec<String> {
 }
 
 /// Child process ids of every thread of this process.
+#[cfg(target_os = "linux")]
 fn children() -> Vec<String> {
     let mut pids = Vec::new();
     for task in std::fs::read_dir("/proc/self/task").expect("procfs") {
@@ -40,6 +47,20 @@ fn children() -> Vec<String> {
         }
     }
     pids
+}
+
+/// Child process ids of this process, as `pgrep -P` lists them.
+#[cfg(not(target_os = "linux"))]
+fn children() -> Vec<String> {
+    let out = std::process::Command::new("pgrep")
+        .arg("-P")
+        .arg(std::process::id().to_string())
+        .output()
+        .expect("pgrep runs");
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Polls `f` until it returns an empty list or two seconds pass: a joined
@@ -84,17 +105,21 @@ fn shutdown_joins_every_thread_and_reaps_ffmpeg() {
             .expect("encoder running");
         assert!(!children().is_empty(), "ffmpeg is a child of this process");
     }
-    let threads = pipeline_threads();
-    assert!(threads.iter().any(|n| n == "ac-engine"), "{threads:?}");
-    assert!(
-        threads.iter().any(|n| n.starts_with("ac-discovery")),
-        "{threads:?}"
-    );
+    if LISTS_THREADS {
+        let threads = pipeline_threads();
+        assert!(threads.iter().any(|n| n == "ac-engine"), "{threads:?}");
+        assert!(
+            threads.iter().any(|n| n.starts_with("ac-discovery")),
+            "{threads:?}"
+        );
+    }
 
     // Shut down with the encoder still running: shutdown finishes it.
     let report = engine.shutdown().unwrap();
     assert!(!report.final_snapshot.running);
-    assert_eq!(settle(pipeline_threads), Vec::<String>::new());
+    if LISTS_THREADS {
+        assert_eq!(settle(pipeline_threads), Vec::<String>::new());
+    }
     assert_eq!(settle(children), Vec::<String>::new());
     if let Some(path) = recording {
         assert!(std::fs::metadata(&path).is_ok_and(|m| m.len() > 0));

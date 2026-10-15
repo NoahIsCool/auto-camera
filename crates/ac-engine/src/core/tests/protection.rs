@@ -79,3 +79,106 @@ fn hiding_an_on_air_subject_keeps_its_shot_until_it_leaves_the_air() {
     rig.run(2);
     assert!(rig.snapshot().shot(&shot("cam/2/close")).is_none());
 }
+
+/// [`config`] with a second query, "Body", framing full shots; the ground
+/// truth answers it with the same boxes, so each subject answers both.
+fn two_queries() -> StudioConfig {
+    let mut c = config(1);
+    c.queries.push(QuerySettings {
+        id: None,
+        name: "Body".into(),
+        prompt: "body".into(),
+        presets: vec![PresetSpec::Size(ShotSize::Full)],
+    });
+    c
+}
+
+/// Ids of the snapshot's shots.
+fn shot_ids(snap: &EngineSnapshot) -> Vec<String> {
+    snap.shots.iter().map(|s| s.id.0.clone()).collect()
+}
+
+#[test]
+fn an_on_air_shot_survives_its_query_being_replaced_by_an_alias() {
+    let mut rig = Rig::new(two_queries());
+    rig.run(31);
+    let snap = rig.snapshot();
+    // Admission is fair across prompts: "body" sorts first, so it is the
+    // primary query and "person" an alias.
+    let subject = &snap.subjects[0];
+    assert_eq!(subject.query, QueryId("body".into()));
+    assert_eq!(subject.aliases, [QueryId("person".into())]);
+    assert_eq!(shot_ids(&snap), ["cam/wide", "cam/1/full"]);
+    preview_and_cut(&mut rig, "cam/1/full");
+    rig.run(2);
+    rig.apply(EngineCommand::RemoveQuery {
+        query: QueryId("body".into()),
+    })
+    .unwrap();
+    rig.run(2);
+    let snap = rig.snapshot();
+    assert_eq!(snap.subjects[0].query, QueryId("person".into()));
+    // The alias's shots are added and the one on air stays.
+    assert_eq!(
+        shot_ids(&snap),
+        ["cam/wide", "cam/1/medium", "cam/1/close", "cam/1/full"]
+    );
+    assert_eq!(snap.switcher.program, Some(shot("cam/1/full")));
+    assert!(snap.render_issues.is_empty(), "{:?}", snap.render_issues);
+    assert!(snap.shot(&shot("cam/1/full")).unwrap().tally.program);
+    assert!(snap.subjects[0].protected);
+    let out = rig.step();
+    assert!(
+        !out.program.data.chunks(4).all(|p| p == [0, 0, 0, 255]),
+        "the program went black"
+    );
+    // Cutting to another of its shots keeps it on air, and the shot too.
+    preview_and_cut(&mut rig, "cam/1/close");
+    rig.run(2);
+    assert!(rig.snapshot().shot(&shot("cam/1/full")).is_some());
+    // Once it leaves program and preview, only the new query's framings
+    // remain.
+    preview_and_cut(&mut rig, "cam/wide");
+    rig.apply(EngineCommand::SetPreview {
+        shot: shot("cam/wide"),
+    })
+    .unwrap();
+    rig.run(2);
+    let snap = rig.snapshot();
+    assert!(!snap.subjects[0].protected);
+    assert_eq!(shot_ids(&snap), ["cam/wide", "cam/1/medium", "cam/1/close"]);
+}
+
+#[test]
+fn a_kept_shot_frames_with_the_new_query_s_preset() {
+    // Both queries define a "close" preset, with different headroom.
+    let mut c = config(1);
+    c.queries[0].presets = vec![PresetSpec::Full(Preset {
+        id: "close".into(),
+        name: "Close".into(),
+        size: ShotSize::Close,
+        headroom: 0.03,
+        max_zoom: 6.0,
+    })];
+    c.queries.push(QuerySettings {
+        id: None,
+        name: "Body".into(),
+        prompt: "body".into(),
+        presets: vec![PresetSpec::Size(ShotSize::Close)],
+    });
+    let mut rig = Rig::new(c);
+    rig.run(31);
+    let before = rig.snapshot();
+    assert_eq!(before.subjects[0].query, QueryId("body".into()));
+    preview_and_cut(&mut rig, "cam/1/close");
+    rig.run(2);
+    rig.apply(EngineCommand::RemoveQuery {
+        query: QueryId("body".into()),
+    })
+    .unwrap();
+    rig.run(2);
+    let e = rig.core.catalog().get(&shot("cam/1/close")).unwrap();
+    let preset = e.preset.as_ref().unwrap();
+    assert_eq!((preset.headroom, preset.max_zoom), (0.03, 6.0));
+    assert!(e.shot.name.starts_with("Person"), "{}", e.shot.name);
+}

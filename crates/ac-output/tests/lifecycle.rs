@@ -248,3 +248,18 @@ fn pushes_are_validated() {
     drop(silent);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn repeats_for_skipped_ticks_are_owed_up_to_the_debt_cap() {
+    let (config, dir) = fake_config(Fake::Hang, "repeats");
+    let enc = common::start(&config).unwrap();
+    assert_eq!(enc.repeat_frames(0), 0);
+    assert_eq!(enc.repeat_frames(12), 12);
+    // Ten seconds of video at 30 fps at most, whatever was owed before.
+    assert_eq!(enc.repeat_frames(u64::MAX), 300 - 12);
+    assert_eq!(enc.repeat_frames(1), 0);
+    let stats = enc.stats();
+    assert_eq!((stats.frames_dropped, stats.frames_in), (0, 0), "{stats:?}");
+    drop(enc);
+    std::fs::remove_dir_all(dir).unwrap();
+}

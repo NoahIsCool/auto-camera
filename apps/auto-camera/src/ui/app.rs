@@ -59,6 +59,18 @@ pub fn notice_for(
     }
 }
 
+/// The notice for an engine that is no longer running, with the reason when
+/// it died rather than stopped on request; it replaces any other notice.
+pub fn stopped_notice(snap: &ac_engine::EngineSnapshot) -> Option<(String, bool)> {
+    if snap.running {
+        return None;
+    }
+    Some(match &snap.fatal {
+        Some(why) => (format!("the engine has stopped: {why}"), true),
+        None => ("the engine has stopped".into(), true),
+    })
+}
+
 /// The operator window; see the module docs.
 pub struct OperatorApp {
     /// The engine, until the window closes.
@@ -163,8 +175,8 @@ impl OperatorApp {
             .filter_map(|a| keys::command(a, &ids))
             .collect();
         let mut notice = self.notice.as_ref().map(|n| (n.text.clone(), n.error));
-        if !snap.running {
-            notice = Some(("the engine has stopped".into(), true));
+        if let Some(stopped) = stopped_notice(&snap) {
+            notice = Some(stopped);
         }
         egui::Panel::bottom("status").show(ui, |ui| {
             panels::status_bar(ui, &snap, notice.as_ref().map(|(t, e)| (t.as_str(), *e)));
@@ -228,9 +240,8 @@ mod tests {
     use super::*;
     use ac_core::QueryId;
     use ac_engine::{EngineOptions, MonitorSettings};
-    use ac_sources::{SourceConfig, VirtualClock};
+    use ac_sources::SourceConfig;
     use ac_switcher::SwitchError;
-    use std::sync::Arc;
 
     #[test]
     fn routine_replies_are_silent_and_errors_are_shown() {
@@ -254,6 +265,21 @@ mod tests {
         assert!(error && text.starts_with("auto: "), "{text}");
     }
 
+    /// Runs frames until every posted command was answered, then fails with
+    /// the notice if the last answer was an error (a refused command fails
+    /// here, with its reason, instead of as a timeout later).
+    fn settle(app: &mut OperatorApp, ctx: &egui::Context) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !app.pending.is_empty() && Instant::now() < deadline {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.frame(ui));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(app.pending.is_empty(), "commands were not answered");
+        if let Some(n) = &app.notice {
+            assert!(!n.error, "{}", n.text);
+        }
+    }
+
     #[test]
     fn frames_draw_and_shortcuts_reach_the_engine() {
         let mut config = StudioConfig::with_source(
@@ -268,14 +294,16 @@ mod tests {
         config.output.width = 160;
         config.output.height = 90;
         config.monitors = MonitorSettings::disabled();
-        let engine = Engine::start_with(
-            config.clone(),
-            EngineOptions {
-                clock: Arc::new(VirtualClock::new()),
-                ..EngineOptions::default()
-            },
-        )
-        .unwrap();
+        // Real time: on a virtual clock the engine's sleeps would race ahead
+        // of the source thread under load, the wide would go stale and the
+        // cut would be refused.
+        let engine = Engine::start_with(config.clone(), EngineOptions::default()).unwrap();
+        let handle = engine.handle();
+        handle
+            .wait_until(Duration::from_secs(10), |s| {
+                s.shots.first().is_some_and(|w| w.available)
+            })
+            .expect("the source delivers frames");
         let mut app = OperatorApp::new(engine, &config);
         let ctx = egui::Context::default();
         let key = |key| egui::Event::Key {
@@ -290,6 +318,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(input, |ui| app.frame(ui));
+        settle(&mut app, &ctx);
         let snap = app
             .handle
             .wait_until(Duration::from_secs(10), |s| s.switcher.preview.is_some())
@@ -301,17 +330,29 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(input, |ui| app.frame(ui));
-        app.handle
+        settle(&mut app, &ctx);
+        let snap = app
+            .handle
             .wait_until(Duration::from_secs(10), |s| s.switcher.program.is_some())
             .expect("cut to program");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !app.pending.is_empty() && Instant::now() < deadline {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.frame(ui));
-        }
-        assert!(app.pending.is_empty());
+        assert_eq!(snap.switcher.program, Some(ShotId("stage/wide".into())));
         app.shutdown();
         assert!(app.engine.is_none());
         app.shutdown();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.frame(ui));
+    }
+
+    #[test]
+    fn a_dead_engine_is_shown_with_its_reason() {
+        let mut snap = super::super::fixtures::snapshot();
+        assert_eq!(stopped_notice(&snap), None);
+        snap.running = false;
+        assert_eq!(
+            stopped_notice(&snap),
+            Some(("the engine has stopped".into(), true))
+        );
+        snap.fatal = Some("the engine thread panicked: boom".into());
+        let (text, error) = stopped_notice(&snap).unwrap();
+        assert!(error && text.ends_with("panicked: boom"), "{text}");
     }
 }

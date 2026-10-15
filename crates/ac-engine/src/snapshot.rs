@@ -245,8 +245,13 @@ pub struct EngineSnapshot {
     pub tick: u64,
     /// Master-clock media time of the tick.
     pub media_time: Duration,
-    /// False in the final snapshot published after shutdown.
+    /// False in the final snapshot published after shutdown, or after the
+    /// engine thread died.
     pub running: bool,
+    /// Why the engine stopped, when it did not stop on request: the engine
+    /// thread panicked (the message says where). Sources were stopped and
+    /// the encoder finished on the way out, but nothing is on air.
+    pub fatal: Option<String>,
     /// Shots in display order.
     pub shots: Vec<ShotView>,
     /// Subjects of every source.

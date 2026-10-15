@@ -2,9 +2,15 @@
 //!
 //! The compositor is the single owner of its scratch state: two pairs of
 //! filter tables (base and overlay), one scratch row set per rayon band, and
-//! two buffer pools (program frames and tiles, kept apart so a multiview
-//! refresh cannot evict the program buffers). It is driven from one thread,
-//! the engine's render loop, and parallelises internally.
+//! three buffer pools: program frames, monitors and multiview tiles. They
+//! are kept apart so a multiview refresh can evict neither the program nor
+//! the monitor buffers. The tile pool grows with the multiview
+//! ([`Compositor::reserve_tiles`]): every tile is held by up to
+//! [`TILE_GENERATIONS`] parties at once (the engine's newest set, the
+//! published snapshot, the operator window's uploaded textures) while the
+//! next set is rendered, and a pool smaller than that allocates fresh tiles
+//! on every refresh. It is driven from one thread, the engine's render loop,
+//! and parallelises internally.
 //!
 //! A render resolves the switcher's base and overlay shots against the layer
 //! map, computes each layer's weight from the opacity and dip (see the crate
@@ -32,9 +38,16 @@ use crate::{
 /// one being rendered, and one spare.
 const PROGRAM_POOL: usize = 4;
 
-/// Tile buffers kept for reuse: enough for a multiview of every shot of a
-/// few sources, refreshed every frame.
+/// Monitor buffers kept for reuse: program and preview, each held by the
+/// engine, a snapshot and the window while the next one is rendered.
+const MONITOR_POOL: usize = 8;
+
+/// Tile buffers kept for reuse at least, whatever the multiview size.
 const TILE_POOL: usize = 32;
+
+/// Sets of tiles alive at once: the one being rendered, the engine's
+/// newest, the published snapshot's and the window's uploaded textures.
+pub const TILE_GENERATIONS: usize = 4;
 
 /// CPU compositor owning its scratch memory and output buffers.
 #[derive(Debug)]
@@ -49,6 +62,8 @@ pub struct Compositor {
     bands: Vec<BandScratch>,
     /// Recycled program frame buffers.
     program: FramePool,
+    /// Recycled monitor buffers.
+    monitors: FramePool,
     /// Recycled tile buffers.
     tiles: FramePool,
 }
@@ -63,6 +78,7 @@ impl Compositor {
             taps: Default::default(),
             bands: Vec::new(),
             program: FramePool::new(PROGRAM_POOL),
+            monitors: FramePool::new(MONITOR_POOL),
             tiles: FramePool::new(TILE_POOL),
         })
     }
@@ -140,8 +156,16 @@ impl Compositor {
         Rendered { frame, report }
     }
 
-    /// Renders `crop` of `frame` at `width` x `height`, for multiview tiles and
-    /// preview monitors.
+    /// Keeps buffers for a multiview of `tiles` tiles: the tile pool holds
+    /// [`TILE_GENERATIONS`] of them (never fewer than its minimum), so a
+    /// refresh recycles instead of allocating while the previous tiles are
+    /// still on screen.
+    pub fn reserve_tiles(&mut self, tiles: usize) {
+        let capacity = tiles.saturating_mul(TILE_GENERATIONS).max(TILE_POOL);
+        self.tiles.set_capacity(capacity);
+    }
+
+    /// Renders `crop` of `frame` at `width` x `height`, for multiview tiles.
     ///
     /// The tile keeps the source frame's id, sequence number and PTS, since it
     /// shows exactly that picture.
@@ -152,12 +176,45 @@ impl Compositor {
         width: u32,
         height: u32,
     ) -> Result<VideoFrame, CompositorError> {
+        self.render_scaled(Pool::Tiles, frame, crop, width, height)
+    }
+
+    /// Renders `crop` of `frame` at `width` x `height` for the program and
+    /// preview monitors, from their own buffer pool. Otherwise exactly
+    /// [`Compositor::render_tile`].
+    pub fn render_monitor(
+        &mut self,
+        frame: &VideoFrame,
+        crop: Rect,
+        width: u32,
+        height: u32,
+    ) -> Result<VideoFrame, CompositorError> {
+        self.render_scaled(Pool::Monitors, frame, crop, width, height)
+    }
+
+    /// Renders `crop` of `frame` at `width` x `height` into a buffer of `pool`.
+    fn render_scaled(
+        &mut self,
+        pool: Pool,
+        frame: &VideoFrame,
+        crop: Rect,
+        width: u32,
+        height: u32,
+    ) -> Result<VideoFrame, CompositorError> {
         check_size(width, height)?;
         check_frame(frame)?;
         check_crop(&crop)?;
         let Self {
-            taps, bands, tiles, ..
+            taps,
+            bands,
+            tiles,
+            monitors,
+            ..
         } = self;
+        let buffers = match pool {
+            Pool::Tiles => tiles,
+            Pool::Monitors => monitors,
+        };
         let slot = &mut taps[0];
         build_axes(slot, frame, &crop, width, height);
         let plan = Plan {
@@ -167,7 +224,7 @@ impl Compositor {
             y: &slot.1,
             weight: 1.0,
         };
-        let data = tiles.fill_with(pixel_bytes(width, height), |dst| {
+        let data = buffers.fill_with(pixel_bytes(width, height), |dst| {
             kernel::render(&[plan], width as usize, dst, bands);
         });
         Ok(VideoFrame {
@@ -179,6 +236,15 @@ impl Compositor {
             data,
         })
     }
+}
+
+/// Which buffer pool a scaled render draws from.
+#[derive(Debug, Clone, Copy)]
+enum Pool {
+    /// Multiview tiles.
+    Tiles,
+    /// Program and preview monitors.
+    Monitors,
 }
 
 /// Bytes of a packed RGBA8 picture.

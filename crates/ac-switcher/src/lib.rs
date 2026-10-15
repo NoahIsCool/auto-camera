@@ -74,8 +74,10 @@ pub struct Output {
     pub dip: f64,
 }
 
+/// A transition in progress.
 #[derive(Debug, Clone, PartialEq)]
 struct Running {
+    /// The transition being run.
     transition: Transition,
     /// Progress in `0.0..=1.0`.
     progress: f64,
@@ -86,9 +88,13 @@ struct Running {
 /// Preview/program state.
 #[derive(Debug, Clone, Default)]
 pub struct Switcher {
+    /// The shot on air.
     program: Option<ShotId>,
+    /// The staged shot.
     preview: Option<ShotId>,
+    /// Transition used by the next auto take.
     transition: Transition,
+    /// The transition in progress, if any.
     running: Option<Running>,
     /// T-bar travel direction flips after each completed manual transition.
     tbar_reversed: bool,
@@ -147,6 +153,8 @@ impl Switcher {
         Ok(())
     }
 
+    /// The preview shot, if a take to it may start now: no transition is
+    /// running and the shot is available.
     fn checked_preview(&self, available: impl Fn(&ShotId) -> bool) -> Result<ShotId, SwitchError> {
         if self.running.is_some() {
             return Err(SwitchError::Busy);
@@ -242,6 +250,7 @@ impl Switcher {
         }
     }
 
+    /// Ends the running transition: preview and program swap.
     fn complete(&mut self) {
         self.running = None;
         std::mem::swap(&mut self.program, &mut self.preview);

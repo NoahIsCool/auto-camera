@@ -10,7 +10,9 @@
 //! so a failure at any later step drops it and kills ffmpeg.
 //!
 //! The engine then calls [`ProgramEncoder::push_video`] exactly once per
-//! program tick and [`ProgramEncoder::push_audio`] with the matching audio.
+//! program tick and [`ProgramEncoder::push_audio`] with the matching audio;
+//! for ticks it had to skip it owes repeats with
+//! [`ProgramEncoder::repeat_frames`], so the frame count stays on its clock.
 //! Neither blocks: a full queue drops the input, counts it in
 //! [`EncoderStats`] and returns [`Push::Dropped`]; the writer repays the gap
 //! with a repeated frame or silence so timing is preserved. When audio is
@@ -37,7 +39,7 @@ use ac_media::{AudioBlock, VideoFrame};
 
 use crate::OutputError;
 use crate::args::build_ffmpeg_args;
-use crate::config::{AudioFormat, Encoder, EncoderChoice, OutputConfig, choose_encoder};
+use crate::config::{AudioFormat, Encoder, EncoderChoice, OutputConfig, choose_working_encoder};
 use crate::progress::Progress;
 use crate::transport::{
     self, AUDIO_ACCEPT_TIMEOUT, AUDIO_QUEUE_BLOCKS, MAX_DEBT_SECONDS, Shared, VIDEO_QUEUE_FRAMES,
@@ -137,7 +139,9 @@ fn spawn_error(ffmpeg: &Path, e: std::io::Error) -> OutputError {
 
 /// Resolves `requested` by asking `ffmpeg -encoders` what it has.
 ///
-/// [`Encoder::Auto`] picks VideoToolbox only on macOS; see [`choose_encoder`].
+/// [`Encoder::Auto`] picks VideoToolbox only on macOS, and only when a
+/// one-frame test encode with it succeeds ([`encoder_works`]); see
+/// [`choose_working_encoder`].
 pub fn detect_encoder(ffmpeg: &Path, requested: Encoder) -> Result<EncoderChoice, OutputError> {
     let out = Command::new(ffmpeg)
         .args(["-hide_banner", "-encoders"])
@@ -146,7 +150,46 @@ pub fn detect_encoder(ffmpeg: &Path, requested: Encoder) -> Result<EncoderChoice
         .output()
         .map_err(|e| spawn_error(ffmpeg, e))?;
     let listing = String::from_utf8_lossy(&out.stdout);
-    choose_encoder(requested, &listing, cfg!(target_os = "macos"))
+    choose_working_encoder(requested, &listing, cfg!(target_os = "macos"), || {
+        encoder_works(ffmpeg, EncoderChoice::VideoToolbox)
+    })
+}
+
+/// Longest a test encode may take before it counts as failed.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// True when `ffmpeg` can encode a few frames of a small test picture with
+/// `choice`, using the same realtime option as a real session. It takes a
+/// fraction of a second; a hung probe is killed after ten seconds.
+pub fn encoder_works(ffmpeg: &Path, choice: EncoderChoice) -> bool {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", "color=c=gray:s=256x144:r=30"])
+        .args(["-frames:v", "3", "-c:v", choice.ffmpeg_name()]);
+    if choice == EncoderChoice::VideoToolbox {
+        cmd.args(["-realtime", "1"]);
+    }
+    let child = cmd
+        .args(["-f", "null", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        return false;
+    };
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => thread::sleep(EXIT_POLL),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 /// Refuses a recording path whose directory is missing or that exists.
@@ -302,6 +345,33 @@ impl ProgramEncoder {
         let cap = MAX_DEBT_SECONDS * u64::from(self.config.fps);
         transport::add_debt(&s.video_debt, 1, cap);
         Push::Dropped
+    }
+
+    /// Owes `n` repeats of the newest frame for program ticks the caller
+    /// skipped (it fell far behind its clock), so the encoded timeline keeps
+    /// pace with the caller's clock instead of falling behind it for good.
+    ///
+    /// The video writer emits the repeats (of the frame it wrote last) just
+    /// before the next frame it takes from the queue, exactly like the
+    /// repeats that repay dropped frames; they count
+    /// in [`EncoderStats::frames_repeated`] and `frames_written`, not as
+    /// drops. The debt is capped at `MAX_DEBT_SECONDS` of video (ten seconds
+    /// at the configured rate), so a long suspension is not replayed in full.
+    /// Returns how many repeats were owed: `n` unless the cap or a closed
+    /// encoder limited it.
+    pub fn repeat_frames(&self, n: u64) -> u64 {
+        let s = &self.shared;
+        if n == 0 || self.video_tx.is_none() || s.video_closed.load(Ordering::SeqCst) {
+            return 0;
+        }
+        let cap = MAX_DEBT_SECONDS * u64::from(self.config.fps);
+        let before = s
+            .video_debt
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |d| {
+                Some(d.saturating_add(n).min(cap))
+            })
+            .unwrap_or_else(|d| d);
+        before.saturating_add(n).min(cap).saturating_sub(before)
     }
 
     /// Queues a composed program frame; it must match the output size.
@@ -485,79 +555,4 @@ impl Drop for ProgramEncoder {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    /// A config whose ffmpeg cannot exist, for paths that fail before spawn.
-    fn config() -> OutputConfig {
-        OutputConfig {
-            ffmpeg: "/nonexistent/ffmpeg-for-ac-output-tests".into(),
-            record_path: Some(std::env::temp_dir().join("ac-output-never-written.mp4")),
-            ..OutputConfig::default()
-        }
-    }
-
-    #[test]
-    fn handle_is_send_and_sync() {
-        fn check<T: Send + Sync>() {}
-        check::<ProgramEncoder>();
-    }
-
-    #[test]
-    fn start_validates_before_spawning() {
-        let err = ProgramEncoder::start(OutputConfig {
-            width: 641,
-            ..config()
-        })
-        .unwrap_err();
-        assert!(matches!(err, OutputError::InvalidConfig(_)), "{err:?}");
-    }
-
-    #[test]
-    fn start_reports_missing_ffmpeg() {
-        let err = ProgramEncoder::start(config()).unwrap_err();
-        assert!(
-            matches!(&err, OutputError::FfmpegNotFound(p) if p == &config().ffmpeg),
-            "{err:?}"
-        );
-        let err = detect_encoder(&config().ffmpeg, Encoder::Auto).unwrap_err();
-        assert!(matches!(err, OutputError::FfmpegNotFound(_)), "{err:?}");
-    }
-
-    #[test]
-    fn start_refuses_missing_directory_or_existing_file() {
-        let missing = OutputConfig {
-            record_path: Some(PathBuf::from("/nonexistent-ac-output-dir/program.mp4")),
-            ..config()
-        };
-        let err = ProgramEncoder::start(missing).unwrap_err();
-        assert!(
-            matches!(&err, OutputError::InvalidConfig(m) if m.contains("does not exist")),
-            "{err:?}"
-        );
-        let existing =
-            std::env::temp_dir().join(format!("ac-output-exists-{}", std::process::id()));
-        std::fs::write(&existing, b"keep me").unwrap();
-        let err = ProgramEncoder::start(OutputConfig {
-            record_path: Some(existing.clone()),
-            ..config()
-        })
-        .unwrap_err();
-        assert_eq!(std::fs::read(&existing).unwrap(), b"keep me");
-        std::fs::remove_file(&existing).unwrap();
-        assert!(
-            matches!(&err, OutputError::InvalidConfig(m) if m.contains("refusing to overwrite")),
-            "{err:?}"
-        );
-    }
-
-    #[test]
-    fn relative_record_path_in_current_directory_is_allowed() {
-        let c = OutputConfig {
-            record_path: Some(PathBuf::from("ac-output-relative-never-written.mp4")),
-            ..config()
-        };
-        check_record_path(&c).unwrap();
-    }
-}
+mod tests;

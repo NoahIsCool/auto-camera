@@ -185,6 +185,7 @@ pub trait VideoSource: Send {
 /// correct behaviour for live video.
 #[derive(Debug, Default, Clone)]
 pub struct LatestFrame {
+    /// The newest frame, shared by the writer and every reader clone.
     slot: Arc<Mutex<Option<VideoFrame>>>,
 }
 

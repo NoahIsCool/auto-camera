@@ -21,7 +21,7 @@ use super::ConfigError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncoderSetting {
-    /// VideoToolbox on macOS when available, otherwise libx264.
+    /// VideoToolbox on macOS when it can encode here, otherwise libx264.
     #[default]
     Auto,
     /// The x264 software encoder.
@@ -56,7 +56,9 @@ pub struct OutputSettings {
     pub keyframe_seconds: u32,
     /// H.264 encoder.
     pub encoder: EncoderSetting,
-    /// ffmpeg executable.
+    /// ffmpeg executable. Defaults to the one file sources decode with:
+    /// `AC_FFMPEG`, else `ffmpeg` on `PATH` (on macOS also Homebrew's
+    /// directories), so one setting serves both.
     pub ffmpeg: PathBuf,
     /// Default RTMP URL (with stream key) for `StartOutput`.
     pub rtmp_url: Option<String>,
@@ -77,7 +79,7 @@ impl Default for OutputSettings {
             video_bitrate_kbps: 6000,
             keyframe_seconds: 2,
             encoder: EncoderSetting::Auto,
-            ffmpeg: PathBuf::from("ffmpeg"),
+            ffmpeg: ac_sources::FfmpegTools::from_env().ffmpeg,
             rtmp_url: None,
             record_path: None,
             audio_source: None,

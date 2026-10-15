@@ -58,8 +58,12 @@ use std::time::Duration;
 use thiserror::Error;
 
 pub use args::build_ffmpeg_args;
-pub use config::{AudioFormat, Encoder, EncoderChoice, OutputConfig, choose_encoder};
-pub use encoder::{DEFAULT_FINISH_TIMEOUT, EncoderStats, ProgramEncoder, Push, detect_encoder};
+pub use config::{
+    AudioFormat, Encoder, EncoderChoice, OutputConfig, choose_encoder, choose_working_encoder,
+};
+pub use encoder::{
+    DEFAULT_FINISH_TIMEOUT, EncoderStats, ProgramEncoder, Push, detect_encoder, encoder_works,
+};
 pub use progress::Progress;
 
 /// Errors from configuring, running or stopping the program encoder.

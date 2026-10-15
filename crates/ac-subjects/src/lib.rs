@@ -33,6 +33,8 @@
 //! 3. Act on tracker events: start or restart a tracker on
 //!    [`StoreEvent::NeedsTrackerStart`] and drop the previous tracker's
 //!    pending observations; stop it on [`StoreEvent::NeedsTrackerStop`].
+//!    Report a start that failed with [`SubjectStore::tracker_failed`], so
+//!    the next matching detection retries it.
 //! 4. Push the switcher's program and preview subjects with
 //!    [`SubjectStore::set_protected`] whenever they change.
 //! 5. Stop sending detections for a query before calling

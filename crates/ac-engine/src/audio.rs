@@ -2,27 +2,68 @@
 //!
 //! The encoder timestamps audio by sample count and video by frame count, so
 //! the program stays in sync exactly when, after `n` video frames at `fps`,
-//! about `n · rate / fps` audio sample frames have been pushed. Program audio
-//! follows one configured source (its embedded audio), which is paced by the
-//! same clock as its video but arrives in 10 ms blocks with some jitter, may
-//! stall, and may burst after a stall.
+//! about `n · rate / fps` audio sample frames (the *target*) have been
+//! pushed. Program audio follows one configured source (its embedded audio),
+//! which is paced by the same clock as its video but arrives in 10 ms blocks
+//! with some jitter, may stall, and catches up in a burst after a stall.
 //!
-//! [`AudioPacer`] turns the blocks drained on each tick into what to push:
+//! # What decides lip sync
 //!
-//! * a block is pushed unless it would put audio more than `max_lead` ahead
-//!   of video, in which case it is dropped (a burst after a stall);
-//! * when audio falls more than `slack` behind video (the source stalled or
-//!   stopped), silence is pushed up to the exact target, because ffmpeg
-//!   interleaves by timestamp and would otherwise hold the video back;
-//! * blocks in another format than the encoder was opened with are dropped.
+//! Video is always the newest picture (latest-frame mailboxes), so it never
+//! runs late. Audio is a stream: every sample frame pushed moves the audio
+//! timeline on by one, whatever it holds. Write the *lead* as
+//! `L = pushed − target` (silence counts as pushed) and the *backlog* `B`
+//! for audio the source produced but has not delivered yet. Relative to the
+//! start of the session, audio then plays late by
 //!
-//! The slack keeps ordinary block jitter from inserting silence (which would
-//! turn into permanent audio latency), and the lead limit bounds how far a
-//! burst can push audio late. Both are counted for the operator.
+//! ```text
+//! lag = silence inserted − source audio dropped = L + B
+//! ```
+//!
+//! because silence pushes everything after it later and dropping source
+//! audio pulls it earlier. Once a burst has been delivered (`B = 0`) the lag
+//! *is* the lead. A pacer that only bounds the lead from above, keeping the
+//! oldest audio of a burst, leaves the program late by up to that bound for
+//! the rest of the show. This pacer drives the lag back to zero instead:
+//!
+//! * **Gaps.** When the audio at hand (pushed plus drained this tick) is more
+//!   than `slack` short of the target (the source stalled or stopped),
+//!   silence fills up to the exact target, *before* this tick's blocks
+//!   (the gap is in the past), because ffmpeg interleaves by timestamp and
+//!   would otherwise hold the video back. The silence is remembered as owed.
+//! * **Resuming.** The first audio after inserted silence is aligned to the
+//!   target: a deficit, however small, is filled, so a source that stopped
+//!   and restarted fresh does not play up to `slack` early.
+//! * **Recovery.** While silence is owed, audio that would put the lead
+//!   more than [`RECOVERY_TOLERANCE`] above zero is the stall's backlog
+//!   arriving late. Its oldest blocks are dropped, up to the amount owed,
+//!   until the newest audio lands on the target, so the lag returns to
+//!   about zero. The tolerance keeps block jitter from being cut. A debt
+//!   that sees no backlog for [`RECOVERY_WINDOW`] is forgiven: the source
+//!   restarted fresh, and there is nothing late to cut.
+//! * **Bursts.** Otherwise, blocks that would put the lead above `max_lead`
+//!   are dropped, oldest first, so the newest audio is always kept and no
+//!   burst can leave audio more than `max_lead` late.
+//! * Blocks in another format than the encoder was opened with are dropped.
+//!
+//! The slack keeps ordinary block jitter from inserting silence and
+//! `max_lead` keeps it from dropping audio; both are several blocks and
+//! ticks long. The video frame count must include ticks the engine skipped
+//! after falling far behind (the encoder repeats a frame for each), or the
+//! target falls behind the source's audio by the skipped time.
 
 use std::time::Duration;
 
 use ac_media::AudioBlock;
+
+/// How long owed silence waits for a stall's backlog (after the last
+/// silence or the last cut) before it is forgiven.
+pub const RECOVERY_WINDOW: Duration = Duration::from_secs(1);
+
+/// How far ahead of video audio may run, while silence is owed, before the
+/// late backlog is cut: more than a block of jitter, well inside what
+/// viewers notice as lip-sync error.
+pub const RECOVERY_TOLERANCE: Duration = Duration::from_millis(20);
 
 /// One item to push to the encoder.
 #[derive(Debug, Clone)]
@@ -40,10 +81,14 @@ pub struct AudioPacerStats {
     pub pushed: u64,
     /// Sample frames of silence pushed.
     pub silence: u64,
-    /// Sample frames dropped because audio ran too far ahead.
+    /// Sample frames of source audio dropped: late backlog cut to repay
+    /// silence, and bursts beyond the lead limit.
     pub dropped: u64,
     /// Blocks dropped because their format did not match.
     pub mismatched_blocks: u64,
+    /// Audio pushed minus the video's share after the latest tick, in
+    /// milliseconds: positive while audio runs ahead.
+    pub lead_ms: i64,
 }
 
 /// Keeps program audio in step with program video; see the module docs.
@@ -59,6 +104,17 @@ pub struct AudioPacer {
     slack: u64,
     /// Largest lead over video, in sample frames.
     max_lead: u64,
+    /// [`RECOVERY_WINDOW`] in sample frames.
+    recovery: u64,
+    /// [`RECOVERY_TOLERANCE`] in sample frames.
+    tolerance: u64,
+    /// Silence inserted and not yet repaid by cutting late backlog.
+    owed: u64,
+    /// Target after which the owed silence is forgiven.
+    owed_until: u64,
+    /// The latest tick inserted silence and had no audio: the next audio
+    /// that arrives resumes the stream.
+    starved: bool,
     /// Counters.
     stats: AudioPacerStats,
 }
@@ -73,6 +129,11 @@ impl AudioPacer {
             fps: fps.max(1),
             slack: frames(slack),
             max_lead: frames(max_lead),
+            recovery: frames(RECOVERY_WINDOW),
+            tolerance: frames(RECOVERY_TOLERANCE),
+            owed: 0,
+            owed_until: 0,
+            starved: false,
             stats: AudioPacerStats::default(),
         }
     }
@@ -88,112 +149,65 @@ impl AudioPacer {
         u64::try_from(t).unwrap_or(u64::MAX)
     }
 
-    /// Plans what to push after `video_frames` frames of video, given the
-    /// source blocks drained this tick (oldest first).
+    /// Plans what to push after `video_frames` frames of video (skipped ticks
+    /// included), given the source blocks drained this tick (oldest first).
     pub fn plan(&mut self, video_frames: u64, blocks: Vec<AudioBlock>) -> Vec<PacedAudio> {
         let target = self.target(video_frames);
-        let total = |s: &AudioPacerStats| s.pushed + s.silence;
-        let mut out = Vec::new();
+        if target > self.owed_until {
+            self.owed = 0;
+        }
+        let mut kept = Vec::with_capacity(blocks.len());
         for block in blocks {
             if block.sample_rate != self.rate || block.channels != self.channels {
                 self.stats.mismatched_blocks += 1;
-                continue;
+            } else if block.frames() > 0 {
+                kept.push(block);
             }
-            let n = block.frames() as u64;
-            if total(&self.stats) + n > target + self.max_lead {
+        }
+        let have = self.stats.pushed + self.stats.silence;
+        let mut incoming: u64 = kept.iter().map(|b| b.frames() as u64).sum();
+        let resuming = self.starved && incoming > 0;
+        let tolerated = if resuming { 0 } else { self.slack };
+        let mut out = Vec::with_capacity(kept.len() + 1);
+        if have + incoming + tolerated < target {
+            let gap = target - have - incoming;
+            self.stats.silence += gap;
+            self.owed = self.owed.saturating_add(gap);
+            self.owed_until = target.saturating_add(self.recovery);
+            self.starved = incoming == 0;
+            out.push(PacedAudio::Silence(gap));
+        } else {
+            if incoming > 0 {
+                self.starved = false;
+            }
+            // Oldest first: the blocks to cut, and how many sample frames
+            // remain after cutting them.
+            let mut cut = 0;
+            if self.owed > 0 && have + incoming > target.saturating_add(self.tolerance) {
+                while cut < kept.len() && self.owed > 0 && have + incoming > target {
+                    let n = kept[cut].frames() as u64;
+                    (incoming, cut) = (incoming - n, cut + 1);
+                    self.stats.dropped += n;
+                    self.owed = self.owed.saturating_sub(n);
+                    self.owed_until = target.saturating_add(self.recovery);
+                }
+            }
+            while cut < kept.len() && have + incoming > target.saturating_add(self.max_lead) {
+                let n = kept[cut].frames() as u64;
+                (incoming, cut) = (incoming - n, cut + 1);
                 self.stats.dropped += n;
-                continue;
             }
-            self.stats.pushed += n;
+            kept.drain(..cut);
+        }
+        for block in kept {
+            self.stats.pushed += block.frames() as u64;
             out.push(PacedAudio::Block(block));
         }
-        let have = total(&self.stats);
-        if have + self.slack < target {
-            let gap = target - have;
-            self.stats.silence += gap;
-            out.push(PacedAudio::Silence(gap));
-        }
+        let lead = (self.stats.pushed + self.stats.silence) as i128 - i128::from(target);
+        self.stats.lead_ms = i64::try_from(lead * 1000 / i128::from(self.rate.max(1))).unwrap_or(0);
         out
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ac_core::SourceId;
-
-    /// A block of `frames` sample frames.
-    fn block(frames: usize, rate: u32, channels: u16) -> AudioBlock {
-        AudioBlock {
-            source: SourceId("a".into()),
-            pts: Duration::ZERO,
-            sample_rate: rate,
-            channels,
-            samples: vec![0.1f32; frames * channels as usize].into(),
-        }
-    }
-
-    /// A 48 kHz stereo pacer for 30 fps video.
-    fn pacer() -> AudioPacer {
-        AudioPacer::new(
-            48_000,
-            2,
-            30,
-            Duration::from_millis(100),
-            Duration::from_millis(500),
-        )
-    }
-
-    #[test]
-    fn steady_audio_passes_through_without_silence() {
-        let mut p = pacer();
-        for tick in 1..=300u64 {
-            // 1600 frames per 30 fps tick, delivered as one block per tick.
-            let out = p.plan(tick, vec![block(1600, 48_000, 2)]);
-            assert_eq!(out.len(), 1);
-            assert!(matches!(out[0], PacedAudio::Block(_)));
-        }
-        assert_eq!(p.stats().pushed, p.target(300));
-        assert_eq!(p.stats().silence, 0);
-    }
-
-    #[test]
-    fn a_stalled_source_is_filled_with_silence_to_the_target() {
-        let mut p = pacer();
-        // 100 ms of slack: three ticks (100 ms) of nothing is tolerated.
-        assert!(p.plan(3, vec![]).is_empty());
-        let out = p.plan(4, vec![]);
-        assert!(matches!(out.as_slice(), [PacedAudio::Silence(6400)]));
-        assert_eq!(p.stats().silence, p.target(4));
-    }
-
-    #[test]
-    fn a_burst_beyond_the_lead_limit_is_dropped() {
-        let mut p = pacer();
-        let burst: Vec<AudioBlock> = (0..100).map(|_| block(480, 48_000, 2)).collect();
-        p.plan(1, burst);
-        let s = p.stats();
-        // At most target + 500 ms may be pushed.
-        assert!(s.pushed <= p.target(1) + 24_000);
-        assert!(s.dropped > 0);
-        assert_eq!(s.pushed + s.dropped, 48_000);
-    }
-
-    #[test]
-    fn mismatched_formats_are_dropped_and_counted() {
-        let mut p = pacer();
-        let out = p.plan(1, vec![block(480, 44_100, 2), block(480, 48_000, 1)]);
-        assert!(out.is_empty());
-        assert_eq!(p.stats().mismatched_blocks, 2);
-    }
-
-    #[test]
-    fn target_is_exact_for_long_runs() {
-        let p = pacer();
-        assert_eq!(p.target(0), 0);
-        assert_eq!(p.target(30), 48_000);
-        assert_eq!(p.target(30 * 3600 * 24), 48_000 * 3600 * 24);
-        let odd = AudioPacer::new(44_100, 2, 30, Duration::ZERO, Duration::ZERO);
-        assert_eq!(odd.target(1), 1470);
-    }
-}
+mod tests;

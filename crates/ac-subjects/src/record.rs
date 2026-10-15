@@ -74,7 +74,8 @@ pub struct SubjectRecord {
     /// keeps tracking for the on-air shot and is retired as soon as it is no
     /// longer protected. Orphans never match detections.
     pub orphaned: bool,
-    /// The subject's fast tracker is running (per the tracker events).
+    /// The subject's fast tracker is running (per the tracker events and
+    /// [`SubjectStore::tracker_failed`](crate::SubjectStore::tracker_failed)).
     pub tracker_running: bool,
     /// PTS at which the subject was admitted.
     pub created_at: Duration,

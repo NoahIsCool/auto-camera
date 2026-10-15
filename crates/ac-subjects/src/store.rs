@@ -28,8 +28,11 @@
 //! * Expiry and eviction never touch a *retained* subject: protected (on
 //!   program or preview), pinned or hidden. Protected subjects are never
 //!   retired at all while protected, and never demoted as duplicates.
-//! * The fast tracker of a subject runs exactly while the subject is
-//!   tracking, and the start/stop events say so.
+//! * The fast tracker of a subject runs only while the subject is tracking,
+//!   and the start/stop events say so. It runs whenever the subject is
+//!   tracking, except after a start the engine reported as failed
+//!   ([`SubjectStore::tracker_failed`]): the subject then follows its
+//!   detections alone until the next matching detection retries the start.
 //! * Fast-track observations never create or revive a subject; only
 //!   detections and operator reacquires do.
 //!
@@ -280,6 +283,24 @@ impl SubjectStore {
             }
         }
         events
+    }
+
+    /// The engine could not start the tracker that a
+    /// [`StoreEvent::NeedsTrackerStart`] for `id` asked for: the box was too
+    /// small or had no texture, or no frame was at hand.
+    ///
+    /// The subject stays as it is (tracking, on its detections), but its
+    /// tracker counts as not running, so its track observations are ignored
+    /// and the next detection that matches it asks for a start again
+    /// ([`crate::associate`] restarts a subject whose tracker is not
+    /// running). Without this, an agreeing detection would only re-anchor
+    /// the box and the tracker would never be retried. Unknown ids are
+    /// ignored; no event is emitted, since nothing runs that could be
+    /// stopped.
+    pub fn tracker_failed(&mut self, id: SubjectId) {
+        if let Some(rec) = self.subjects.get_mut(&id) {
+            rec.tracker_running = false;
+        }
     }
 
     /// The live record `id`, mutably, or [`StoreError::UnknownSubject`].

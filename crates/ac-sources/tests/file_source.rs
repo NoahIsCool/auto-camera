@@ -1,7 +1,8 @@
 //! `FileSource` against real ffmpeg, on tiny clips generated per test.
 //!
 //! Every test skips (passes with a note) when `ffmpeg`/`ffprobe` are not
-//! installed. Clips come from ffmpeg's built-in `testsrc` and `sine`
+//! installed, unless `AC_REQUIRE_FFMPEG` is set (CI), which makes a missing
+//! tool a failure. Clips come from ffmpeg's built-in `testsrc` and `sine`
 //! generators, so no media files live in the repository.
 
 use std::path::{Path, PathBuf};
@@ -15,12 +16,16 @@ use ac_sources::{
     FfmpegTools, FileOptions, FileSource, FrameRate, SourceConfig, VirtualClock, open_source, probe,
 };
 
-/// The tools, or `None` (and a note) when ffmpeg is not installed.
+/// The tools, or `None` (and a note) when ffmpeg is not installed; panics
+/// instead when `AC_REQUIRE_FFMPEG` is set.
 fn tools() -> Option<FfmpegTools> {
     let tools = FfmpegTools::from_env();
     if tools.is_available() {
         Some(tools)
     } else {
+        let required =
+            std::env::var_os("AC_REQUIRE_FFMPEG").is_some_and(|v| !v.is_empty() && v != "0");
+        assert!(!required, "ffmpeg/ffprobe are required (AC_REQUIRE_FFMPEG)");
         eprintln!("skipping: ffmpeg/ffprobe not found");
         None
     }

@@ -6,7 +6,9 @@
 //!
 //! * one wide shot per source, then
 //! * for every subject of that source (ascending id) that is visible or on
-//!   air, one shot per preset of the subject's primary query.
+//!   air, one shot per preset it is given: those of its primary query, and
+//!   for an on-air subject also those of the shots it already has (the
+//!   engine core keeps them until it leaves the air).
 //!
 //! Shot ids are derived from what they frame, `"<source>/wide"` and
 //! `"<source>/<subject>/<preset>"`, so they are stable for the life of a
@@ -84,9 +86,10 @@ pub struct SubjectShots<'a> {
     pub id: SubjectId,
     /// Its current box.
     pub bbox: Rect,
-    /// Name of its primary query.
+    /// Name of its primary query (its id, for an on-air orphan).
     pub query_name: &'a str,
-    /// Presets of its primary query.
+    /// Presets to make shots for: its primary query's, plus, while it is on
+    /// air, those of the shots it already has.
     pub presets: &'a [Preset],
 }
 
@@ -276,8 +279,9 @@ impl Catalog {
         }
     }
 
-    /// Reconciles the entries with `specs`: existing ids keep their state,
-    /// new ids start framed on their subject, missing ids are dropped.
+    /// Reconciles the entries with `specs`: existing ids keep their framing
+    /// state and take the spec's name and preset, new ids start framed on
+    /// their subject, missing ids are dropped.
     /// Returns the ids added and removed.
     pub fn sync(
         &mut self,
@@ -295,7 +299,12 @@ impl Catalog {
         for spec in specs {
             let entry = match old.remove(&spec.shot.id) {
                 Some(mut e) => {
+                    // The name and the preset's parameters may have changed
+                    // (an alias query took over with its own preset of the
+                    // same id); the framer keeps its state and eases to the
+                    // new framing.
                     e.shot = spec.shot;
+                    e.preset = spec.preset;
                     e
                 }
                 None => {

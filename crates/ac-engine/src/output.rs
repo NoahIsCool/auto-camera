@@ -16,8 +16,20 @@
 //!
 //! Every helper thread is joined by [`OutputController::shutdown`], which
 //! also finishes a running encoder synchronously, so no ffmpeg process or
-//! thread outlives the engine. Program audio, when configured, is paced
-//! against the frame count by an [`AudioPacer`].
+//! thread outlives the engine.
+//!
+//! Each start opens a new *session*, numbered, and every helper result
+//! carries the number of the session it belongs to. A result for an older
+//! session (the finish of an ffmpeg that died, arriving after the operator
+//! already started again) only updates the "last session" statistics; it
+//! never changes the state of the current session, so a stale `Finished`
+//! cannot make a starting or running session look finished.
+//!
+//! The encoder gets exactly one frame per master-clock tick. Ticks the
+//! engine skipped after falling far behind are owed to it as repeated
+//! frames ([`ProgramEncoder::repeat_frames`]) and counted in the frame
+//! count, so the encoded timeline stays on the master clock. Program audio,
+//! when configured, is paced against that frame count by an [`AudioPacer`].
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -34,15 +46,23 @@ use crate::snapshot::{OutputState, OutputView};
 
 /// Audio may lag video by this much before silence is inserted.
 const AUDIO_SLACK: Duration = Duration::from_millis(100);
-/// Audio may lead video by this much before blocks are dropped.
-const AUDIO_MAX_LEAD: Duration = Duration::from_millis(500);
+/// Audio may lead video by this much before the oldest blocks are dropped.
+const AUDIO_MAX_LEAD: Duration = Duration::from_millis(100);
 
 /// A result handed back by a helper thread.
 enum Event {
     /// `ProgramEncoder::start` returned.
-    Started(Result<ProgramEncoder, OutputError>),
-    /// `ProgramEncoder::finish` returned; `failed` keeps an earlier failure.
+    Started {
+        /// The session it was started for.
+        session: u64,
+        /// The start result.
+        result: Result<ProgramEncoder, OutputError>,
+    },
+    /// `ProgramEncoder::finish` returned; an earlier failure of the session
+    /// is kept.
     Finished {
+        /// The session it belonged to.
+        session: u64,
         /// The finish result.
         result: Result<EncoderStats, OutputError>,
         /// Stats read just before finishing (boxed: the enum stays small).
@@ -54,8 +74,10 @@ enum Event {
 pub struct OutputController {
     /// Encoder and default destinations.
     settings: OutputSettings,
-    /// Lifecycle.
+    /// Lifecycle of the current session.
     state: OutputState,
+    /// Number of the current session (0 before the first start).
+    session: u64,
     /// The running encoder.
     encoder: Option<ProgramEncoder>,
     /// Program audio pacing for the running session.
@@ -94,6 +116,7 @@ impl OutputController {
         Self {
             settings,
             state: OutputState::Idle,
+            session: 0,
             encoder: None,
             pacer: None,
             frames_pushed: 0,
@@ -161,13 +184,16 @@ impl OutputController {
             )
         });
         let tx = self.sender.clone();
+        let session = self.session + 1;
         let helper = std::thread::Builder::new()
             .name("ac-output-start".into())
             .spawn(move || {
-                let _ = tx.send(Event::Started(ProgramEncoder::start(config)));
+                let result = ProgramEncoder::start(config);
+                let _ = tx.send(Event::Started { session, result });
             })
             .map_err(|e| CommandError::Output(e.to_string()))?;
         self.helpers.push(helper);
+        self.session = session;
         self.state = OutputState::Starting;
         self.rtmp_url = rtmp_url;
         self.record_path = record_path;
@@ -200,12 +226,17 @@ impl OutputController {
             return;
         };
         let tx = self.sender.clone();
+        let session = self.session;
         let spawned = std::thread::Builder::new()
             .name("ac-output-finish".into())
             .spawn(move || {
                 let before = Box::new(encoder.stats());
                 let result = encoder.finish();
-                let _ = tx.send(Event::Finished { result, before });
+                let _ = tx.send(Event::Finished {
+                    session,
+                    result,
+                    before,
+                });
             });
         match spawned {
             Ok(h) => self.helpers.push(h),
@@ -219,7 +250,16 @@ impl OutputController {
     pub fn poll(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
-                Event::Started(Ok(encoder)) => {
+                Event::Started { session, result } if session != self.session => {
+                    // Cannot happen (a start is refused until the previous
+                    // one resolved), but an encoder nobody owns is never
+                    // adopted: dropping it kills and reaps its ffmpeg.
+                    drop(result);
+                }
+                Event::Started {
+                    result: Ok(encoder),
+                    ..
+                } => {
                     self.encoder = Some(encoder);
                     if self.stop_after_start {
                         self.finish_in_background();
@@ -228,22 +268,26 @@ impl OutputController {
                         self.state = OutputState::Running;
                     }
                 }
-                Event::Started(Err(e)) => self.state = OutputState::Failed(e.to_string()),
-                Event::Finished { result, before } => {
+                Event::Started { result: Err(e), .. } => {
+                    self.state = OutputState::Failed(e.to_string());
+                }
+                Event::Finished {
+                    session,
+                    result,
+                    before,
+                } => {
+                    let current = session == self.session;
                     let failed = matches!(self.state, OutputState::Failed(_));
-                    match result {
-                        Ok(stats) => {
-                            self.last_stats = Some(stats);
-                            if !failed {
-                                self.state = OutputState::Finished;
-                            }
-                        }
-                        Err(e) => {
-                            self.last_stats = Some(*before);
-                            if !failed {
-                                self.state = OutputState::Failed(e.to_string());
-                            }
-                        }
+                    let (stats, error) = match result {
+                        Ok(stats) => (stats, None),
+                        Err(e) => (*before, Some(e.to_string())),
+                    };
+                    self.last_stats = Some(stats);
+                    if current && !failed {
+                        self.state = match error {
+                            None => OutputState::Finished,
+                            Some(e) => OutputState::Failed(e),
+                        };
                     }
                 }
             }
@@ -265,10 +309,14 @@ impl OutputController {
     }
 
     /// Pushes one program frame and the program audio drained this tick.
-    pub fn push(&mut self, frame: &VideoFrame, audio: Vec<AudioBlock>) {
+    /// `skipped` ticks were skipped just before this one; the encoder is
+    /// owed a repeated frame for each, and they count as pushed, so the
+    /// encoded timeline and the audio target stay on the master clock.
+    pub fn push(&mut self, frame: &VideoFrame, audio: Vec<AudioBlock>, skipped: u64) {
         let Some(encoder) = &self.encoder else {
             return;
         };
+        self.frames_pushed += encoder.repeat_frames(skipped);
         if encoder.push_frame(frame).is_ok() {
             self.frames_pushed += 1;
         }
@@ -309,7 +357,11 @@ impl OutputController {
         if let Some(encoder) = self.encoder.take() {
             let before = Box::new(encoder.stats());
             let result = encoder.finish();
-            let _ = self.sender.send(Event::Finished { result, before });
+            let _ = self.sender.send(Event::Finished {
+                session: self.session,
+                result,
+                before,
+            });
             if self.state == OutputState::Running {
                 self.state = OutputState::Stopping;
             }
@@ -324,7 +376,11 @@ impl OutputController {
         if let Some(encoder) = self.encoder.take() {
             let before = Box::new(encoder.stats());
             let result = encoder.finish();
-            let _ = self.sender.send(Event::Finished { result, before });
+            let _ = self.sender.send(Event::Finished {
+                session: self.session,
+                result,
+                before,
+            });
             self.poll();
         }
         for h in self.helpers.drain(..) {
@@ -419,6 +475,58 @@ mod tests {
         assert_eq!(view.record_path.as_deref(), Some(path.as_path()));
         assert!(!path.exists());
         assert!(c.shutdown() <= 1);
+    }
+
+    /// Final stats of a session that wrote `frames` frames.
+    fn stats(frames: u64) -> EncoderStats {
+        EncoderStats {
+            encoder: ac_output::EncoderChoice::Libx264,
+            frames_in: frames,
+            frames_dropped: 0,
+            frames_repeated: 0,
+            frames_written: frames,
+            audio_samples_in: 0,
+            audio_samples_dropped: 0,
+            audio_silence_samples: 0,
+            audio_samples_written: 0,
+            audio_connected: false,
+            ffmpeg_alive: false,
+            exit_code: Some(0),
+            last_error: None,
+            progress: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_late_finish_of_an_old_session_leaves_the_new_one_alone() {
+        let mut c = OutputController::new(settings());
+        // Session 1 died and its finish is still pending while the operator
+        // already started session 2.
+        c.session = 2;
+        c.state = OutputState::Starting;
+        let send = |c: &OutputController, session, result| {
+            c.sender
+                .send(Event::Finished {
+                    session,
+                    result,
+                    before: Box::new(stats(7)),
+                })
+                .unwrap();
+        };
+        send(&c, 1, Ok(stats(42)));
+        c.poll();
+        assert_eq!(c.state(), &OutputState::Starting);
+        assert_eq!(c.view().stats.map(|s| s.frames_written), Some(42));
+        // The new session can still be cancelled.
+        assert_eq!(c.stop(), Ok(CommandReply::OutputStopping));
+        send(&c, 1, Err(OutputError::Stopped));
+        c.poll();
+        assert_eq!(c.state(), &OutputState::Stopping);
+        // Its own finish does count.
+        send(&c, 2, Ok(stats(9)));
+        c.poll();
+        assert_eq!(c.state(), &OutputState::Finished);
+        assert_eq!(c.view().stats.map(|s| s.frames_written), Some(9));
     }
 
     #[test]

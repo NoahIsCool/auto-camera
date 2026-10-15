@@ -26,6 +26,8 @@ fn studio() -> StudioConfig {
     });
     c.output.width = 320;
     c.output.height = 180;
+    // Not a test of the encoder: libx264 behaves the same everywhere.
+    c.output.encoder = ac_engine::EncoderSetting::Libx264;
     c.director.mode = DirectorMode::Off;
     c
 }
@@ -35,14 +37,22 @@ fn options(seconds: f64, record: Option<PathBuf>) -> HeadlessOptions {
     HeadlessOptions { seconds, record }
 }
 
-/// True when `tool -version` succeeds.
+/// True when `tool -version` succeeds. When it does not and
+/// `AC_REQUIRE_FFMPEG` is set (CI), panics instead of letting the caller
+/// skip.
 fn have(tool: &str) -> bool {
-    std::process::Command::new(tool)
+    let found = std::process::Command::new(tool)
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+        .is_ok_and(|s| s.success());
+    let required = std::env::var_os("AC_REQUIRE_FFMPEG").is_some_and(|v| !v.is_empty() && v != "0");
+    assert!(
+        found || !required,
+        "{tool} is not installed, and AC_REQUIRE_FFMPEG says it must be"
+    );
+    found
 }
 
 /// A fresh, unique path in the temp directory (not created).
@@ -115,6 +125,60 @@ fn unusable_setups_fail_with_a_summary() {
     std::fs::remove_file(existing).unwrap();
 }
 
+/// Real time, except that the engine thread's clock reading number `fuse`
+/// panics: a stand-in for any bug inside a tick.
+#[derive(Debug)]
+struct Grenade {
+    /// The instant that reads as zero.
+    origin: Instant,
+    /// Readings taken on the engine thread so far.
+    calls: std::sync::atomic::AtomicU64,
+    /// Reading that panics.
+    fuse: u64,
+}
+
+impl ac_sources::Clock for Grenade {
+    fn now(&self) -> Duration {
+        if std::thread::current().name() == Some("ac-engine")
+            && self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == self.fuse
+        {
+            panic!("injected failure inside a tick");
+        }
+        self.origin.elapsed()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+#[test]
+fn a_run_whose_engine_dies_fails_at_once_with_the_reason() {
+    let clock = Arc::new(Grenade {
+        origin: Instant::now(),
+        calls: Default::default(),
+        fuse: 200,
+    });
+    let started = Instant::now();
+    let s = run_with(
+        studio(),
+        Path::new("x.toml"),
+        &options(30.0, None),
+        EngineOptions {
+            clock,
+            ..EngineOptions::default()
+        },
+    );
+    assert!(!s.ok);
+    let error = s.error.as_deref().unwrap_or_default();
+    assert!(error.contains("injected failure"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "the run waited out its time: {:?}",
+        started.elapsed()
+    );
+}
+
 #[test]
 fn a_recording_run_finalizes_the_file() {
     if !have("ffmpeg") {
@@ -164,7 +228,8 @@ fn the_sample_configs_load() {
     let demo = StudioConfig::load(&root.join("demo.toml")).unwrap();
     assert_eq!(demo.sources.len(), 1);
     assert_eq!(demo.detector, DetectorSettings::Synthetic { score: 0.9 });
-    assert_eq!(demo.director.mode, DirectorMode::Auto);
+    // Auto-take is opt-in: the demo only suggests.
+    assert_eq!(demo.director.mode, DirectorMode::Suggest);
     assert_eq!(demo.discovery.rate_hz, 10.0);
     let file = StudioConfig::load(&root.join("file-source.example.toml")).unwrap();
     assert_eq!(file.queries.len(), 2);

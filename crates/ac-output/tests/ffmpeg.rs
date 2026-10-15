@@ -141,6 +141,105 @@ fn encodes_frames_and_sine_to_a_playable_fragmented_mp4() {
 }
 
 #[test]
+fn repeated_frames_for_skipped_ticks_keep_the_timeline() {
+    if !common::have_ffmpeg() {
+        return;
+    }
+    let dir = common::scratch_dir("repeats");
+    let path = dir.join("program.mp4");
+    let enc = common::start(&small(path.clone())).unwrap();
+    for i in 0..30u32 {
+        enc.push_video(&common::frame(320, 180, i)).unwrap();
+    }
+    // The caller skipped 15 ticks: they are owed, then 15 more frames.
+    assert_eq!(enc.repeat_frames(15), 15);
+    for i in 30..45u32 {
+        enc.push_video(&common::frame(320, 180, i)).unwrap();
+    }
+    let stats = enc.finish().unwrap();
+    // Dropped frames are repaid too, so the count is exact either way.
+    assert_eq!(stats.frames_written, 60, "{stats:?}");
+    assert_eq!(
+        stats.frames_repeated,
+        stats.frames_dropped + 15,
+        "{stats:?}"
+    );
+    let video = common::probe(
+        &path,
+        &[
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+        ],
+    );
+    assert_eq!(video["nb_read_frames"], "60");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_test_encode_tells_working_encoders_apart() {
+    if !common::have_ffmpeg() {
+        return;
+    }
+    let ffmpeg = std::path::Path::new("ffmpeg");
+    assert!(ac_output::encoder_works(ffmpeg, EncoderChoice::Libx264));
+    // Off macOS, Auto never tries VideoToolbox.
+    if !cfg!(target_os = "macos") {
+        assert_eq!(
+            ac_output::detect_encoder(ffmpeg, Encoder::Auto).unwrap(),
+            EncoderChoice::Libx264
+        );
+    }
+}
+
+/// A real VideoToolbox encode, when this Mac can open a session (hosted
+/// runners and virtual machines usually cannot: then Auto must have fallen
+/// back to libx264, which is checked instead).
+#[cfg(target_os = "macos")]
+#[test]
+fn videotoolbox_encodes_a_playable_file_when_it_can() {
+    if !common::have_ffmpeg() {
+        return;
+    }
+    let ffmpeg = std::path::Path::new("ffmpeg");
+    let auto = ac_output::detect_encoder(ffmpeg, Encoder::Auto).unwrap();
+    if !ac_output::encoder_works(ffmpeg, EncoderChoice::VideoToolbox) {
+        eprintln!("skipping: VideoToolbox cannot open a session here");
+        assert_eq!(auto, EncoderChoice::Libx264);
+        return;
+    }
+    assert_eq!(auto, EncoderChoice::VideoToolbox);
+    let dir = common::scratch_dir("vt");
+    let path = dir.join("program.mp4");
+    let config = OutputConfig {
+        encoder: Encoder::VideoToolbox,
+        ..small(path.clone())
+    };
+    let enc = common::start(&config).unwrap();
+    assert_eq!(enc.encoder(), EncoderChoice::VideoToolbox);
+    for i in 0..30u32 {
+        enc.push_video(&common::frame(320, 180, i)).unwrap();
+        thread::sleep(Duration::from_millis(5));
+    }
+    let stats = enc.finish().unwrap();
+    assert_eq!(stats.frames_written, 30, "{stats:?}");
+    let video = common::probe(
+        &path,
+        &[
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,width,height",
+        ],
+    );
+    assert_eq!(video["codec_name"], "h264");
+    assert_eq!(video["width"], "320");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn unreachable_rtmp_does_not_stop_the_recording() {
     if !common::have_ffmpeg() {
         return;

@@ -65,6 +65,26 @@ impl FramePool {
         buffer
     }
 
+    /// Changes the largest number of buffers kept (at least one),
+    /// forgetting the oldest when it shrinks below what is kept now.
+    pub(crate) fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity.max(1);
+        let excess = self.buffers.len().saturating_sub(self.capacity);
+        self.buffers.drain(..excess);
+    }
+
+    /// The buffers kept, oldest first.
+    #[cfg(test)]
+    pub(crate) fn buffers(&self) -> impl Iterator<Item = &Arc<[u8]>> {
+        self.buffers.iter()
+    }
+
+    /// Largest number of buffers kept.
+    #[cfg(test)]
+    pub(crate) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Number of buffers currently kept.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
@@ -113,6 +133,23 @@ mod tests {
         let _b = pool.fill_with(4, |b| b.fill(0));
         assert_eq!(pool.len(), 2);
         assert!(pool.buffers.iter().all(|b| b.len() == 4));
+    }
+
+    #[test]
+    fn capacity_can_grow_and_shrink() {
+        let mut pool = FramePool::new(2);
+        let held: Vec<_> = (0..4).map(|i| pool.fill_with(1, |b| b.fill(i))).collect();
+        assert_eq!(pool.len(), 2);
+        pool.set_capacity(8);
+        let more: Vec<_> = (0..4).map(|i| pool.fill_with(1, |b| b.fill(i))).collect();
+        assert_eq!(pool.len(), 6);
+        pool.set_capacity(3);
+        assert_eq!((pool.len(), pool.capacity()), (3, 3));
+        pool.set_capacity(0);
+        assert_eq!((pool.len(), pool.capacity()), (1, 1));
+        // The newest buffer is the one kept.
+        assert!(Arc::ptr_eq(&pool.buffers[0], &more[3]));
+        drop(held);
     }
 
     #[test]

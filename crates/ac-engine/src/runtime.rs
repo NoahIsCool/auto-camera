@@ -30,7 +30,18 @@
 //! every source, publishes a final snapshot with `running == false` and
 //! exits, and `shutdown` joins it. No thread or child process outlives the
 //! engine.
+//!
+//! The engine thread can also die: a bug that panics anywhere in a tick or
+//! a command unwinds it. Unwinding drops what the thread owned (sources
+//! stop, the encoder is finished), and the thread then publishes a last
+//! snapshot with `running == false` and [`EngineSnapshot::fatal`] saying
+//! why, before the panic continues to [`Engine::shutdown`] (which reports
+//! [`EngineError::Panicked`]). Every reader therefore learns that the engine
+//! is gone from the snapshots alone: the operator window shows it,
+//! [`EngineHandle::wait_until`] returns at once and a headless run fails,
+//! instead of watching a frozen "running" snapshot forever.
 
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
@@ -48,7 +59,7 @@ use crate::discovery::{DiscoveryResult, DiscoveryWorker, build_detector};
 use crate::mailbox::Latest;
 use crate::output::OutputController;
 use crate::schedule::{TickDecision, TickSchedule, TickTimer};
-use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
+use crate::snapshot::{EngineSnapshot, OutputState, OutputView, TimingView};
 
 /// Longest single wait of the engine thread between ticks.
 const WAIT_SLICE: Duration = Duration::from_millis(10);
@@ -361,9 +372,20 @@ impl Engine {
             late: 0,
             skipped: 0,
         };
-        let thread = std::thread::Builder::new()
-            .name("ac-engine".into())
-            .spawn(move || runtime.run())?;
+        let last_words = snapshots.clone();
+        let thread =
+            std::thread::Builder::new().name("ac-engine".into()).spawn(
+                move || match catch_unwind(AssertUnwindSafe(|| runtime.run())) {
+                    Ok(report) => report,
+                    Err(payload) => {
+                        // `runtime` was dropped while unwinding: sources are
+                        // stopped and the encoder finished. Say so, then let the
+                        // panic reach `join`.
+                        publish_fatal(&last_words, &panic_message(payload.as_ref()));
+                        resume_unwind(payload)
+                    }
+                },
+            )?;
         Ok(Self {
             handle: EngineHandle {
                 tx,
@@ -415,6 +437,33 @@ impl Drop for Engine {
     }
 }
 
+/// The text of a panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into())
+}
+
+/// Publishes the last snapshot of an engine thread that panicked: the newest
+/// one, marked stopped, with the reason and the output no longer running.
+fn publish_fatal(snapshots: &Latest<Arc<EngineSnapshot>>, message: &str) {
+    let Some(last) = snapshots.get() else {
+        return;
+    };
+    let mut snap = (*last).clone();
+    snap.running = false;
+    snap.fatal = Some(format!("the engine thread panicked: {message}"));
+    if matches!(
+        snap.output.state,
+        OutputState::Starting | OutputState::Running | OutputState::Stopping
+    ) {
+        snap.output.state = OutputState::Failed("the engine stopped".into());
+    }
+    snapshots.publish(Arc::new(snap));
+}
+
 impl Runtime {
     /// The engine thread's main loop.
     fn run(mut self) -> EngineReport {
@@ -436,7 +485,7 @@ impl Runtime {
             if self.apply_commands() {
                 break;
             }
-            self.tick(media_time);
+            self.tick(media_time, skipped);
             self.timer.record(started.elapsed());
             self.late += u64::from(late);
             self.skipped += skipped;
@@ -474,8 +523,9 @@ impl Runtime {
         }
     }
 
-    /// One tick: feed the core, dispatch discovery, push the program.
-    fn tick(&mut self, media_time: Duration) {
+    /// One tick: feed the core, dispatch discovery, push the program
+    /// (owing the encoder a repeat for each of the `skipped` ticks before).
+    fn tick(&mut self, media_time: Duration, skipped: u64) {
         self.output.poll();
         let results: Vec<DiscoveryResult> = self.results.try_iter().collect();
         let feeds: Vec<SourceFeed> = self
@@ -499,7 +549,7 @@ impl Runtime {
                 program_audio = blocks;
             }
         }
-        self.output.push(&out.program, program_audio);
+        self.output.push(&out.program, program_audio, skipped);
     }
 
     /// Publishes the current snapshot and returns it.

@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use ac_core::ShotId;
 use ac_director::{CandidateKind, ContentProfile, DirectorMode};
 use ac_engine::{
-    Engine, EngineCommand, EngineOptions, EngineSnapshot, MonitorSettings, OutputState, ShotStatus,
-    StudioConfig,
+    Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot, MonitorSettings,
+    OutputState, ShotStatus, StudioConfig,
 };
 use serde::Serialize;
 
@@ -230,12 +230,21 @@ pub fn run_with(
     )
 }
 
+/// `why`, or why the engine died when it did (a dead engine also makes
+/// every wait end early).
+fn failure(h: &EngineHandle, why: &str) -> String {
+    match &h.snapshot().fatal {
+        Some(fatal) => format!("{why}: {fatal}"),
+        None => why.to_owned(),
+    }
+}
+
 /// Phases 2 to 5; returns why the run failed.
 fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> Result<(), String> {
     let h = engine.handle();
     let snap = h
         .wait_until(SIGNAL_TIMEOUT, |s| first_wide(s).is_some())
-        .ok_or("no source delivered a picture in time")?;
+        .ok_or_else(|| failure(&h, "no source delivered a picture in time"))?;
     sampler.record(&snap);
     if snap.director.mode != DirectorMode::Auto && snap.switcher.program.is_none() {
         let wide = first_wide(&snap).expect("checked above");
@@ -255,7 +264,7 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
             .wait_until(OUTPUT_START_TIMEOUT, |s| {
                 !matches!(s.output.state, OutputState::Idle | OutputState::Starting)
             })
-            .ok_or("the output did not start in time")?;
+            .ok_or_else(|| failure(&h, "the output did not start in time"))?;
         if snap.output.state != OutputState::Running {
             return Err(format!("the output did not start: {:?}", snap.output.state));
         }
@@ -266,7 +275,7 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
         let snap = h.snapshot();
         sampler.record(&snap);
         if !snap.running {
-            return Err("the engine stopped early".into());
+            return Err(failure(&h, "the engine stopped early"));
         }
         if matches!(snap.output.state, OutputState::Failed(_)) {
             return Err(format!("the output failed: {:?}", snap.output.state));
@@ -279,7 +288,7 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
             .wait_until(OUTPUT_STOP_TIMEOUT, |s| {
                 !matches!(s.output.state, OutputState::Running | OutputState::Stopping)
             })
-            .ok_or("the recording was not finalized in time")?;
+            .ok_or_else(|| failure(&h, "the recording was not finalized in time"))?;
         sampler.record(&snap);
         if snap.output.state != OutputState::Finished {
             return Err(format!("the output failed: {:?}", snap.output.state));

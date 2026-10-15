@@ -31,10 +31,10 @@ kind = "synthetic"
 rate_hz = 10.0
 
 [director]
-# Auto so a headless run puts a shot on air by itself: it establishes the
-# wide at once and moves to subject shots once the wide reaches its maximum
-# dwell (10 s). Switch to "suggest" in the window to drive it by hand.
-mode = "auto"
+# Suggest: the director stages its pick on preview and the operator takes
+# it. Auto-take is opt-in; choose "auto" in the window (or here) to let it
+# cut by itself. A headless run cuts the first wide to program either way.
+mode = "suggest"
 profile = "talk"
 
 [switcher]

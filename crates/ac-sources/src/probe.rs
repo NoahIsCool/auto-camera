@@ -1,5 +1,11 @@
 //! Locating the ffmpeg tools and probing media files with `ffprobe`.
 //!
+//! The tools are found once, the same way for decoding and for the program
+//! encoder: the `AC_FFMPEG` / `AC_FFPROBE` variables, else the bare name on
+//! `PATH`. On macOS an app started from Finder, the Dock or launchd gets a
+//! `PATH` without Homebrew's directories, so a name that is not on `PATH`
+//! is also looked for in `/opt/homebrew/bin` and `/usr/local/bin`.
+//!
 //! Probing runs `ffprobe -print_format json -show_streams -show_format` once
 //! when a file is opened and reads the first real video stream and the first
 //! audio stream. Cover art (a video stream with the `attached_pic`
@@ -29,6 +35,35 @@ pub const FFMPEG_ENV: &str = "AC_FFMPEG";
 /// Environment variable overriding the `ffprobe` executable.
 pub const FFPROBE_ENV: &str = "AC_FFPROBE";
 
+/// Where a tool missing from `PATH` is also looked for on macOS (Homebrew on
+/// Apple Silicon, then on Intel).
+const MAC_TOOL_DIRS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
+
+/// `name` when a directory of `search_path` holds it (or nothing does),
+/// else the first of `fallbacks` that holds it, as a full path.
+fn locate(name: &str, search_path: Option<&std::ffi::OsStr>, fallbacks: &[&str]) -> PathBuf {
+    let on_path =
+        search_path.is_some_and(|p| std::env::split_paths(p).any(|d| d.join(name).is_file()));
+    if on_path {
+        return PathBuf::from(name);
+    }
+    fallbacks
+        .iter()
+        .map(|d| Path::new(d).join(name))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// The default location of tool `name`; see the module docs.
+fn default_tool(name: &str) -> PathBuf {
+    let fallbacks: &[&str] = if cfg!(target_os = "macos") {
+        &MAC_TOOL_DIRS
+    } else {
+        &[]
+    };
+    locate(name, std::env::var_os("PATH").as_deref(), fallbacks)
+}
+
 /// Locations of the `ffmpeg` and `ffprobe` executables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegTools {
@@ -40,12 +75,13 @@ pub struct FfmpegTools {
 
 impl FfmpegTools {
     /// The tools named by [`FFMPEG_ENV`] and [`FFPROBE_ENV`], defaulting to
-    /// `ffmpeg` and `ffprobe` on `PATH`.
+    /// `ffmpeg` and `ffprobe` on `PATH` (and, on macOS, in Homebrew's
+    /// directories when they are not on `PATH`).
     pub fn from_env() -> Self {
         let pick = |var: &str, default: &str| {
             std::env::var_os(var)
                 .filter(|v| !v.is_empty())
-                .map_or_else(|| PathBuf::from(default), PathBuf::from)
+                .map_or_else(|| default_tool(default), PathBuf::from)
         };
         Self {
             ffmpeg: pick(FFMPEG_ENV, "ffmpeg"),
@@ -311,6 +347,35 @@ fn parse_audio(s: &RawStream) -> Result<AudioStreamInfo, MediaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tools_off_the_path_are_found_in_fallback_directories() {
+        let root = std::env::temp_dir().join(format!("ac-sources-locate-{}", std::process::id()));
+        let (on_path, brew) = (root.join("bin"), root.join("brew"));
+        std::fs::create_dir_all(&on_path).unwrap();
+        std::fs::create_dir_all(&brew).unwrap();
+        std::fs::write(brew.join("ffmpeg"), b"").unwrap();
+        let brew_dir = brew.to_str().unwrap();
+        let path = std::env::join_paths([&on_path]).unwrap();
+        // Not on PATH: the fallback's full path.
+        assert_eq!(
+            locate("ffmpeg", Some(&path), &[brew_dir]),
+            brew.join("ffmpeg")
+        );
+        // On PATH: the bare name, so PATH order still decides.
+        std::fs::write(on_path.join("ffmpeg"), b"").unwrap();
+        assert_eq!(
+            locate("ffmpeg", Some(&path), &[brew_dir]),
+            PathBuf::from("ffmpeg")
+        );
+        // Nowhere: the bare name, so the error names the tool.
+        assert_eq!(
+            locate("ffprobe", Some(&path), &[brew_dir]),
+            PathBuf::from("ffprobe")
+        );
+        assert_eq!(locate("ffprobe", None, &[]), PathBuf::from("ffprobe"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// Trimmed real ffprobe output for a 160x120 30 fps clip with stereo audio.
     const CLIP: &str = r#"{

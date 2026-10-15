@@ -374,6 +374,61 @@ fn tracks_several_subjects_independently() {
 }
 
 #[test]
+fn one_pyramid_serves_every_start_and_update_on_a_frame() {
+    let mut tracker = TemplateTracker::default();
+    let squares = [
+        Square {
+            seed: 1,
+            ..square(120.0, 120.0, 60.0)
+        },
+        Square {
+            seed: 2,
+            ..square(320.0, 180.0, 60.0)
+        },
+        Square {
+            seed: 3,
+            ..square(520.0, 240.0, 60.0)
+        },
+    ];
+    let frame = render(0, Background::Noise, &squares);
+    for (i, s) in squares.iter().enumerate() {
+        tracker
+            .start(&frame, SubjectId(i as u32 + 1), s.rect())
+            .unwrap();
+    }
+    // A failed start on the same frame reuses it too.
+    assert!(
+        tracker
+            .start(&frame, SubjectId(9), Rect::new(0.5, 0.5, 0.004, 0.004))
+            .is_err()
+    );
+    assert_eq!(tracker.pyramids_built(), 1);
+    // The next frame is converted once for the update and a late start.
+    let next = render(1, Background::Noise, &squares);
+    assert_eq!(tracker.update(&next).len(), 3);
+    tracker
+        .start(&next, SubjectId(4), squares[0].rect())
+        .unwrap();
+    assert_eq!(tracker.pyramids_built(), 2);
+    // A frame with the same number from another source is not confused
+    // with it.
+    let other = render_from(SourceId("other".into()), 1, Background::Noise, &squares);
+    let _ = tracker.start(&other, SubjectId(5), squares[0].rect());
+    assert_eq!(
+        tracker.pyramids_built(),
+        2,
+        "a foreign source is refused first"
+    );
+    for id in 1..=4 {
+        tracker.stop(SubjectId(id));
+    }
+    tracker
+        .start(&other, SubjectId(5), squares[0].rect())
+        .unwrap();
+    assert_eq!(tracker.pyramids_built(), 3);
+}
+
+#[test]
 fn rejects_invalid_boxes_and_flat_regions() {
     let mut tracker = TemplateTracker::default();
     let frame = render(0, Background::Flat, &[square(320.0, 180.0, 64.0)]);
@@ -477,7 +532,7 @@ fn small_frames_are_not_enlarged() {
         .collect::<Vec<_>>()
         .into();
     let frame = VideoFrame::new(SourceId("cam".into()), 0, Duration::ZERO, 64, 48, data).unwrap();
-    let tracker = TemplateTracker::default();
+    let mut tracker = TemplateTracker::default();
     let p = tracker.pyramid(&frame);
     assert_eq!((p.levels[0].img.width, p.levels[0].img.height), (64, 48));
 }

@@ -136,6 +136,7 @@ impl EngineCore {
             tick: self.ticks,
             media_time: self.now,
             running,
+            fatal: None,
             shots,
             subjects,
             queries,
