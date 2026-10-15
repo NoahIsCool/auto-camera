@@ -43,3 +43,7 @@ ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, fea
 
 [lints]
 workspace = true
+
+[[example]]
+name = "owl_detect"
+required-features = ["onnx"]

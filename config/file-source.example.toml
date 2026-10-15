@@ -30,13 +30,19 @@ presets = ["full", { id = "tight", name = "Tight", size = "close", headroom = 0.
 
 [detector]
 kind = "owl"
-model = "../models/owlv2-base-onnx/model.onnx"
-tokenizer = "../models/owlv2-base-onnx/tokenizer.json"
+# The split export (crates/ac-vision/README.md) caches prompt embeddings; for
+# the combined one, set model = ".../model.onnx" and drop text_encoder.
+model = "../models/owlv2-split-onnx/detector.onnx"
+text_encoder = "../models/owlv2-split-onnx/text_encoder.onnx"
+tokenizer = "../models/owlv2-split-onnx/tokenizer.json"
 score_threshold = 0.2
-# use_coreml = true   # Apple Silicon
+# CoreML on Apple Silicon (the default): about 0.2 s per pass after a
+# compile of a few minutes on first use, cached next to the model.
+use_coreml = true
 
 [discovery]
-# OWLv2 on a CPU takes about a second per frame; the tracker fills the gaps.
+# OWLv2 base takes about 0.2 s per frame on CoreML and 2 s on an Apple CPU;
+# the tracker fills the gaps.
 rate_hz = 1.0
 max_result_age_s = 3.0
 
