@@ -11,6 +11,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ac-director"
+version = "0.1.0"
+dependencies = [
+ "ac-core",
+ "proptest",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "ac-eval"
 version = "0.1.0"
 dependencies = [
