@@ -55,6 +55,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ac-output"
+version = "0.1.0"
+dependencies = [
+ "ac-core",
+ "ac-media",
+ "thiserror",
+]
+
+[[package]]
 name = "ac-sources"
 version = "0.1.0"
 dependencies = [
