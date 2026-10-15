@@ -1,0 +1,50 @@
+# Demo studio: one synthetic camera with three moving subjects and the
+# ground-truth "synthetic" detector, so it runs anywhere without a camera,
+# a model or a video file.
+#
+#   cargo run -p auto-camera                         # operator window
+#   cargo run -p auto-camera -- --headless --seconds 5 --record /tmp/demo.mp4
+#
+# Relative paths in this file are resolved against this file's directory.
+
+[[sources]]
+id = "stage"
+name = "Stage"
+kind = "synthetic"
+width = 1280
+height = 720
+fps = 30
+subjects = 3
+
+[[queries]]
+name = "Person"
+prompt = "person"
+presets = ["medium", "close"]
+
+[detector]
+# Answers every query with the pattern's true subject boxes.
+kind = "synthetic"
+
+[discovery]
+# The template tracker cannot tell the identical synthetic subjects apart
+# when they cross; frequent discovery re-anchors them.
+rate_hz = 10.0
+
+[director]
+# Auto so a headless run puts a shot on air by itself: it establishes the
+# wide at once and moves to subject shots once the wide reaches its maximum
+# dwell (10 s). Switch to "suggest" in the window to drive it by hand.
+mode = "auto"
+profile = "talk"
+
+[switcher]
+transition = "mix"
+duration = 0.8
+
+[output]
+width = 1280
+height = 720
+fps = 30
+video_bitrate_kbps = 4000
+# rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
+# record_path = "recordings/demo.mp4"

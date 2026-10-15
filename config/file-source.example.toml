@@ -1,0 +1,54 @@
+# A studio fed by a local video file, with the OWLv2 detector.
+#
+# Requires ffmpeg on PATH, and a build with the `onnx` feature:
+#
+#   cargo run -p auto-camera --features onnx -- --config config/file-source.example.toml
+#
+# Copy this file, then point `path`, `model` and `tokenizer` at real files
+# (see crates/ac-vision/README.md for exporting OWLv2 to ONNX). Relative paths
+# are resolved against this file's directory.
+
+[[sources]]
+id = "cam-1"
+name = "Rehearsal"
+kind = "file"
+path = "../media/rehearsal.mp4"
+loop_playback = true
+# Decode at most 1280 pixels wide; the tracker and compositor work on this.
+max_width = 1280
+audio = true
+
+[[queries]]
+name = "Speaker"
+prompt = "a person speaking at a lectern"
+presets = ["medium", "close"]
+
+[[queries]]
+name = "Guitarist"
+prompt = "a person playing guitar"
+presets = ["full", { id = "tight", name = "Tight", size = "close", headroom = 0.03, max_zoom = 6.0 }]
+
+[detector]
+kind = "owl"
+model = "../models/owlv2-base-onnx/model.onnx"
+tokenizer = "../models/owlv2-base-onnx/tokenizer.json"
+score_threshold = 0.2
+# use_coreml = true   # Apple Silicon
+
+[discovery]
+# OWLv2 on a CPU takes about a second per frame; the tracker fills the gaps.
+rate_hz = 1.0
+max_result_age_s = 3.0
+
+[director]
+mode = "suggest"
+profile = "music"
+
+[output]
+width = 1280
+height = 720
+fps = 30
+# Program audio comes from this source's embedded audio track.
+audio_source = "cam-1"
+# rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
+record_path = "../recordings/show.mp4"
