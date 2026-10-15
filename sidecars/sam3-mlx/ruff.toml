@@ -1,0 +1,9 @@
+# Lint and format settings for the sidecar: `ruff check . && ruff format --check .`
+target-version = "py310"
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "B", "I", "UP", "N", "D"]
+
+[lint.pydocstyle]
+convention = "pep257"

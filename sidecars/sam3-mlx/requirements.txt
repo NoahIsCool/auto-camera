@@ -1,0 +1,17 @@
+# SAM 3.1 sidecar, MLX backend: Apple Silicon (macOS), Python 3.10 or newer.
+# These are the versions in Noah's venv (~/repos/auto-camera/models/sam3/),
+# the ones research/sam31-vs-owlv2.md was measured with. The fake backend and
+# the tests need none of this.
+#
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+mlx==0.32.3
+# mlx-vlm 0.7.6 at the pinned revision; every call the backend makes was
+# checked against this revision's source.
+mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@5b22c24f325a953ec70b965e39fb97a9b5ec7a4d
+transformers==5.18.0
+# Imported directly by the backend. mlx-vlm already requires all three and
+# pip picks their versions; pin them from `pip freeze` in the venv when a
+# reproducible rebuild matters.
+numpy
+opencv-python
+Pillow
