@@ -143,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn prompts_without_shot_or_role_words_behave_as_before() {
+    fn prompts_without_shot_or_role_words_keep_their_phrase_and_presets() {
         for prompt in [
             "person",
             "a person speaking at a lectern",
@@ -211,48 +211,55 @@ mod tests {
         assert_eq!(settle_presets(None, &plain), default_presets());
     }
 
+    /// The rows of the README's prompt table, read from the README itself:
+    /// (prompt, detector phrase, framing), as written.
+    fn readme_rows() -> Vec<(String, String, String)> {
+        const README: &str = include_str!("../../../README.md");
+        const HEADER: &str = "| Prompt | Detector sees | Framing |";
+        let mut lines = README.lines().skip_while(|l| l.trim() != HEADER);
+        assert!(lines.next().is_some(), "the README has a prompt table");
+        lines.next(); // |---|---|---|
+        lines
+            .take_while(|l| l.trim_start().starts_with('|'))
+            .map(|l| {
+                let cells: Vec<&str> = l
+                    .trim()
+                    .trim_matches('|')
+                    .split('|')
+                    .map(str::trim)
+                    .collect();
+                assert_eq!(cells.len(), 3, "{l}");
+                let prompt = cells[0].trim_matches('`');
+                (
+                    prompt.to_string(),
+                    cells[1].to_string(),
+                    cells[2].to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The README's "Framing" cell for a query built without presets.
+    fn framing_cell(q: &Query) -> String {
+        let sizes = if q.parse.shots.is_empty() {
+            "the query's presets".to_string()
+        } else {
+            let names: Vec<&str> = q.presets.iter().map(|p| p.name.as_str()).collect();
+            names.join(", ")
+        };
+        format!("{sizes} ({})", q.basis().label())
+    }
+
     #[test]
     fn the_readme_prompt_table_holds() {
-        let rows: &[(&str, &str, Option<&[ShotSize]>, Basis)] = &[
-            (
-                "speaker upper body",
-                "a person speaking",
-                Some(&[Medium, MediumClose]),
-                Basis::Person,
-            ),
-            (
-                "speaker's upper body at the lectern",
-                "speaker at the lectern",
-                Some(&[Medium, MediumClose]),
-                Basis::Person,
-            ),
-            (
-                "guitarist close-up",
-                "a person playing guitar",
-                Some(&[Close]),
-                Basis::Person,
-            ),
-            ("guitar close-up", "guitar", Some(&[Close]), Basis::Object),
-            (
-                "drummer wide",
-                "a person playing drums",
-                Some(&[Full]),
-                Basis::Person,
-            ),
-            (
-                "a person playing guitar",
-                "a person playing guitar",
-                None,
-                Basis::Person,
-            ),
-        ];
-        for &(prompt, phrase, shots, basis) in rows {
-            let q = build(prompt, None, false).unwrap();
+        let rows = readme_rows();
+        assert!(rows.len() >= 6, "{rows:?}");
+        for (prompt, phrase, framing) in rows {
+            let q = build(&prompt, None, false).unwrap();
             assert_eq!(q.detector_phrase(), phrase, "{prompt}");
-            assert_eq!(q.basis(), basis, "{prompt}");
-            match shots {
-                Some(shots) => assert_eq!(sizes(&q), shots, "{prompt}"),
-                None => assert_eq!(q.presets, default_presets(), "{prompt}"),
+            assert_eq!(framing_cell(&q), framing, "{prompt}");
+            if q.parse.shots.is_empty() {
+                assert_eq!(q.presets, default_presets(), "{prompt}");
             }
         }
     }

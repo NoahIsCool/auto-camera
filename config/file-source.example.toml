@@ -26,18 +26,30 @@ audio = true
 #   waist up (Medium); upper body, half body (Medium and Medium close, until
 #   Noah picks one); full, full body, full length, head to toe, long shot, fs
 #   (Full); and "wide" after a subject ("drummer wide", Full for now; the
-#   subject with its kit is later work). "speaker's upper body" works too.
+#   subject with its kit is later work). "speaker's upper body" and plurals
+#   ("close-ups") work too.
 # * Role words are rewritten for the detector when they are the whole
 #   subject: speaker, pastor and preacher ask for "a person speaking",
 #   guitarist for "a person playing guitar", drummer for "a person playing
 #   drums", singer for "a person singing". Each is a hypothesis until
 #   benchmarked on footage; the window shows what the detector sees.
-# * A person subject (a person or role word) is framed at body lines measured
-#   from the head; anything else ("guitar close-up") scales its box.
+# * A person subject (a person or role word) on a whole-person box is cut at
+#   body lines measured from the head; anything else ("guitar close-up")
+#   scales its box.
 # * Explicit `presets` always win over shot words; with neither, a query
-#   gets medium and close. `literal = true` sends the prompt as typed.
+#   gets medium and close. `literal = true` sends the prompt as typed; use it
+#   for a prompt that is only shot words ("face"), which is refused otherwise.
+# * Queries whose prompts ask the detector for the same thing ("speaker
+#   close-up" and "speaker wide") share one subject, which gets the shots of
+#   both.
 #
-# Prompts without shot or role words, like the first two, behave as before.
+# Prompts without shot or role words, like the first two, keep their
+# detector phrase and presets. Their framing changes when they name a person
+# and the detector returns whole people (OWLv2 people-first): shots are cut
+# at body lines instead of scaling the box, and those the zoom ceiling cannot
+# reach are drawn at the ceiling and marked limited. On a guitarist half the
+# frame high, the second query's Full is now a 1.8x crop instead of the wide,
+# and its Tight needs about 9x, so it is drawn at its 6x ceiling and marked.
 [[queries]]
 name = "Speaker"
 prompt = "a person speaking at a lectern"

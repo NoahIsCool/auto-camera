@@ -27,7 +27,7 @@ pub mod model;
 pub mod prompt;
 
 pub use geometry::{Extent, Point, Rect};
-pub use lexicon::{Lexicon, LexiconError, Placement, RoleWord, ShotWord};
+pub use lexicon::{Lexicon, LexiconError, Placement, RoleWord, ShotWord, WordClass};
 pub use model::{
     Preset, Query, QueryId, Shot, ShotId, ShotSize, ShotTarget, Source, SourceId, Subject,
     SubjectId, TrackState,

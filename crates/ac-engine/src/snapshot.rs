@@ -59,6 +59,10 @@ pub struct ShotView {
     /// The preset's zoom ceiling keeps the shot looser than its size, as
     /// for a close-up of a distant person; the multiview labels it.
     pub limited_by_zoom: bool,
+    /// Another shot of the same subject this zoom-limited shot looks like
+    /// (both drawn at the ceiling); see
+    /// [`ShotEntry::same_picture_as`](crate::catalog::ShotEntry::same_picture_as).
+    pub same_picture_as: Option<ShotId>,
     /// Health.
     pub status: ShotStatus,
     /// The shot can be put on air.

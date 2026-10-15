@@ -383,6 +383,48 @@ fn punctuation_where_shot_words_were_cut_is_trimmed() {
 }
 
 #[test]
+fn quotes_and_brackets_around_cut_shot_words_never_reach_the_detector() {
+    for text in [
+        "guitar \"close-up\"",
+        "guitar <close-up>",
+        "guitar \u{AB}close-up\u{BB}",
+        "guitar *close-up*",
+        "guitar \u{201C}close-up\u{201D}",
+        "guitar `close-up`",
+        "guitar #closeup",
+        "\"close-up\" guitar",
+        "\u{AB}close-up\u{BB} guitar",
+        "<close-up> guitar",
+    ] {
+        assert_parse(text, "guitar", &[Close], Basis::Object);
+    }
+    // Balanced quotes in the subject stay.
+    assert_parse(
+        "\"lead guitar\" close-up",
+        "\"lead guitar\"",
+        &[Close],
+        Basis::Object,
+    );
+}
+
+#[test]
+fn plural_shot_words_count() {
+    for text in ["speaker close-ups", "speaker closeups", "speaker headshots"] {
+        assert_parse(text, "a person speaking", &[Close], Basis::Person);
+        assert!(parse(text).warnings.is_empty(), "{text}");
+    }
+    assert_parse("guitar CUs", "guitar", &[Close], Basis::Object);
+    assert_parse(
+        "drummer medium close-ups",
+        "a person playing drums",
+        &[MediumClose],
+        Basis::Person,
+    );
+    // "es" plurals do not: "cues" is not "CU".
+    assert_parse("pool cues", "pool cues", &[], Basis::Object);
+}
+
+#[test]
 fn prompts_without_shot_or_role_words_are_unchanged() {
     // The example configs, the README and the engine's tests.
     for text in [

@@ -36,15 +36,37 @@ fn shot_status_reads_like_a_caption() {
 
 #[test]
 fn zoom_limited_shots_are_labelled() {
+    let snap = snapshot();
     let mut shot = subject_shot("a", ShotStatus::Tracking, 0.9);
     shot.name = "Person 1 Close".into();
     assert_eq!(shot_title(&shot), "Person 1 Close");
-    assert!(!shot_hover(&shot).contains("limited"));
+    assert!(!shot_hover(&snap, &shot).contains("limited"));
     shot.limited_by_zoom = true;
     assert_eq!(shot_title(&shot), "Person 1 Close (limited)");
-    let hover = shot_hover(&shot);
+    let hover = shot_hover(&snap, &shot);
     assert!(hover.starts_with("a\nlimited: "), "{hover}");
     assert!(hover.ends_with("click: preview · double-click: cut"));
+}
+
+#[test]
+fn look_alike_shots_say_which_shot_they_match() {
+    let mut snap = snapshot();
+    let mut medium = subject_shot("stage/1/medium", ShotStatus::Tracking, 0.9);
+    medium.name = "Speaker 1 Medium".into();
+    medium.limited_by_zoom = true;
+    let mut chest = subject_shot("stage/1/medium_close", ShotStatus::Tracking, 0.9);
+    chest.name = "Speaker 1 Medium close".into();
+    chest.limited_by_zoom = true;
+    chest.same_picture_as = Some(medium.id.clone());
+    snap.shots.extend([medium, chest.clone()]);
+    let hover = shot_hover(&snap, &chest);
+    assert!(
+        hover.contains("looks the same as Speaker 1 Medium: both are drawn at the zoom ceiling"),
+        "{hover}"
+    );
+    // A twin that is gone is named by its id.
+    chest.same_picture_as = Some(ShotId("stage/1/gone".into()));
+    assert!(shot_hover(&snap, &chest).contains("same as stage/1/gone"));
 }
 
 #[test]

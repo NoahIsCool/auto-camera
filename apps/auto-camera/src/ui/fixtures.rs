@@ -53,6 +53,7 @@ pub fn subject_shot(id: &str, status: ShotStatus, quality: f32) -> ShotView {
         quality,
         settled: 1.0,
         limited_by_zoom: false,
+        same_picture_as: None,
         status,
         available: status != ShotStatus::Unavailable,
         tally: Tally::default(),

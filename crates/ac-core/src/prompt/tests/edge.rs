@@ -64,6 +64,12 @@ fn shot_words_alone_are_errors() {
     }
     let message = parse("close-up").summary();
     assert!(message.contains("\"close-up\"") && message.contains("speaker close-up"));
+    // An old config's "face" is told how to look for a face itself.
+    let message = parse("face").summary();
+    assert!(
+        message.contains("\"the face\"") && message.contains("literal"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -233,12 +239,14 @@ fn lexicon_entries_drive_the_parse() {
         sizes: vec![Medium],
         placement: Placement::Anywhere,
         note: None,
+        also: None,
     });
     lexicon.set_shot(ShotWord {
         phrase: "close up".into(),
         sizes: vec![MediumClose],
         placement: Placement::AfterSubject,
         note: Some("is a test caveat".into()),
+        also: None,
     });
     lexicon.set_role(RoleWord {
         word: "worship leader".into(),
@@ -266,18 +274,21 @@ fn malformed_lexicons_never_fail_the_parse() {
                 sizes: vec![Close],
                 placement: Placement::Anywhere,
                 note: None,
+                also: None,
             },
             ShotWord {
                 phrase: "close".into(),
                 sizes: vec![ShotSize::Wide],
                 placement: Placement::Anywhere,
                 note: None,
+                also: None,
             },
             ShotWord {
                 phrase: "and".into(),
                 sizes: vec![Close],
                 placement: Placement::Anywhere,
                 note: None,
+                also: None,
             },
         ],
         roles: vec![RoleWord {

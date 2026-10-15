@@ -37,12 +37,15 @@
 //!   "speaker's upper body at the lectern" when a preposition follows. The
 //!   possessive marker is dropped from the subject.
 //!
-//! Matching ignores case, folds typographic apostrophes, and treats spaces
-//! and hyphens inside a phrase as optional ("close-up", "close up",
-//! "closeup"). The longest phrase wins ("medium close" is one phrase, not
-//! "medium" and "close"). Several phrases may be listed, separated by
-//! nothing, punctuation, "and", "or" or "plus", and each may be followed by
-//! "shot" or "shots". Sizes are kept in the order typed, without repeats.
+//! Matching ignores case, folds typographic apostrophes, treats spaces and
+//! hyphens inside a phrase as optional ("close-up", "close up", "closeup")
+//! and accepts "s" plurals ("close-ups", "headshots"). The longest phrase
+//! wins ("medium close" is one phrase, not "medium" and "close"). Several
+//! phrases may be listed, separated by nothing, punctuation, "and", "or" or
+//! "plus", and each may be followed by "shot" or "shots". Sizes are kept in
+//! the order typed, without repeats. Separators, brackets and quotes left
+//! where shot words were cut off are trimmed from the subject
+//! ([`trim`]), so `guitar "close-up"` sends "guitar".
 //!
 //! A shot word right after an article or a preposition is a noun: "a face"
 //! looks for a face, "close-up of the face" is a close-up of a face. Such
@@ -50,6 +53,15 @@
 //! Shot words anywhere else are sent to the detector as typed, with a
 //! [`PromptWarning::InSubject`] notice, or [`PromptWarning::AfterSubjectOnly`]
 //! for words such as "wide" that count only after the subject.
+//!
+//! Some shot words are everyday words too ([`crate::WordClass`]). Where the
+//! everyday reading is likely, the shot size is still read, with a
+//! [`PromptWarning::MaybeMisread`] notice pointing at literal mode
+//! ([`notices`]): a modifier ("full", "close", "tight", "medium", "Ms") at
+//! the start right before the subject ("full band", "close friend", "Ms
+//! Smith"), a noun ("face", "bust") at the end right after a word that is
+//! not a person ("a rock face", "marble bust"), or a modifier at the end
+//! right after an "-ing" word ("a man standing close").
 //!
 //! **Roles** are rewritten only when the role word is the whole subject,
 //! after any articles ("the pastor", "guitarists"): the measured phrases are
@@ -76,9 +88,11 @@
 //! * Pure and total: no I/O, no clock, no panics, for any text and any
 //!   lexicon; time and memory grow linearly with the prompt.
 //! * A prompt without shot words or a whole role word parses to its own
-//!   trimmed text, so prompts written before shot words behave as before.
+//!   trimmed text, so prompts written before shot words keep their detector
+//!   phrase.
 //! * The subject is sliced from the typed text, keeping case and inner
-//!   punctuation; separators are trimmed only where shot words were cut.
+//!   punctuation; separators and stray wrappers are trimmed only where shot
+//!   words were cut.
 //! * `model_phrase` is empty exactly when the parse has an error.
 //! * `shots` never holds [`ShotSize::Wide`] nor a size twice.
 
@@ -86,15 +100,20 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::geometry::Extent;
 use crate::lexicon::Lexicon;
 use crate::model::ShotSize;
 
 mod head;
+mod notices;
 mod scan;
+mod trim;
 pub(crate) mod words;
 
 use head::{basis_of, role_of};
+use notices::{misreads, shot_words_in};
 use scan::{Match, Table};
+use trim::clean;
 use words::{CONNECTORS, DETERMINERS, JOINERS, LINK_WORDS, Token, is_in, phrase_key, tokenize};
 
 /// How shot sizes are measured on a subject.
@@ -113,6 +132,16 @@ impl Basis {
         match self {
             Basis::Person => "person",
             Basis::Object => "object",
+        }
+    }
+
+    /// What a box the detector marked `detected` is framed as on this
+    /// basis: a whole person only when the basis is a person too, else an
+    /// object (the fill rule). See [`crate::model`], "Basis and extent".
+    pub fn framing_extent(self, detected: Extent) -> Extent {
+        match self {
+            Basis::Person => detected,
+            Basis::Object => Extent::Object,
         }
     }
 }
@@ -149,6 +178,15 @@ pub enum PromptWarning {
         /// The phrases, as typed.
         phrases: Vec<String>,
     },
+    /// A shot word with an everyday reading ([`crate::WordClass`]) was
+    /// read as a shot size where that reading is likely: "full band",
+    /// "a rock face", "a man standing close".
+    MaybeMisread {
+        /// The shot phrase, as typed.
+        phrase: String,
+        /// The phrase with the word it may belong to, as typed.
+        words: String,
+    },
     /// A caveat the lexicon attaches to a shot word.
     Note {
         /// The phrase, as typed.
@@ -179,12 +217,16 @@ impl fmt::Display for PromptWarning {
                 "the prompt is empty: type who or what to look for, such as \"speaker\" or \
                  \"guitar\""
             ),
-            PromptWarning::NoSubject { phrases } => write!(
-                f,
-                "{} only names a shot size: add who or what to frame, such as \"speaker {}\"",
-                quoted(phrases),
-                phrases.first().map_or("close-up", String::as_str)
-            ),
+            PromptWarning::NoSubject { phrases } => {
+                let first = phrases.first().map_or("close-up", String::as_str);
+                write!(
+                    f,
+                    "{} only names a shot size: add who or what to frame, such as \"speaker \
+                     {first}\"; to look for \"{first}\" itself, write \"the {first}\" or send the \
+                     prompt as typed (literal)",
+                    quoted(phrases),
+                )
+            }
             PromptWarning::ReadAsSubject { phrases, after } => write!(
                 f,
                 "{} after \"{after}\" is read as part of what to look for, not as a shot size",
@@ -204,6 +246,11 @@ impl fmt::Display for PromptWarning {
                  \"drummer {}\"",
                 quoted(phrases),
                 phrases.first().map_or("wide", String::as_str)
+            ),
+            PromptWarning::MaybeMisread { phrase, words } => write!(
+                f,
+                "\"{phrase}\" is read as a shot size here; if \"{words}\" is what to look for, \
+                 send the prompt as typed (literal)"
             ),
             PromptWarning::Note { phrase, note } => write!(f, "\"{phrase}\" {note}"),
         }
@@ -405,6 +452,7 @@ pub fn parse_prompt(text: &str, lexicon: &Lexicon) -> ParsedPrompt {
             phrases: after_only,
         });
     }
+    warnings.extend(misreads(&table, text, &tokens, &lead, &trail, e));
     warnings.extend(notes.into_iter().map(|(phrase, note)| PromptWarning::Note {
         phrase: phrase.to_string(),
         note: note.to_string(),
@@ -507,64 +555,6 @@ fn sizes(table: &Table<'_>, found: &[Match]) -> Vec<ShotSize> {
         }
     }
     out
-}
-
-/// Separators trimmed from the end of a subject where shot words were cut
-/// after it.
-const SEPARATORS_BEFORE: &[char] = &[
-    ',', ';', ':', '.', '!', '?', '/', '+', '&', '|', '(', '[', '{', '-', '\u{2013}', '\u{2014}',
-];
-
-/// Separators trimmed from the start of a subject where shot words were cut
-/// before it.
-const SEPARATORS_AFTER: &[char] = &[
-    ',', ';', ':', '.', '!', '?', '/', '+', '&', '|', ')', ']', '}', '-', '\u{2013}', '\u{2014}',
-];
-
-/// `text` trimmed of whitespace, and of separators on the sides where shot
-/// words were cut.
-fn clean(text: &str, cut_before: bool, cut_after: bool) -> &str {
-    let mut text = text.trim();
-    if cut_before {
-        text =
-            text.trim_start_matches(|c: char| c.is_whitespace() || SEPARATORS_AFTER.contains(&c));
-    }
-    if cut_after {
-        text = text.trim_end_matches(|c: char| c.is_whitespace() || SEPARATORS_BEFORE.contains(&c));
-    }
-    text
-}
-
-/// Shot phrases left inside a subject, as typed, without repeats and
-/// without those whose keys are in `skip`: those that may count anywhere,
-/// and those that count only after a subject.
-fn shot_words_in(
-    table: &Table<'_>,
-    subject: &str,
-    words: &[Token],
-    skip: &[String],
-) -> (Vec<String>, Vec<String>) {
-    let (mut anywhere, mut after_only) = (Vec::new(), Vec::new());
-    let mut i = 0;
-    while i < words.len() {
-        match table.phrase_at(words, i, words.len(), true) {
-            Some(m) => {
-                let phrase = &subject[words[m.start].start..words[m.end - 1].end];
-                let key = phrase_key(phrase);
-                let list: &mut Vec<String> = if table.entry(m).after_subject {
-                    &mut after_only
-                } else {
-                    &mut anywhere
-                };
-                if !skip.contains(&key) && !list.iter().any(|f| phrase_key(f) == key) {
-                    list.push(phrase.to_string());
-                }
-                i = m.end;
-            }
-            None => i += 1,
-        }
-    }
-    (anywhere, after_only)
 }
 
 #[cfg(test)]

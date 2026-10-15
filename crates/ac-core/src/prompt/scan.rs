@@ -15,22 +15,25 @@
 //! and medium"). Runs are read forwards at the start of a prompt and after a
 //! possessive, and backwards at its end.
 //!
-//! Role and person words match by key too, with "s" and "es" plurals.
+//! Shot words match their "s" plurals too ("close-ups", "headshots",
+//! "CUs"), but not "es" ones, so "pool cues" holds no "CU". Role and person
+//! words match by key too, with "s" and "es" plurals.
 //!
 //! # Invariants
 //!
 //! * Entries [`crate::Lexicon::validate`] would reject are skipped, so a
 //!   malformed lexicon never makes matching fail.
 //! * For equal keys the later lexicon entry wins.
-//! * Every window is at most as long, in key bytes, as the longest key, so a
-//!   run costs time linear in its length whatever the prompt's length.
+//! * Every window is at most one byte longer, in key bytes, than the longest
+//!   key (room for a plural "s"), so a run costs time linear in its length
+//!   whatever the prompt's length.
 
 use std::collections::{HashMap, HashSet};
 
 use super::words::{
     FILLERS, JOINERS, Joint, Token, is_grammar_word, is_in, phrase_key, phrase_words,
 };
-use crate::lexicon::{Lexicon, Placement};
+use crate::lexicon::{Lexicon, Placement, WordClass};
 use crate::model::ShotSize;
 
 /// A usable shot word.
@@ -42,6 +45,8 @@ pub(super) struct Entry<'a> {
     pub(super) after_subject: bool,
     /// The caveat to show when it is used.
     pub(super) note: Option<&'a str>,
+    /// Its everyday reading, if any.
+    pub(super) also: Option<WordClass>,
 }
 
 /// A shot phrase found in a prompt.
@@ -86,6 +91,7 @@ impl<'a> Table<'a> {
                     sizes: &word.sizes,
                     after_subject: word.placement == Placement::AfterSubject,
                     note: word.note.as_deref(),
+                    also: word.also,
                 });
             }
         }
@@ -123,9 +129,13 @@ impl<'a> Table<'a> {
         &self.entries[m.entry]
     }
 
-    /// The entry for a window's key, if it may be used there.
+    /// The entry for a window's key or its "s" plural, if it may be used
+    /// there.
     fn lookup(&self, key: &str, allow_after: bool) -> Option<usize> {
-        let &entry = self.keys.get(key)?;
+        let &entry = self
+            .keys
+            .get(key)
+            .or_else(|| key.strip_suffix('s').and_then(|k| self.keys.get(k)))?;
         (allow_after || !self.entries[entry].after_subject).then_some(entry)
     }
 
@@ -152,7 +162,7 @@ impl<'a> Table<'a> {
                 break;
             }
             key.push_str(&last.core);
-            if key.len() > self.max_key_len {
+            if key.len() > self.max_key_len + 1 {
                 break;
             }
             if let Some(entry) = self.lookup(&key, allow_after)
@@ -173,7 +183,7 @@ impl<'a> Table<'a> {
                 break;
             }
             key.insert_str(0, &tokens[start].core);
-            if key.len() > self.max_key_len {
+            if key.len() > self.max_key_len + 1 {
                 break;
             }
             if let Some(entry) = self.lookup(&key, true)
@@ -300,6 +310,17 @@ mod tests {
     }
 
     #[test]
+    fn shot_words_match_their_s_plurals_only() {
+        assert_eq!(trailing("x close-ups"), ["close-ups"]);
+        assert_eq!(trailing("x closeups"), ["closeups"]);
+        assert_eq!(trailing("x headshots"), ["headshots"]);
+        assert_eq!(trailing("x CUs"), ["CUs"]);
+        assert_eq!(trailing("x medium close-ups"), ["medium close-ups"]);
+        assert!(trailing("pool cues").is_empty());
+        assert!(trailing("x close-upss").is_empty());
+    }
+
+    #[test]
     fn compounds_are_not_cut() {
         assert!(trailing("x full-time").is_empty());
         assert!(trailing("x semi-close").is_empty());
@@ -325,18 +346,21 @@ mod tests {
                     sizes: vec![ShotSize::Close],
                     placement: Placement::Anywhere,
                     note: None,
+                    also: None,
                 },
                 ShotWord {
                     phrase: "snug".into(),
                     sizes: vec![ShotSize::Wide],
                     placement: Placement::Anywhere,
                     note: None,
+                    also: None,
                 },
                 ShotWord {
                     phrase: "of".into(),
                     sizes: vec![ShotSize::Close],
                     placement: Placement::Anywhere,
                     note: None,
+                    also: None,
                 },
             ],
             roles: vec![RoleWord {

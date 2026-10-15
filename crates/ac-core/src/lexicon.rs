@@ -13,7 +13,9 @@
 //!
 //! * [`ShotWord`]s map phrases ("close-up", "upper body") to
 //!   [`ShotSize`]s. The built-in table is design §4.2's; Noah decides the
-//!   mappings.
+//!   mappings. A shot word that is also an everyday word ([`WordClass`]:
+//!   "full band", "a rock face") is marked so, and the parser tells the
+//!   operator when it may have misread one.
 //! * [`RoleWord`]s rewrite a role ("speaker") into the phrase a detector
 //!   understands ("a person speaking"). Every entry is a hypothesis until it
 //!   is benchmarked: "a person speaking" is measured on SAM 3.1 only (10/20
@@ -55,6 +57,19 @@ pub enum Placement {
     AfterSubject,
 }
 
+/// The everyday reading a shot word also has, which the parser may have
+/// taken for a shot size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WordClass {
+    /// Also an adjective or a title before a noun ("full band", "close
+    /// friend", "tight end", "Ms Smith"), or an adverb after a verb ("a man
+    /// standing close").
+    Modifier,
+    /// Also a noun after another noun ("a rock face", "marble bust").
+    Noun,
+}
+
 /// A phrase that names shot sizes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +85,10 @@ pub struct ShotWord {
     /// A caveat shown to the operator whenever the phrase is used.
     #[serde(default)]
     pub note: Option<String>,
+    /// The everyday reading the phrase also has, if any; the parser adds a
+    /// notice where that reading is likely (`PromptWarning::MaybeMisread`).
+    #[serde(default)]
+    pub also: Option<WordClass>,
 }
 
 /// A role and the phrase a detector is asked for instead.
@@ -115,39 +134,41 @@ pub enum LexiconError {
     EmptyPhrase(String),
 }
 
-/// Built-in shot words: design §4.2's table. Cut lines and head-height
-/// multiples behind each size are estimates (see `ShotSize`); the word
-/// lists are proposals until Noah confirms them. "medium close-up" is
-/// listed so that, with hyphens optional, the longest match beats
-/// "close-up" in "speaker medium close-up".
-const SHOT_WORDS: &[(&str, &[ShotSize])] = {
+/// Built-in shot words: design §4.2's table, with the everyday reading of
+/// each word that has one. Cut lines and head-height multiples behind each
+/// size are estimates (see `ShotSize`); the word lists are proposals until
+/// Noah confirms them. "medium close-up" is listed so that, with hyphens
+/// optional, the longest match beats "close-up" in "speaker medium
+/// close-up". Plurals ("close-ups", "headshots") match without being listed.
+const SHOT_WORDS: &[(&str, &[ShotSize], Option<WordClass>)] = {
     use ShotSize::{Close, Full, Medium, MediumClose};
+    use WordClass::{Modifier, Noun};
     &[
-        ("close", &[Close]),
-        ("close-up", &[Close]),
-        ("cu", &[Close]),
-        ("head and shoulders", &[Close]),
-        ("headshot", &[Close]),
-        ("tight", &[Close]),
-        ("face", &[Close]),
-        ("medium close", &[MediumClose]),
-        ("medium close-up", &[MediumClose]),
-        ("mcu", &[MediumClose]),
-        ("chest up", &[MediumClose]),
-        ("bust", &[MediumClose]),
-        ("medium", &[Medium]),
-        ("mid shot", &[Medium]),
-        ("ms", &[Medium]),
-        ("waist up", &[Medium]),
+        ("close", &[Close], Some(Modifier)),
+        ("close-up", &[Close], None),
+        ("cu", &[Close], None),
+        ("head and shoulders", &[Close], None),
+        ("headshot", &[Close], Some(Noun)),
+        ("tight", &[Close], Some(Modifier)),
+        ("face", &[Close], Some(Noun)),
+        ("medium close", &[MediumClose], None),
+        ("medium close-up", &[MediumClose], None),
+        ("mcu", &[MediumClose], None),
+        ("chest up", &[MediumClose], None),
+        ("bust", &[MediumClose], Some(Noun)),
+        ("medium", &[Medium], Some(Modifier)),
+        ("mid shot", &[Medium], None),
+        ("ms", &[Medium], Some(Modifier)),
+        ("waist up", &[Medium], None),
         // Waist-up and chest-up both, until Noah picks one (design §8 item 6).
-        ("upper body", &[Medium, MediumClose]),
-        ("half body", &[Medium, MediumClose]),
-        ("full", &[Full]),
-        ("full body", &[Full]),
-        ("full length", &[Full]),
-        ("head to toe", &[Full]),
-        ("long shot", &[Full]),
-        ("fs", &[Full]),
+        ("upper body", &[Medium, MediumClose], None),
+        ("half body", &[Medium, MediumClose], None),
+        ("full", &[Full], Some(Modifier)),
+        ("full body", &[Full], None),
+        ("full length", &[Full], None),
+        ("head to toe", &[Full], None),
+        ("long shot", &[Full], None),
+        ("fs", &[Full], None),
     ]
 };
 
@@ -210,11 +231,12 @@ impl Lexicon {
         let mut lexicon = Self {
             shots: SHOT_WORDS
                 .iter()
-                .map(|(phrase, sizes)| ShotWord {
+                .map(|(phrase, sizes, also)| ShotWord {
                     phrase: (*phrase).into(),
                     sizes: sizes.to_vec(),
                     placement: Placement::Anywhere,
                     note: None,
+                    also: *also,
                 })
                 .collect(),
             roles: ROLE_WORDS
@@ -231,6 +253,7 @@ impl Lexicon {
             sizes: vec![ShotSize::Full],
             placement: Placement::AfterSubject,
             note: Some(WIDE_NOTE.into()),
+            also: None,
         });
         lexicon
     }
@@ -342,6 +365,14 @@ mod tests {
                 assert_eq!(word.placement, Placement::Anywhere, "{phrase}");
             }
         }
+        let also = |phrase: &str| shot(&lexicon, phrase).and_then(|w| w.also);
+        for phrase in ["close", "tight", "full", "medium", "ms"] {
+            assert_eq!(also(phrase), Some(WordClass::Modifier), "{phrase}");
+        }
+        for phrase in ["face", "bust", "headshot"] {
+            assert_eq!(also(phrase), Some(WordClass::Noun), "{phrase}");
+        }
+        assert_eq!(also("close-up"), None);
         let wide = shot(&lexicon, "wide").expect("wide");
         assert_eq!(wide.sizes, [Full]);
         assert_eq!(wide.placement, Placement::AfterSubject);
@@ -376,6 +407,7 @@ mod tests {
             sizes: vec![MediumClose],
             placement: Placement::Anywhere,
             note: None,
+            also: None,
         });
         assert_eq!(lexicon.shots.len(), before);
         assert_eq!(
@@ -387,6 +419,7 @@ mod tests {
             sizes: vec![Medium],
             placement: Placement::Anywhere,
             note: None,
+            also: None,
         });
         assert_eq!(lexicon.shots.len(), before + 1);
     }
@@ -418,6 +451,7 @@ mod tests {
             sizes: sizes.to_vec(),
             placement: Placement::Anywhere,
             note: None,
+            also: None,
         };
         let with_shot = |w: ShotWord| Lexicon {
             shots: vec![w],

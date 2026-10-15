@@ -6,26 +6,35 @@
 //!
 //! * one wide shot per source, then
 //! * for every subject of that source (ascending id) that is visible or on
-//!   air, one shot per preset it is given: those of its primary query, and
-//!   for an on-air subject also those of the shots it already has (the
-//!   engine core keeps them until it leaves the air).
+//!   air, one shot per [`ShotPlan`] the engine core gives it: the presets of
+//!   every query the subject answers (its primary query first, then its
+//!   aliases, de-duplicated by preset id), and for an on-air subject also
+//!   those of the shots it already has (kept until it leaves the air).
 //!
 //! Shot ids are derived from what they frame, `"<source>/wide"` and
 //! `"<source>/<subject>/<preset>"`, so they are stable for the life of a
 //! subject, and an entry that survives a sync keeps its framing state. A
 //! subject id is never reused within a source, so an id never silently
-//! changes meaning.
+//! changes meaning. A subject shot is named after the query whose preset
+//! made it: "Speaker 1 Close".
 //!
-//! Each subject shot owns a [`ShotFramer`]. Per tick, [`Catalog::step`]
-//! asks it to aim at the subject's box and extent ([`ShotFramer::aim`]:
-//! the fill rule for objects, body cut lines for whole people, with the
-//! shot's remembered head height) while the subject is tracking, and feeds
-//! it nothing while it is lost (the framer then holds). A new shot starts
-//! framed on its subject the same way ([`compose_subject`]). Each entry
-//! reports whether its shot is held back by its preset's zoom ceiling
-//! ([`ShotEntry::limited_by_zoom`]), so the operator sees a close-up that
-//! cannot be one labelled as such. It also scores the shot for the
-//! director:
+//! Each subject shot owns a [`ShotFramer`] and has a [`Basis`], that of the
+//! query its plan came from (the engine core keeps the basis of an on-air
+//! shot fixed, so removing or promoting a query never changes how a live
+//! shot is measured). Per tick, [`Catalog::step`] asks the framer to aim at
+//! the subject's box ([`ShotFramer::aim`]) while the subject is tracking,
+//! and feeds it nothing while it is lost (the framer then holds). The box
+//! is framed as a whole person, cut at body lines with the shot's
+//! remembered head height, only when the shot's basis is a person and the
+//! detector marked the box a whole person ([`Basis::framing_extent`]);
+//! otherwise it keeps the fill rule. A new shot starts framed on its subject
+//! the same way ([`compose_subject`]). Each entry reports whether its shot
+//! is held back by its preset's zoom ceiling ([`ShotEntry::limited_by_zoom`]),
+//! so the operator sees a close-up that cannot be one labelled as such, and
+//! whether that leaves it looking like another of its subject's shots
+//! ([`ShotEntry::same_picture_as`]): two sizes that both need more zoom than
+//! the ceiling allows are both drawn at the ceiling, and differ only by
+//! their headroom. It also scores the shot for the director:
 //!
 //! ```text
 //! settled = clamp(1 - max(|dx| / w, |dy| / h, |ln(w* / w)|) / SETTLE_TOLERANCE, 0, 1)
@@ -41,12 +50,18 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use ac_core::{Extent, Point, Preset, Rect, Shot, ShotId, ShotTarget, SourceId, SubjectId};
+use ac_core::{Basis, Extent, Point, Preset, Rect, Shot, ShotId, ShotTarget, SourceId, SubjectId};
 use ac_framing::{Composition, FramerConfig, ShotFramer, SubjectGeometry, compose_subject};
 use serde::{Deserialize, Serialize};
 
 /// Framing error, in crop sizes, at which a shot counts as fully unsettled.
 pub const SETTLE_TOLERANCE: f64 = 0.25;
+
+/// Overlap (IoU) of two zoom-limited crops of one subject above which they
+/// count as the same picture ([`ShotEntry::same_picture_as`]). Two sizes
+/// drawn at the same ceiling overlap by about 0.98: they differ only by the
+/// gap between their headrooms.
+pub const SAME_PICTURE_IOU: f64 = 0.9;
 
 /// Id of the wide shot of `source`.
 pub fn wide_shot_id(source: &SourceId) -> ShotId {
@@ -81,26 +96,39 @@ pub struct ShotSpec {
     pub source: usize,
     /// The preset of a subject shot.
     pub preset: Option<Preset>,
+    /// How the shot measures sizes; [`Basis::Object`] for wides.
+    pub basis: Basis,
     /// The subject's box when the shot is created.
     pub initial: Rect,
-    /// What `initial` covers.
+    /// What the detector says `initial` covers.
     pub extent: Extent,
+}
+
+/// One shot a subject should have: a preset and the query that asks for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShotPlan {
+    /// The framing.
+    pub preset: Preset,
+    /// How the query measures shot sizes: on [`Basis::Person`] a box the
+    /// detector marked a whole person is cut at body lines, on
+    /// [`Basis::Object`] every box keeps the fill rule.
+    pub basis: Basis,
+    /// The query's operator-facing name (the query id for the kept shot of
+    /// an on-air orphan).
+    pub query_name: String,
 }
 
 /// A subject as the catalog needs it.
 #[derive(Debug, Clone)]
-pub struct SubjectShots<'a> {
+pub struct SubjectShots {
     /// The subject.
     pub id: SubjectId,
     /// Its current box.
     pub bbox: Rect,
-    /// What the box covers.
+    /// What the detector says the box covers.
     pub extent: Extent,
-    /// Name of its primary query (its id, for an on-air orphan).
-    pub query_name: &'a str,
-    /// Presets to make shots for: its primary query's, plus, while it is on
-    /// air, those of the shots it already has.
-    pub presets: &'a [Preset],
+    /// Shots to make, in order, with unique preset ids; see the module docs.
+    pub plans: Vec<ShotPlan>,
 }
 
 /// A source as the catalog needs it.
@@ -111,7 +139,7 @@ pub struct SourceShots<'a> {
     /// Operator-facing name.
     pub name: &'a str,
     /// Subjects to make shots for, ascending id.
-    pub subjects: Vec<SubjectShots<'a>>,
+    pub subjects: Vec<SubjectShots>,
 }
 
 /// The shots that should exist, in display order; see the module docs.
@@ -135,18 +163,20 @@ pub fn desired_shots(sources: &[SourceShots<'_>]) -> Vec<ShotSpec> {
             },
             source: index,
             preset: None,
+            basis: Basis::Object,
             initial: Rect::FULL,
             extent: Extent::Object,
         });
         for subject in &s.subjects {
-            for preset in subject.presets {
+            for plan in &subject.plans {
+                let preset = &plan.preset;
                 out.push(ShotSpec {
                     shot: Shot {
                         id: subject_shot_id(s.id, subject.id, &preset.id),
                         name: format!(
                             "{}{} {} {}",
                             prefix(s.name),
-                            subject.query_name,
+                            plan.query_name,
                             subject.id.0,
                             preset.name
                         ),
@@ -158,6 +188,7 @@ pub fn desired_shots(sources: &[SourceShots<'_>]) -> Vec<ShotSpec> {
                     },
                     source: index,
                     preset: Some(preset.clone()),
+                    basis: plan.basis,
                     initial: subject.bbox,
                     extent: subject.extent,
                 });
@@ -181,7 +212,8 @@ pub struct SourceFacts {
 pub struct SubjectFacts {
     /// Current box.
     pub bbox: Rect,
-    /// What the box covers.
+    /// What the detector says the box covers; each shot's basis decides
+    /// how it is framed ([`Basis::framing_extent`]).
     pub extent: Extent,
     /// The subject is tracking (not lost).
     pub tracking: bool,
@@ -200,6 +232,9 @@ pub struct ShotEntry {
     pub subject: Option<SubjectId>,
     /// The preset, for subject shots.
     pub preset: Option<Preset>,
+    /// How the shot measures sizes, from the query that asked for it;
+    /// [`Basis::Object`] for wides. See the module docs.
+    pub basis: Basis,
     /// Smooth framing state, for subject shots.
     framer: Option<ShotFramer>,
     /// Current crop in normalized source coordinates.
@@ -207,9 +242,15 @@ pub struct ShotEntry {
     /// How close the crop is to its ideal, in `0..=1`.
     pub settled: f64,
     /// The preset's zoom ceiling keeps the shot looser than its size (the
-    /// newest ideal crop's verdict, held while the subject is lost). Always
-    /// false for wides.
+    /// newest ideal crop's verdict, with hysteresis, held while the subject
+    /// is lost). Always false for wides.
     pub limited_by_zoom: bool,
+    /// For a zoom-limited shot whose crop is nearly that of another shot of
+    /// the same subject (overlap above [`SAME_PICTURE_IOU`]): that shot, an
+    /// earlier one in display order or one that is not limited itself, so
+    /// each look-alike pair is marked once. Cutting between the two changes
+    /// almost nothing; see the module docs.
+    pub same_picture_as: Option<ShotId>,
     /// Director quality in `0..=1`.
     pub quality: f32,
     /// The shot can be put on air.
@@ -236,6 +277,7 @@ pub fn wide_crop(source_aspect: f64, output_aspect: f64) -> Rect {
         center: Point { x: 0.5, y: 0.5 },
         width: ac_framing::compose::max_width(source_aspect, output_aspect),
         limited_by_zoom: false,
+        zoom_fit: f64::INFINITY,
     }
     .rect(source_aspect, output_aspect)
 }
@@ -299,8 +341,8 @@ impl Catalog {
     }
 
     /// Reconciles the entries with `specs`: existing ids keep their framing
-    /// state and take the spec's name and preset, new ids start framed on
-    /// their subject, missing ids are dropped.
+    /// state and take the spec's name, preset and basis, new ids start
+    /// framed on their subject, missing ids are dropped.
     /// Returns the ids added and removed.
     pub fn sync(
         &mut self,
@@ -324,6 +366,7 @@ impl Catalog {
                     // new framing.
                     e.shot = spec.shot;
                     e.preset = spec.preset;
+                    e.basis = spec.basis;
                     e
                 }
                 None => {
@@ -360,7 +403,8 @@ impl Catalog {
             let facts = e.subject.and_then(|id| subject(e.source, id));
             match (&mut e.framer, &e.preset, facts) {
                 (Some(framer), Some(preset), Some(f)) if f.tracking => {
-                    let target = framer.aim(&f.bbox, f.extent, preset, dt);
+                    let extent = e.basis.framing_extent(f.extent);
+                    let target = framer.aim(&f.bbox, extent, preset, dt);
                     let current = framer.step(Some(target), dt);
                     e.crop = current.rect(src.aspect, output_aspect);
                     e.limited_by_zoom = current.limited_by_zoom;
@@ -390,6 +434,27 @@ impl Catalog {
                 e.status = ShotStatus::Unavailable;
             }
         }
+        self.mark_same_pictures();
+    }
+
+    /// Sets [`ShotEntry::same_picture_as`] on every entry; see there.
+    fn mark_same_pictures(&mut self) {
+        for i in 0..self.entries.len() {
+            let e = &self.entries[i];
+            let twin = (e.limited_by_zoom && e.subject.is_some())
+                .then(|| {
+                    self.entries.iter().enumerate().find(|&(j, o)| {
+                        j != i
+                            && (j < i || !o.limited_by_zoom)
+                            && o.source == e.source
+                            && o.subject == e.subject
+                            && o.crop.iou(&e.crop) > SAME_PICTURE_IOU
+                    })
+                })
+                .flatten()
+                .map(|(_, o)| o.shot.id.clone());
+            self.entries[i].same_picture_as = twin;
+        }
     }
 }
 
@@ -406,7 +471,8 @@ fn new_entry(
         ShotTarget::Wide { .. } => None,
     };
     let framer = spec.preset.as_ref().map(|p| {
-        let subject = SubjectGeometry::new(spec.initial, spec.extent);
+        let extent = spec.basis.framing_extent(spec.extent);
+        let subject = SubjectGeometry::new(spec.initial, extent);
         let initial = compose_subject(&subject, p, aspect, output_aspect);
         ShotFramer::new(*framing, initial, aspect, output_aspect)
     });
@@ -420,10 +486,12 @@ fn new_entry(
         source: spec.source,
         subject,
         preset: spec.preset,
+        basis: spec.basis,
         framer,
         crop,
         settled: 1.0,
         limited_by_zoom,
+        same_picture_as: None,
         quality: 0.0,
         available: false,
         status: ShotStatus::Unavailable,

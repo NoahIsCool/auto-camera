@@ -67,7 +67,7 @@ pub(super) fn basis_of(table: &Table<'_>, words: &[Token]) -> Basis {
 
 /// True for an "-ing" word long enough to be a participle ("playing", but
 /// not "ring" or "thing").
-fn is_participle(word: &str) -> bool {
+pub(super) fn is_participle(word: &str) -> bool {
     word.strip_suffix("ing")
         .is_some_and(|stem| stem.chars().count() >= 3)
 }

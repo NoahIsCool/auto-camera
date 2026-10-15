@@ -39,8 +39,11 @@ line says how it reads, for example "Detector sees: a person speaking ·
 Framing: Medium, Medium close (person)", and the framing checkboxes follow
 the prompt's shot words until you tick one yourself (see
 [Prompts](#prompts)). A tile whose preset's zoom ceiling keeps it looser
-than its size is labelled, for example "Speaker 1 Close (limited)". The
-status bar shows source frame rates, tick timing and dropped frames.
+than its size carries an amber LIMITED badge in the corner of its picture,
+and the monitors and the director's suggestion name it "Speaker 1 Close
+(limited)"; its hover text says when it looks the same as another of the
+subject's shots (two sizes both drawn at the ceiling). The status bar shows
+source frame rates, tick timing and dropped frames.
 
 | Input | Action |
 |---|---|
@@ -158,13 +161,17 @@ operator's text, only what the parser makes of it:
 | `a person playing guitar` | a person playing guitar | the query's presets (person) |
 
 - **Shot words** count at either end of the prompt or right after a
-  possessive, in any case, with or without hyphens: close, close-up, CU,
-  head and shoulders, headshot, tight, face (Close); medium close, MCU,
-  chest up, bust (Medium close); medium, mid shot, MS, waist up (Medium);
-  upper body, half body (Medium and Medium close, until Noah picks one);
-  full, full body, full length, head to toe, long shot, FS (Full); and
-  "wide" after a subject (Full for now; framing the subject with its kit is
-  later work). A prompt that is only shot words is refused.
+  possessive, in any case, with or without hyphens, singular or plural
+  ("close-ups"): close, close-up, CU, head and shoulders, headshot, tight,
+  face (Close); medium close, MCU, chest up, bust (Medium close); medium,
+  mid shot, MS, waist up (Medium); upper body, half body (Medium and Medium
+  close, until Noah picks one); full, full body, full length, head to toe,
+  long shot, FS (Full); and "wide" after a subject (Full for now; framing
+  the subject with its kit is later work). A prompt that is only shot words
+  is refused: write "the face", or set `literal = true`, to look for a face
+  itself. Where a shot word may be an everyday word ("full band", "a rock
+  face", "Ms Smith") the parse says so; `literal = true` sends such a prompt
+  as typed.
 - **Role words** are rewritten when they are the whole subject: speaker,
   pastor and preacher become "a person speaking", guitarist "a person
   playing guitar", drummer "a person playing drums", singer "a person
@@ -173,10 +180,20 @@ operator's text, only what the parser makes of it:
   as a person: on a whole-person box, shots are cut at body lines measured
   in head heights from the crown (Close at the shoulders, Medium at the
   waist), with the head estimated from body proportions. Anything else
-  ("guitar close-up") scales its box, as before.
+  ("guitar close-up") scales its box, as before, even when people-first
+  matching answers it with the whole player: until the guitar's own box is
+  attached, that "Close" is the player's full length and is not marked.
 - **Presets.** A query's explicit `presets` always win over its shot words;
   with neither it gets medium and close. `literal = true` sends the prompt
-  as typed. Prompts without shot or role words behave as they always did.
+  as typed. Prompts without shot or role words keep their detector phrase
+  and presets; if they name a person and the detector returns whole people,
+  their shots are now cut at body lines too, and may be marked limited.
+- **One subject, several queries.** Prompts that ask the detector for the
+  same thing ("speaker close-up" and "speaker wide" both ask for "a person
+  speaking") find the same person, who becomes one subject answering both
+  queries and gets the shots of both, each named after its query ("Speaker
+  tight 1 Close"). A shot on air keeps how it is framed when its query is
+  removed or replaced.
 - **Lexicon.** The words are data. A `[lexicon]` table adds entries or
   replaces built-in ones: `roles = [{ word = "worship leader", phrase = "a
   person singing" }]`, `shots = [{ phrase = "upper body", sizes =

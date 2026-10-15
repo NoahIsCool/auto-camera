@@ -41,9 +41,16 @@ pub fn clock(d: Duration) -> String {
 /// Marks a shot whose preset's zoom ceiling keeps it looser than its size.
 pub const LIMITED: &str = "(limited)";
 
-/// A shot's name as its multiview tile shows it: marked [`LIMITED`] when the
-/// zoom ceiling keeps it from its size, as for "Person 1 Close (limited)" on
-/// a distant speaker, so the operator never takes it for a true close-up.
+/// The multiview tile's badge for such a shot. It is drawn in the corner of
+/// the picture, apart from the caption, so a long name never pushes it out
+/// of a narrow tile.
+pub const LIMITED_BADGE: &str = "LIMITED";
+
+/// A shot's name marked [`LIMITED`] when the zoom ceiling keeps it from its
+/// size, as for "Person 1 Close (limited)" on a distant speaker, so the
+/// operator never takes it for a true close-up. The monitors and the
+/// director's suggestion show it; a multiview tile shows the plain name and
+/// [`LIMITED_BADGE`].
 pub fn shot_title(shot: &ShotView) -> String {
     if shot.limited_by_zoom {
         format!("{} {LIMITED}", shot.name)
@@ -52,15 +59,21 @@ pub fn shot_title(shot: &ShotView) -> String {
     }
 }
 
-/// A shot tile's hover text: its id, why it is limited if it is, and what
-/// clicks do.
-pub fn shot_hover(shot: &ShotView) -> String {
-    let limited = if shot.limited_by_zoom {
-        "\nlimited: the preset's max zoom stops this shot reaching its size"
-    } else {
-        ""
-    };
-    format!("{}{limited}\nclick: preview · double-click: cut", shot.id.0)
+/// A shot tile's hover text: its id, why it is limited if it is, which of
+/// its subject's shots it looks the same as, and what clicks do.
+pub fn shot_hover(snap: &EngineSnapshot, shot: &ShotView) -> String {
+    let mut text = shot.id.0.clone();
+    if shot.limited_by_zoom {
+        text.push_str("\nlimited: the preset's max zoom stops this shot reaching its size");
+    }
+    if let Some(twin) = &shot.same_picture_as {
+        let name = snap.shot(twin).map_or(twin.0.as_str(), |s| s.name.as_str());
+        text.push_str(&format!(
+            "\nlooks the same as {name}: both are drawn at the zoom ceiling"
+        ));
+    }
+    text.push_str("\nclick: preview · double-click: cut");
+    text
 }
 
 /// A shot's health and quality, as on its multiview caption.

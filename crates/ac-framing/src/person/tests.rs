@@ -169,39 +169,93 @@ fn squat_boxes_look_truncated_judged_in_pixels() {
     assert!(!looks_truncated(&b, -2.0));
 }
 
+/// The person of [`half_frame_person`] behind a lectern that hides them
+/// from the waist down: a squat box, crown in the same place.
+fn behind_lectern() -> Rect {
+    Rect::new(0.45, 0.3, 0.1, 0.22)
+}
+
+/// `bbox` as a person whose shot remembers a head of `head`.
+fn remembering(bbox: Rect, head: f64) -> SubjectGeometry {
+    SubjectGeometry {
+        remembered_head: Some(head),
+        ..SubjectGeometry::new(bbox, Extent::Person)
+    }
+}
+
 #[test]
-fn a_known_head_height_survives_truncation() {
+fn a_remembered_head_survives_truncation() {
     let standing = half_frame_person();
-    let hidden = Rect::new(0.45, 0.3, 0.1, 0.7);
+    let hidden = behind_lectern();
     assert!(looks_truncated(&hidden, HD));
     let head = standing.h / HEADS_PER_BODY;
     for size in SIZES {
         let p = preset(size);
-        let remembered = SubjectGeometry {
-            head_height: Some(head),
-            ..SubjectGeometry::new(hidden, Extent::Person)
-        };
         assert_eq!(
-            compose_subject(&remembered, &p, HD, HD),
+            compose_subject(&remembering(hidden, head), &p, HD, HD),
             person_crop(standing, &p, HD, HD),
             "{size:?}"
         );
     }
-    // A usable known head wins over the box's own proportions, an unusable
-    // one is ignored.
+    // An unusable memory is no memory: the fill rule.
     let p = unlimited(ShotSize::Close);
-    let given = |h| SubjectGeometry {
-        head_height: Some(h),
-        ..SubjectGeometry::new(standing, Extent::Person)
-    };
-    let smaller = compose_subject(&given(head / 2.0), &p, HD, HD);
-    assert!((smaller.width - person_crop(standing, &p, HD, HD).width / 2.0).abs() < 1e-12);
     for bad in [f64::NAN, 0.0, -0.1, f64::INFINITY] {
         assert_eq!(
-            compose_subject(&given(bad), &p, HD, HD),
-            person_crop(standing, &p, HD, HD),
+            compose_subject(&remembering(hidden, bad), &p, HD, HD),
+            compose(&hidden, &p, HD, HD),
             "{bad}"
         );
+    }
+}
+
+#[test]
+fn a_truncated_box_is_never_sized_below_what_it_shows() {
+    // Walked toward the camera until the feet left the picture: 0.8 of the
+    // body is visible, so the head is at least 0.8 / 7.5, whatever the
+    // memory says.
+    let cut_off = Rect::new(0.4, 0.2, 0.2, 0.8);
+    assert!(looks_truncated(&cut_off, HD));
+    let bound = visible_head(&cut_off).unwrap();
+    assert!((bound - 0.8 / HEADS_PER_BODY).abs() < 1e-12);
+    for size in SIZES {
+        let p = unlimited(size);
+        let stale = compose_subject(&remembering(cut_off, 0.05), &p, HD, HD);
+        assert_eq!(
+            stale,
+            compose_person(&cut_off, bound, &p, HD, HD),
+            "{size:?}"
+        );
+        let larger = compose_subject(&remembering(cut_off, 0.2), &p, HD, HD);
+        assert_eq!(
+            larger,
+            compose_person(&cut_off, 0.2, &p, HD, HD),
+            "{size:?}"
+        );
+    }
+    let full = compose_subject(
+        &remembering(cut_off, 0.05),
+        &unlimited(ShotSize::Full),
+        HD,
+        HD,
+    );
+    assert!(full.rect(HD, HD).bottom() >= cut_off.bottom() - 1e-9);
+    assert_eq!(visible_head(&Rect::new(0.4, 0.2, 0.2, 0.0)), None);
+    assert_eq!(visible_head(&Rect::new(0.4, f64::NAN, 0.2, 0.5)), None);
+}
+
+#[test]
+fn an_untruncated_box_ignores_the_memory() {
+    // Full is the whole box, however stale the memory.
+    let standing = half_frame_person();
+    for head in [0.01, 0.05, 0.3] {
+        for size in SIZES {
+            let p = unlimited(size);
+            assert_eq!(
+                compose_subject(&remembering(standing, head), &p, HD, HD),
+                person_crop(standing, &p, HD, HD),
+                "{size:?} {head}"
+            );
+        }
     }
 }
 
@@ -254,7 +308,7 @@ fn degenerate_inputs_give_finite_crops() {
                             let g = SubjectGeometry {
                                 bbox: b,
                                 extent,
-                                head_height,
+                                remembered_head: head_height,
                             };
                             let c = compose_subject(&g, p, src, out);
                             let r = c.rect(src, out);
@@ -273,16 +327,21 @@ fn degenerate_inputs_give_finite_crops() {
 }
 
 #[test]
-fn the_memory_seeds_smooths_and_ignores_truncated_boxes() {
+fn the_memory_seeds_smooths_and_only_rises_on_truncated_boxes() {
     let mut m = HeadMemory::new();
     assert_eq!(m.get(), None);
     // Truncated boxes cannot seed it.
-    let hidden = Rect::new(0.45, 0.3, 0.1, 0.7);
-    assert_eq!(m.observe(&hidden, HD, 5.0, 0.1), None);
+    let cut_off = Rect::new(0.45, 0.3, 0.1, 0.7);
+    assert!(looks_truncated(&cut_off, HD));
+    assert_eq!(m.observe(&cut_off, HD, 5.0, 0.1), None);
     let head = 0.5 / HEADS_PER_BODY;
     assert_eq!(m.observe(&half_frame_person(), HD, 5.0, 0.1), Some(head));
-    // Nor move it once seeded.
-    assert_eq!(m.observe(&hidden, HD, 5.0, 10.0), Some(head));
+    // Nor lower it once seeded.
+    assert_eq!(m.observe(&behind_lectern(), HD, 5.0, 10.0), Some(head));
+    // A truncated box showing more body raises it, smoothed.
+    let mut raised = m;
+    let up = raised.observe(&cut_off, HD, 5.0, 5.0).unwrap();
+    assert!((up - (head + 0.7 / HEADS_PER_BODY) / 2.0).abs() < 1e-12);
     // One half-life moves it half way; a zero half-life follows at once.
     let taller = Rect::new(0.45, 0.2, 0.1, 0.6);
     let half = m.observe(&taller, HD, 5.0, 5.0).unwrap();

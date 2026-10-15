@@ -16,11 +16,14 @@
 //! Two facts decide how a subject's shots are composed. The query's basis is
 //! what the operator asked to frame; a subject's [`Extent`] is what the
 //! detector's box covers. Shots are cut at body lines only when both say
-//! person ([`Query::framing_extent`]). An object prompt keeps the fill rule
-//! even when people-first matching answers it with the whole person holding
-//! the object ("guitar close-up" finds the guitarist): framing that person's
-//! head would frame the wrong thing, and framing the guitar itself needs its
-//! box attached to the subject, which is later work.
+//! person ([`Basis::framing_extent`], [`Query::framing_extent`]); a shot
+//! keeps the basis of the query that asked for it (the engine's catalog). An
+//! object prompt keeps the fill rule even when people-first matching answers
+//! it with the whole person holding the object ("guitar close-up" finds the
+//! guitarist): framing that person's head would frame the wrong thing, and
+//! framing the guitar itself needs its box attached to the subject, which is
+//! later work. Until then such a "Close" frames the player's whole box by
+//! the fill rule and is not flagged (ADR 0003 asks Noah about it).
 //!
 //! # Invariants
 //!
@@ -114,10 +117,7 @@ impl Query {
     /// query: a whole person only when the query asks for a person, else
     /// an object; see the module docs.
     pub fn framing_extent(&self, detected: Extent) -> Extent {
-        match self.basis() {
-            Basis::Person => detected,
-            Basis::Object => Extent::Object,
-        }
+        self.basis().framing_extent(detected)
     }
 }
 

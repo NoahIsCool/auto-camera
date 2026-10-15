@@ -6,11 +6,13 @@
 //! [`ShotFramer::step`] follows it:
 //!
 //! * **Head memory.** The framer owns its shot's [`HeadMemory`] and is its
-//!   only writer: every person box passed to `aim` is folded in (untruncated
-//!   ones only, smoothed with [`FramerConfig::head_half_life`]), and the
-//!   remembered head height sizes the shot, so a person whose legs go behind
-//!   a lectern keeps their zoom instead of falling back to the fill rule
-//!   (see [`crate::person`]). The memory lives and dies with the shot.
+//!   only writer: every person box passed to `aim` is folded in (smoothed
+//!   with [`FramerConfig::head_half_life`]; a truncated box can only raise
+//!   it, toward what the box shows). An untruncated box is framed on its own
+//!   proportions, so Full is always the whole box; the memory sizes only
+//!   truncated boxes, so a person whose legs go behind a lectern keeps their
+//!   zoom instead of falling back to the fill rule (see [`crate::person`]).
+//!   The memory lives and dies with the shot.
 //! * **Dead zone with hysteresis.** The camera starts moving only when the
 //!   ideal centre leaves an engage band (a fraction of the current crop size)
 //!   and stops once the error is below a quarter of that band. Small sway gives
@@ -20,9 +22,16 @@
 //!   ratio feels equally fast.
 //! * **Loss.** When no observation arrives, the shot holds its last framing
 //!   instead of drifting.
-//! * **Zoom honesty.** [`ShotFramer::current`] carries the newest target's
-//!   [`Composition::limited_by_zoom`], held while the subject is unobserved,
-//!   so the shot is labelled as limited for exactly as long as it is.
+//! * **Zoom honesty.** [`ShotFramer::current`] says whether the shot is held
+//!   back by its zoom ceiling ([`Composition::limited_by_zoom`]), held while
+//!   the subject is unobserved. The verdict has hysteresis: it turns on when
+//!   a target needs [`LIMIT_HYSTERESIS`] (5%) more zoom than the ceiling
+//!   allows ([`Composition::zoom_fit`] below 0.95) and off when a target
+//!   fits with 5% to spare (above 1.05); in between it keeps its last value.
+//!   Box jitter from the tracker's scale search (±5% steps) or a new
+//!   detection near the ceiling therefore does not flip the "(limited)"
+//!   label on and off. A new framer starts from its initial crop's exact
+//!   verdict.
 
 use ac_core::{Extent, Point, Preset, Rect};
 use serde::{Deserialize, Serialize};
@@ -83,6 +92,10 @@ impl Default for FramerConfig {
 /// Fraction of the engage band below which a moving axis comes to rest.
 const RELEASE_RATIO: f64 = 0.25;
 
+/// Relative band around the zoom ceiling in which a shot's "limited by
+/// zoom" verdict keeps its last value; see the module docs.
+pub const LIMIT_HYSTERESIS: f64 = 0.05;
+
 /// One axis with dead-zone hysteresis.
 #[derive(Debug, Clone, Copy)]
 struct Axis {
@@ -138,8 +151,11 @@ pub struct ShotFramer {
     y: Axis,
     /// Natural log of the crop width, so zoom moves evenly in scale.
     log_w: Axis,
-    /// The newest target could not reach its size within the zoom ceiling.
+    /// The shot is held back by its zoom ceiling, with hysteresis; see the
+    /// module docs.
     limited_by_zoom: bool,
+    /// [`Composition::zoom_fit`] of the newest target.
+    zoom_fit: f64,
     /// The shot's remembered head height; written only by [`Self::aim`].
     head: HeadMemory,
 }
@@ -164,6 +180,7 @@ impl ShotFramer {
                 config.max_zoom_speed,
             ),
             limited_by_zoom: initial.limited_by_zoom,
+            zoom_fit: initial.zoom_fit,
             head: HeadMemory::new(),
         }
     }
@@ -172,11 +189,11 @@ impl ShotFramer {
     /// seconds after the previous call, under `preset`, for this framer's
     /// aspect ratios.
     ///
-    /// A person box first updates the shot's head memory; the remembered
-    /// head height then sizes the shot ([`compose_subject`]). Objects never
-    /// touch the memory.
+    /// A person box first updates the shot's head memory, which then sizes
+    /// the shot only if the box looks truncated ([`compose_subject`]).
+    /// Objects never touch the memory.
     pub fn aim(&mut self, bbox: &Rect, extent: Extent, preset: &Preset, dt: f64) -> Composition {
-        let head_height = match extent {
+        let remembered_head = match extent {
             Extent::Person => {
                 let half_life = self.config.head_half_life;
                 self.head.observe(bbox, self.source_aspect, half_life, dt)
@@ -186,7 +203,7 @@ impl ShotFramer {
         let subject = SubjectGeometry {
             bbox: *bbox,
             extent,
-            head_height,
+            remembered_head,
         };
         compose_subject(&subject, preset, self.source_aspect, self.output_aspect)
     }
@@ -206,6 +223,7 @@ impl ShotFramer {
             },
             width: self.log_w.spring.value.exp(),
             limited_by_zoom: self.limited_by_zoom,
+            zoom_fit: self.zoom_fit,
         }
     }
 
@@ -213,7 +231,12 @@ impl ShotFramer {
     /// `None` when the subject was not observed.
     pub fn step(&mut self, target: Option<Composition>, dt: f64) -> Composition {
         if let Some(t) = target {
-            self.limited_by_zoom = t.limited_by_zoom;
+            self.zoom_fit = t.zoom_fit;
+            if t.zoom_fit < 1.0 - LIMIT_HYSTERESIS {
+                self.limited_by_zoom = true;
+            } else if t.zoom_fit > 1.0 + LIMIT_HYSTERESIS {
+                self.limited_by_zoom = false;
+            }
         }
         let width = self.current().width;
         let height = width * self.source_aspect / self.output_aspect;
@@ -242,163 +265,4 @@ impl ShotFramer {
 }
 
 #[cfg(test)]
-mod tests {
-    use ac_core::ShotSize;
-
-    use super::*;
-
-    const A: f64 = 16.0 / 9.0;
-
-    fn at(x: f64, y: f64, width: f64) -> Composition {
-        Composition {
-            center: Point { x, y },
-            width,
-            limited_by_zoom: false,
-        }
-    }
-
-    fn run(framer: &mut ShotFramer, target: Composition, seconds: f64) -> Composition {
-        let dt = 1.0 / 60.0;
-        let mut out = framer.current();
-        for _ in 0..(seconds / dt) as usize {
-            out = framer.step(Some(target), dt);
-        }
-        out
-    }
-
-    #[test]
-    fn small_sway_inside_dead_zone_keeps_shot_static() {
-        let start = at(0.5, 0.5, 0.5);
-        let mut f = ShotFramer::new(FramerConfig::default(), start, A, A);
-        let out = run(&mut f, at(0.5 + 0.03 * 0.5, 0.5, 0.5), 2.0);
-        assert_eq!(out, start);
-    }
-
-    #[test]
-    fn large_move_is_followed_and_settles() {
-        let mut f = ShotFramer::new(FramerConfig::default(), at(0.3, 0.5, 0.5), A, A);
-        let out = run(&mut f, at(0.7, 0.5, 0.5), 6.0);
-        assert!((out.center.x - 0.7).abs() < 0.5 * 0.08 * RELEASE_RATIO + 1e-9);
-    }
-
-    #[test]
-    fn pan_speed_never_exceeds_cap() {
-        let config = FramerConfig::default();
-        let mut f = ShotFramer::new(config, at(0.2, 0.5, 0.5), A, A);
-        let dt = 1.0 / 60.0;
-        let mut previous = f.current().center.x;
-        for _ in 0..240 {
-            let x = f.step(Some(at(0.8, 0.5, 0.5)), dt).center.x;
-            assert!((x - previous).abs() / dt <= config.max_pan_speed * 0.5 + 1e-9);
-            previous = x;
-        }
-    }
-
-    #[test]
-    fn zoom_follows_in_log_space() {
-        let mut f = ShotFramer::new(FramerConfig::default(), at(0.5, 0.5, 0.8), A, A);
-        let out = run(&mut f, at(0.5, 0.5, 0.4), 10.0);
-        assert!((out.width / 0.4 - 1.0).abs() < 0.03);
-    }
-
-    #[test]
-    fn missing_observations_hold_the_framing() {
-        let start = at(0.4, 0.5, 0.5);
-        let mut f = ShotFramer::new(FramerConfig::default(), start, A, A);
-        for _ in 0..120 {
-            f.step(None, 1.0 / 60.0);
-        }
-        assert_eq!(f.current(), start);
-    }
-
-    /// A whole person half the frame high, legs in view.
-    fn standing() -> Rect {
-        Rect::new(0.45, 0.3, 0.1, 0.5)
-    }
-
-    /// The same person with the legs hidden: the box ends at the frame
-    /// bottom.
-    fn behind_lectern() -> Rect {
-        Rect::new(0.45, 0.3, 0.1, 0.7)
-    }
-
-    /// A close preset that can reach its size on `standing()`.
-    fn close() -> Preset {
-        Preset {
-            max_zoom: 20.0,
-            ..Preset::new("c", "Close", ShotSize::Close)
-        }
-    }
-
-    /// A framer for `close()` at rest on its first target.
-    fn framer() -> ShotFramer {
-        ShotFramer::new(FramerConfig::default(), at(0.5, 0.5, 1.0), A, A)
-    }
-
-    #[test]
-    fn person_boxes_seed_then_smooth_the_head_memory() {
-        let mut f = framer();
-        assert_eq!(f.head_height(), None);
-        f.aim(&standing(), Extent::Person, &close(), 0.0);
-        assert!((f.head_height().unwrap() - 0.5 / 7.5).abs() < 1e-12);
-        // A taller box (walking toward the camera) moves the memory half
-        // way in one half-life, in any number of steps.
-        let taller = Rect::new(0.45, 0.2, 0.12, 0.7);
-        let half_life = FramerConfig::default().head_half_life;
-        for _ in 0..50 {
-            f.aim(&taller, Extent::Person, &close(), half_life / 50.0);
-        }
-        let halfway = (0.5 / 7.5 + 0.7 / 7.5) / 2.0;
-        assert!((f.head_height().unwrap() - halfway).abs() < 1e-9);
-    }
-
-    #[test]
-    fn a_lectern_hiding_the_legs_keeps_the_zoom() {
-        let mut f = framer();
-        let seen = f.aim(&standing(), Extent::Person, &close(), 1.0 / 30.0);
-        let hidden = f.aim(&behind_lectern(), Extent::Person, &close(), 1.0 / 30.0);
-        assert!((hidden.width - seen.width).abs() < 1e-12);
-        assert!((hidden.center.y - seen.center.y).abs() < 1e-12);
-        assert!((f.head_height().unwrap() - 0.5 / 7.5).abs() < 1e-12);
-        // A shot that never saw the legs has nothing to remember: fill rule.
-        let mut fresh = framer();
-        let fallback = fresh.aim(&behind_lectern(), Extent::Person, &close(), 1.0 / 30.0);
-        assert_eq!(fresh.head_height(), None);
-        assert_eq!(fallback, crate::compose(&behind_lectern(), &close(), A, A));
-    }
-
-    #[test]
-    fn objects_never_touch_the_memory() {
-        let mut f = framer();
-        let target = f.aim(&standing(), Extent::Object, &close(), 1.0 / 30.0);
-        assert_eq!(f.head_height(), None);
-        assert_eq!(target, crate::compose(&standing(), &close(), A, A));
-    }
-
-    #[test]
-    fn bad_time_steps_never_poison_the_memory() {
-        let mut f = framer();
-        f.aim(&standing(), Extent::Person, &close(), 1.0 / 30.0);
-        let bigger = Rect::new(0.4, 0.1, 0.2, 0.8);
-        for dt in [f64::NAN, -1.0, 0.0] {
-            f.aim(&bigger, Extent::Person, &close(), dt);
-            assert!((f.head_height().unwrap() - 0.5 / 7.5).abs() < 1e-12, "{dt}");
-        }
-        let target = f.aim(&bigger, Extent::Person, &close(), f64::INFINITY);
-        assert!((f.head_height().unwrap() - 0.8 / 7.5).abs() < 1e-12);
-        assert!(target.width.is_finite() && target.center.y.is_finite());
-    }
-
-    #[test]
-    fn the_zoom_flag_follows_the_target_and_holds_while_unobserved() {
-        let mut f = framer();
-        let capped = Preset::new("c", "Close", ShotSize::Close);
-        let target = f.aim(&standing(), Extent::Person, &capped, 1.0 / 30.0);
-        assert!(target.limited_by_zoom, "a close-up of this person needs 9x");
-        assert!(f.step(Some(target), 1.0 / 30.0).limited_by_zoom);
-        assert!(f.step(None, 1.0 / 30.0).limited_by_zoom, "held");
-        let reachable = f.aim(&standing(), Extent::Person, &close(), 1.0 / 30.0);
-        assert!(!reachable.limited_by_zoom);
-        assert!(!f.step(Some(reachable), 1.0 / 30.0).limited_by_zoom);
-    }
-}
+mod tests;

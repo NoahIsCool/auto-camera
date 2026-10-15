@@ -1,8 +1,9 @@
 //! Framing through the core: the detector's extent reaches the shots, whole
 //! people are cut at body lines when the query asks for a person, shots the
-//! zoom ceiling holds back are flagged in the snapshot, and a prompt's shot
+//! zoom ceiling holds back are flagged in the snapshot, a prompt's shot
 //! words reach the catalog while only its parsed phrase reaches the
-//! detector.
+//! detector, every query a subject answers makes its shots, and an on-air
+//! shot keeps its basis whatever happens to its query.
 
 use ac_core::Extent;
 
@@ -146,5 +147,151 @@ fn shot_words_make_the_shots_and_the_detector_sees_the_parsed_phrase() {
         (chest.crop.h - 0.276 / 0.94).abs() < 0.02,
         "{:?}",
         chest.crop
+    );
+}
+
+/// A rig whose detector answers every query with `standing()`, a whole
+/// person, as people-first OWL does for prompts that share an object or a
+/// described person.
+fn everyone_sees_one_person(c: StudioConfig) -> Rig {
+    let detector = ScriptedDetector::from_fn("one-person", |_, queries| {
+        Ok(queries
+            .iter()
+            .map(|q| Detection {
+                query: q.id.clone(),
+                bbox: standing(),
+                score: 0.9,
+                extent: Extent::Person,
+            })
+            .collect())
+    });
+    Rig::new(c).with_detector(detector)
+}
+
+#[test]
+fn each_query_s_shot_words_make_shots_on_a_shared_subject() {
+    // Both prompts ask the detector for "a person speaking", so they find
+    // the same box and one subject answers both.
+    let mut c = config(0);
+    c.queries = vec![
+        QuerySettings::new("Speaker wide", "speaker upper body"),
+        QuerySettings::new("Speaker tight", "speaker close-up"),
+    ];
+    let mut rig = everyone_sees_one_person(c);
+    rig.run_secs(6.0);
+    let snap = rig.snapshot();
+    assert_eq!(snap.subjects.len(), 1, "{:?}", snap.subjects);
+    assert_eq!(snap.subjects[0].aliases.len(), 1);
+    let shots: Vec<(&str, &str)> = snap
+        .shots
+        .iter()
+        .map(|s| (s.id.0.as_str(), s.name.as_str()))
+        .collect();
+    assert_eq!(
+        shots,
+        [
+            ("cam/wide", "Wide"),
+            ("cam/1/close", "Speaker tight 1 Close"),
+            ("cam/1/medium", "Speaker wide 1 Medium"),
+            ("cam/1/medium_close", "Speaker wide 1 Medium close"),
+        ]
+    );
+}
+
+/// The program shot's crop width and zoom verdict.
+fn on_air(rig: &Rig) -> (f64, bool) {
+    let snap = rig.snapshot();
+    let id = snap.switcher.program.clone().expect("a program shot");
+    let s = snap.shot(&id).expect("the program shot exists");
+    (s.crop.w, s.limited_by_zoom)
+}
+
+#[test]
+fn removing_a_query_never_reframes_its_shot_on_air() {
+    // "guitar" is an object prompt; people-first matching answers it with
+    // the player. On air, the shot keeps the fill rule after its query is
+    // removed and the subject, an orphan, goes on tracking.
+    let mut c = config(1);
+    c.queries[0] = QuerySettings {
+        presets: Some(vec![PresetSpec::Size(ShotSize::Full)]),
+        ..QuerySettings::new("Guitar", "guitar")
+    };
+    let pattern = SyntheticPattern::new(W, H, FPS, 1).unwrap();
+    let mut truth = synthetic_detector(pattern, 0.9);
+    let detector = ScriptedDetector::from_fn("players", move |frame, queries| {
+        let found = truth.detect(frame, queries)?;
+        Ok(found
+            .into_iter()
+            .map(|d| Detection {
+                extent: Extent::Person,
+                ..d
+            })
+            .collect())
+    });
+    let mut rig = Rig::new(c).with_detector(detector);
+    rig.run(31);
+    preview_and_cut(&mut rig, "cam/1/full");
+    rig.run_secs(1.0);
+    let before = on_air(&rig);
+    rig.apply(EngineCommand::RemoveQuery {
+        query: QueryId("guitar".into()),
+    })
+    .unwrap();
+    for _ in 0..5 {
+        rig.run_secs(0.5);
+        let snap = rig.snapshot();
+        assert_eq!(snap.subjects[0].state, TrackState::Tracking);
+        let after = on_air(&rig);
+        assert!((after.0 - before.0).abs() < 1e-6, "{before:?} -> {after:?}");
+        assert_eq!(after.1, before.1);
+    }
+}
+
+#[test]
+fn a_promoted_alias_reframes_a_shot_only_once_it_is_off_air() {
+    // "guitar" (an object) and "guitarist" (a person) find the same player;
+    // "guitar" sorts first, so its basis frames the shared "close" preset.
+    let mut c = config(0);
+    let close = || Some(vec![PresetSpec::Size(ShotSize::Close)]);
+    c.queries = vec![
+        QuerySettings {
+            presets: close(),
+            ..QuerySettings::new("Guitar", "guitar")
+        },
+        QuerySettings {
+            presets: close(),
+            ..QuerySettings::new("Guitarist", "guitarist")
+        },
+    ];
+    let mut rig = everyone_sees_one_person(c);
+    rig.run_secs(6.0);
+    assert_eq!(rig.snapshot().subjects[0].query, QueryId("guitar".into()));
+    preview_and_cut(&mut rig, "cam/1/close");
+    rig.run_secs(1.0);
+    let before = on_air(&rig);
+    rig.apply(EngineCommand::RemoveQuery {
+        query: QueryId("guitar".into()),
+    })
+    .unwrap();
+    rig.run_secs(4.0);
+    assert_eq!(
+        rig.snapshot().subjects[0].query,
+        QueryId("guitarist".into())
+    );
+    let after = on_air(&rig);
+    assert!((after.0 - before.0).abs() < 1e-6, "{before:?} -> {after:?}");
+    // Off air, the shot follows its new query: body lines, at the ceiling.
+    preview_and_cut(&mut rig, "cam/wide");
+    rig.apply(EngineCommand::SetPreview {
+        shot: shot("cam/wide"),
+    })
+    .unwrap();
+    rig.run_secs(6.0);
+    let off = rig.snapshot();
+    let s = off.shot(&shot("cam/1/close")).unwrap();
+    assert!(
+        s.limited_by_zoom && (s.crop.w - 0.25).abs() < 0.02,
+        "{:?}",
+        s.crop
     );
 }

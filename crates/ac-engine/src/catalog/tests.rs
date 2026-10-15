@@ -19,6 +19,18 @@ fn person(x: f64) -> Rect {
     Rect::new(x, 0.3, 0.08, 0.3)
 }
 
+/// Plans for `presets` from query "Person" on `basis`.
+fn plans(presets: &[Preset], basis: Basis) -> Vec<ShotPlan> {
+    presets
+        .iter()
+        .map(|p| ShotPlan {
+            preset: p.clone(),
+            basis,
+            query_name: "Person".into(),
+        })
+        .collect()
+}
+
 /// Shot specs for subjects `ids` with `presets` on one source.
 fn specs(ids: &[u32], presets: &[Preset]) -> Vec<ShotSpec> {
     let source = SourceId("cam".into());
@@ -28,8 +40,7 @@ fn specs(ids: &[u32], presets: &[Preset]) -> Vec<ShotSpec> {
             id: SubjectId(i),
             bbox: person(0.2 + 0.1 * i as f64),
             extent: Extent::Object,
-            query_name: "Person",
-            presets,
+            plans: plans(presets, Basis::Object),
         })
         .collect();
     desired_shots(&[SourceShots {
@@ -65,6 +76,39 @@ fn ids_and_names_derive_from_what_is_framed() {
     assert_eq!(s[0].shot.name, "Wide");
     assert_eq!(s[1].shot.name, "Person 1 Medium");
     assert_eq!(s[1].preset.as_ref().unwrap().id, "medium");
+    assert_eq!((s[0].basis, s[1].basis), (Basis::Object, Basis::Object));
+}
+
+#[test]
+fn each_shot_is_named_after_and_measured_by_its_own_query() {
+    let source = SourceId("cam".into());
+    let mut both = plans(&presets()[..1], Basis::Person);
+    both.push(ShotPlan {
+        preset: Preset::new("full", "Full", ShotSize::Full),
+        basis: Basis::Object,
+        query_name: "Guitar".into(),
+    });
+    let s = desired_shots(&[SourceShots {
+        id: &source,
+        name: "Stage",
+        subjects: vec![SubjectShots {
+            id: SubjectId(1),
+            bbox: person(0.4),
+            extent: Extent::Person,
+            plans: both,
+        }],
+    }]);
+    let named: Vec<(&str, Basis)> = s[1..]
+        .iter()
+        .map(|s| (s.shot.name.as_str(), s.basis))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("Person 1 Medium", Basis::Person),
+            ("Guitar 1 Full", Basis::Object)
+        ]
+    );
 }
 
 #[test]
@@ -146,8 +190,7 @@ fn whole_people_too_small_for_their_size_are_flagged_from_the_start() {
         id: SubjectId(1),
         bbox: person(0.4),
         extent,
-        query_name: "Person",
-        presets: &p,
+        plans: plans(&p, Basis::Person),
     };
     let sync = |extent| {
         let mut c = Catalog::new();
@@ -176,6 +219,91 @@ fn whole_people_too_small_for_their_size_are_flagged_from_the_start() {
     assert!(!c.get(&ShotId("cam/wide".into())).unwrap().limited_by_zoom);
     // The same box as an object fills the frame by the fill rule.
     assert!(!sync(Extent::Object).get(&close).unwrap().limited_by_zoom);
+}
+
+/// A catalog for one subject at `person(0.4)`, a whole person, with
+/// `presets` on `basis`, stepped for `secs` while tracking.
+fn person_catalog(presets: &[Preset], basis: Basis, secs: f64) -> Catalog {
+    let source = SourceId("cam".into());
+    let mut c = Catalog::new();
+    let specs = desired_shots(&[SourceShots {
+        id: &source,
+        name: "Stage",
+        subjects: vec![SubjectShots {
+            id: SubjectId(1),
+            bbox: person(0.4),
+            extent: Extent::Person,
+            plans: plans(presets, basis),
+        }],
+    }]);
+    c.sync(specs, &[A], A, &FramerConfig::default());
+    let facts = |_: usize, _: SubjectId| {
+        Some(SubjectFacts {
+            bbox: person(0.4),
+            extent: Extent::Person,
+            tracking: true,
+            confidence: 0.9,
+        })
+    };
+    for _ in 0..(secs * 30.0) as usize {
+        c.step(1.0 / 30.0, &[live(0)], facts, A);
+    }
+    c
+}
+
+#[test]
+fn an_object_basis_keeps_the_fill_rule_on_a_person_box() {
+    // "guitar close-up" answered with the whole player: the fill rule.
+    let p = presets();
+    let object = person_catalog(&p, Basis::Object, 2.0);
+    let person = person_catalog(&p, Basis::Person, 2.0);
+    let close = ShotId("cam/1/close".into());
+    let fill = object.get(&close).unwrap();
+    assert!(
+        (fill.crop.h - 0.3 / ShotSize::Close.fill()).abs() < 0.02,
+        "{:?}",
+        fill.crop
+    );
+    assert!(!fill.limited_by_zoom);
+    assert!(person.get(&close).unwrap().limited_by_zoom);
+}
+
+#[test]
+fn zoom_limited_shots_that_look_alike_are_marked_once() {
+    // A whole person 0.3 high: Medium needs about 7.7x and Medium close
+    // about 10x, so both are drawn at the 4x ceiling.
+    let p = vec![
+        Preset::new("medium", "Medium", ShotSize::Medium),
+        Preset::new("medium_close", "Medium close", ShotSize::MediumClose),
+        Preset::new("full", "Full", ShotSize::Full),
+    ];
+    let c = person_catalog(&p, Basis::Person, 6.0);
+    let get = |id: &str| c.get(&ShotId(id.into())).unwrap();
+    assert!(get("cam/1/medium").limited_by_zoom && get("cam/1/medium_close").limited_by_zoom);
+    assert_eq!(get("cam/1/medium").same_picture_as, None);
+    assert_eq!(
+        get("cam/1/medium_close").same_picture_as,
+        Some(ShotId("cam/1/medium".into()))
+    );
+    // A reachable shot and the wide are never marked.
+    assert!(!get("cam/1/full").limited_by_zoom);
+    assert_eq!(get("cam/1/full").same_picture_as, None);
+    assert_eq!(get("cam/wide").same_picture_as, None);
+    // A different ceiling makes a different picture.
+    let wider = vec![
+        Preset::new("medium", "Medium", ShotSize::Medium),
+        Preset {
+            max_zoom: 8.0,
+            ..Preset::new("close", "Close", ShotSize::Close)
+        },
+    ];
+    let c = person_catalog(&wider, Basis::Person, 6.0);
+    assert_eq!(
+        c.get(&ShotId("cam/1/close".into()))
+            .unwrap()
+            .same_picture_as,
+        None
+    );
 }
 
 #[test]
@@ -237,6 +365,7 @@ fn settledness_is_one_on_target_and_falls_with_error() {
         center: Point { x, y: 0.5 },
         width: w,
         limited_by_zoom: false,
+        zoom_fit: f64::INFINITY,
     };
     assert_eq!(settledness(at(0.5, 0.4), at(0.5, 0.4), A, A), 1.0);
     let half = settledness(at(0.5, 0.4), at(0.55, 0.4), A, A);

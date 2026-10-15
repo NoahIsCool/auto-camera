@@ -57,30 +57,48 @@
 //! when it is too squat in pixels for a standing body: pixel height over
 //! pixel width, `b.h / (b.w * source_aspect)`, below [`MIN_STANDING_ASPECT`]
 //! (1.6, an inferred threshold: seated, behind a lectern or a drum kit).
-//! Such a box falls back to the fill rule, unless a head height is already
-//! known: then the crown is still the box top and the known head sets the
-//! scale, so a lectern hiding the legs does not change the zoom.
+//!
+//! An untruncated box is always measured on its own proportions, so Full is
+//! always the whole box, crown to feet. A truncated box falls back to the
+//! fill rule, unless the shot remembers a head height from an earlier
+//! untruncated box: then the crown is still the box top and the scale comes
+//! from
+//!
+//! ```text
+//! head = max(remembered, b.h / 7.5)
+//! ```
+//!
+//! The visible part of a body is never taller than the whole body, so
+//! `b.h / 7.5` ([`visible_head`]) is a lower bound on the head. The memory
+//! keeps a lectern hiding the legs from changing the zoom; the bound keeps a
+//! person who walked toward the camera until their feet left the picture
+//! from being sized by the smaller head they had further away.
 //!
 //! # Head memory
 //!
-//! [`HeadMemory`] is where a known head height comes from. It holds one
+//! [`HeadMemory`] is where a remembered head height comes from. It holds one
 //! value, seeded by the first untruncated box and then smoothed over every
 //! later untruncated box with a long half-life
-//! ([`FramerConfig::head_half_life`](crate::FramerConfig::head_half_life)),
-//! and frozen while boxes look truncated. The memory is per shot: each
-//! shot's [`ShotFramer`](crate::ShotFramer) owns one and is its only writer,
-//! and it lives and dies with the shot. Shots of one subject made together
-//! see the same boxes and remember the same value; a shot made later starts
-//! from the boxes it sees. The smoothing also steadies the scale against box
-//! jitter, while a speaker walking toward the camera is still followed,
-//! slowly.
+//! ([`FramerConfig::head_half_life`](crate::FramerConfig::head_half_life)).
+//! While boxes look truncated it never falls (the box says nothing about how
+//! tall the hidden body is) but rises toward the visible lower bound with
+//! the same half-life, so it does not stay stuck below what the picture
+//! shows. The memory is per shot: each shot's
+//! [`ShotFramer`](crate::ShotFramer) owns one and is its only writer, and it
+//! lives and dies with the shot. Shots of one subject made together see the
+//! same boxes and remember the same value; a shot made later starts from the
+//! boxes it sees. The long half-life keeps a raised hand or a box spike just
+//! before the legs disappear from setting the scale.
 //!
 //! # Limits
 //!
 //! The crown is the box top, so raised hands or a guitar headstock above the
-//! head move it up and enlarge the measured head; the long half-life damps
-//! the scale, not the crown. The horizontal centre is the box centre, not the
-//! torso. Both wait for a head source (a head detector, masks or pose).
+//! head move it up and enlarge the measured head. The horizontal centre is
+//! the box centre, not the torso. The memory lags a person who walks toward
+//! the camera and is then hidden at once (a speaker arriving at a lectern):
+//! the shot is sized from the head the memory has reached, tighter than
+//! true. All of these wait for a head source (a head detector, masks or
+//! pose).
 
 use ac_core::{Preset, Rect, ShotSize};
 
@@ -133,6 +151,13 @@ pub fn head_height(bbox: &Rect, source_aspect: f64) -> Option<f64> {
     (!looks_truncated(bbox, source_aspect)).then(|| bbox.h / HEADS_PER_BODY)
 }
 
+/// The smallest head the person in `bbox` can have, whether or not the box
+/// is truncated: the visible height on the body canon, `bbox.h / 7.5`
+/// (see the module docs). `None` for an empty or non-finite box.
+pub fn visible_head(bbox: &Rect) -> Option<f64> {
+    (is_finite(bbox) && bbox.h > 0.0).then(|| bbox.h / HEADS_PER_BODY)
+}
+
 /// The ideal crop for the person in `bbox`, whose head is `head_height`
 /// high (a fraction of the source height), under `preset`; see the module
 /// docs. Falls back to the fill rule when the head height or the box is not
@@ -181,10 +206,12 @@ impl HeadMemory {
     /// of `source_aspect`) `dt` seconds after the previous call, and returns
     /// the remembered value.
     ///
-    /// The first measurable box seeds the memory; later ones move it by
-    /// `1 - 2^(-dt / half_life)` of the difference. Truncated boxes leave it
-    /// as it is. A `dt` that is not positive moves nothing, and a
-    /// `half_life` that is not positive follows each box at once.
+    /// The first untruncated box seeds the memory; later ones move it by
+    /// `1 - 2^(-dt / half_life)` of the difference. A truncated box cannot
+    /// seed it nor lower it, but moves it the same way toward the box's
+    /// [`visible_head`] when that is larger. A `dt` that is not positive
+    /// moves nothing, and a `half_life` that is not positive follows each
+    /// box at once.
     pub fn observe(
         &mut self,
         bbox: &Rect,
@@ -192,9 +219,16 @@ impl HeadMemory {
         half_life: f64,
         dt: f64,
     ) -> Option<f64> {
-        if let Some(measured) = head_height(bbox, source_aspect) {
-            let alpha = smoothing(dt, half_life);
-            self.head = Some(self.head.map_or(measured, |m| m + alpha * (measured - m)));
+        let alpha = smoothing(dt, half_life);
+        match (head_height(bbox, source_aspect), self.head) {
+            (Some(measured), None) => self.head = Some(measured),
+            (Some(measured), Some(m)) => self.head = Some(m + alpha * (measured - m)),
+            (None, Some(m)) => {
+                if let Some(bound) = visible_head(bbox).filter(|b| *b > m) {
+                    self.head = Some(m + alpha * (bound - m));
+                }
+            }
+            (None, None) => {}
         }
         self.head
     }

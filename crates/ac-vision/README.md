@@ -163,14 +163,16 @@ See [ADR 0003](../../docs/adr/0003-shot-words-in-prompts.md).
 
 Every detection says what its box covers (`Detection::extent`). People-first
 detections are `Extent::Person`, whole bodies, and framing cuts their shots
-at body lines measured in head heights from the crown, so "Close" on a
-distant speaker is a head-and-shoulders crop (labelled "(limited)" in the
-multiview when the zoom ceiling cannot reach it), not a full-length shot,
-as long as the query asks for a person (`ac_core::Query::framing_extent`):
-an object prompt answered with the person holding the object keeps the fill
-rule. With `people_first` off, and for scripted boxes not marked as people,
-the boxes are `Extent::Object` and keep the fill rule. See
-`ac_framing::person`.
+at body lines measured in head heights from the crown, so "Close" asks for
+a head-and-shoulders crop, not a full-length shot, as long as the query
+asks for a person (`ac_core::Basis::framing_extent`): an object prompt
+answered with the person holding the object keeps the fill rule. A Close
+that needs more zoom than the preset's ceiling allows, as on a distant
+speaker, is drawn at the ceiling, so it is looser than head and shoulders
+(on a speaker half the frame high, a 4x ceiling cuts at about the waist),
+and is marked limited in the window. With `people_first` off, and for
+scripted boxes not marked as people, the boxes are `Extent::Object` and
+keep the fill rule. See `ac_framing::person`.
 
 Thresholds come on two scales. OWLv2 scores a named object high and any
 description of a person low, however well it fits. So objects need

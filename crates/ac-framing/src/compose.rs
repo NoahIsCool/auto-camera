@@ -10,9 +10,10 @@
 //! How tall the frame should be depends on what the subject's box covers
 //! ([`Extent`]); [`compose_subject`] picks the basis. The extent passed in
 //! is the one the subject is framed as: the engine marks a box a whole
-//! person only when the detector did and the subject's query asks for a
-//! person (`ac_core::Query::framing_extent`), so "guitar close-up" answered
-//! with the player holding the guitar stays on the object basis.
+//! person only when the detector did and the query that asked for the shot
+//! is about a person (`ac_core::Basis::framing_extent`), so "guitar
+//! close-up" answered with the player holding the guitar stays on the
+//! object basis.
 //!
 //! * **Object basis** ([`compose`], the fill rule). For a subject box `b` and
 //!   a preset with fill `f` ([`ShotSize::fill`]): frame height `h = b.h / f`,
@@ -20,7 +21,9 @@
 //!   upper body, and for person boxes too truncated to measure.
 //! * **Person basis** ([`crate::person`]). A whole-person box is cut at a body
 //!   line measured in head heights from the crown, so "Close" on a person
-//!   half the frame high is a head-and-shoulders shot, not a full-length one.
+//!   half the frame high asks for a head-and-shoulders shot, not a
+//!   full-length one (and is drawn at the zoom ceiling, flagged, when it
+//!   needs more zoom than the preset allows).
 //!
 //! Both then place the frame the same way:
 //!
@@ -36,8 +39,10 @@
 //! When the zoom ceiling stops a shot reaching its size, the crop is drawn at
 //! the ceiling, looser than asked, and [`Composition::limited_by_zoom`] says
 //! so, so the operator sees "Close (limited)" instead of a close-up that is
-//! not one. Hitting the source bounds (a shot wider than the picture) is not
-//! zoom limiting and is not flagged.
+//! not one. [`Composition::zoom_fit`] says by how much (the wanted width over
+//! the narrowest the ceiling allows), so the framer can keep the verdict
+//! steady near the ceiling. Hitting the source bounds (a shot wider than the
+//! picture) is not zoom limiting and is not flagged.
 //!
 //! # Invariants
 //!
@@ -75,6 +80,11 @@ pub struct Composition {
     /// The preset's zoom ceiling stopped the shot reaching its size: the
     /// crop is drawn at the ceiling and is looser than the size asks for.
     pub limited_by_zoom: bool,
+    /// The width the shot's size asks for over the narrowest width the zoom
+    /// ceiling allows: below 1 the ceiling holds the shot back by that
+    /// factor, at or above 1 the size is reachable. Infinite when nothing
+    /// is asked of the zoom (wides, unusable boxes); never NaN.
+    pub zoom_fit: f64,
 }
 
 impl Composition {
@@ -95,11 +105,12 @@ pub struct SubjectGeometry {
     pub bbox: Rect,
     /// What the box covers.
     pub extent: Extent,
-    /// A person's head height, as a fraction of the source height, when it
-    /// is known from more than this box: the shot's memory of earlier,
-    /// untruncated boxes ([`crate::HeadMemory`]). `None` measures it from
-    /// `bbox` when the box is untruncated. Ignored for objects.
-    pub head_height: Option<f64>,
+    /// The shot's remembered head height for this person, as a fraction of
+    /// the source height ([`crate::HeadMemory`]). Used only when `bbox`
+    /// looks truncated, and then never below what the box itself shows
+    /// ([`person::visible_head`]); an untruncated box is always measured on
+    /// its own proportions. Ignored for objects.
+    pub remembered_head: Option<f64>,
 }
 
 impl SubjectGeometry {
@@ -108,7 +119,7 @@ impl SubjectGeometry {
         Self {
             bbox,
             extent,
-            head_height: None,
+            remembered_head: None,
         }
     }
 }
@@ -137,6 +148,7 @@ fn wide(source_aspect: f64, output_aspect: f64) -> Composition {
         center: Point { x: 0.5, y: 0.5 },
         width: max_width(source_aspect, output_aspect),
         limited_by_zoom: false,
+        zoom_fit: f64::INFINITY,
     }
 }
 
@@ -181,6 +193,7 @@ pub(crate) fn place(
     };
     let width = desired_w.clamp(narrowest, widest);
     let limited_by_zoom = desired_w < narrowest * (1.0 - LIMIT_TOLERANCE);
+    let zoom_fit = desired_w / narrowest;
     let h = width * ratio;
     let frame_top = top - headroom(preset) * h;
     let center = Point {
@@ -192,6 +205,7 @@ pub(crate) fn place(
         center: bounded.center(),
         width,
         limited_by_zoom,
+        zoom_fit,
     }
 }
 
@@ -220,8 +234,10 @@ pub fn compose(
 /// Computes the ideal crop for `subject` under `preset`, on the basis its
 /// extent calls for; see the module docs and [`crate::person`].
 ///
-/// A person box falls back to the object basis when no head height is known
-/// and the box is too truncated to measure one ([`person::looks_truncated`]).
+/// A person box is measured on its own proportions when it is untruncated
+/// ([`person::looks_truncated`]); a truncated one uses the larger of the
+/// remembered head and [`person::visible_head`], and falls back to the
+/// object basis when nothing is remembered.
 pub fn compose_subject(
     subject: &SubjectGeometry,
     preset: &Preset,
@@ -232,10 +248,11 @@ pub fn compose_subject(
     if subject.extent == Extent::Object || preset.size == ShotSize::Wide || !is_finite(bbox) {
         return compose(bbox, preset, source_aspect, output_aspect);
     }
-    let head = subject
-        .head_height
+    let remembered = subject
+        .remembered_head
         .filter(|h| h.is_finite() && *h > 0.0)
-        .or_else(|| person::head_height(bbox, source_aspect));
+        .map(|h| person::visible_head(bbox).map_or(h, |bound| h.max(bound)));
+    let head = person::head_height(bbox, source_aspect).or(remembered);
     match head {
         Some(head) => person::compose_person(bbox, head, preset, source_aspect, output_aspect),
         None => compose(bbox, preset, source_aspect, output_aspect),
@@ -333,7 +350,7 @@ mod tests {
         for size in [ShotSize::Full, ShotSize::Medium, ShotSize::Close] {
             let p = Preset::new("p", "P", size);
             let geometry = SubjectGeometry {
-                head_height: Some(0.05),
+                remembered_head: Some(0.05),
                 ..SubjectGeometry::new(person(), Extent::Object)
             };
             assert_eq!(

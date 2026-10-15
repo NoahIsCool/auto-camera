@@ -331,16 +331,140 @@ mod tests {
         assert_eq!(presets.map(|p| sizes_of(&p)), Some(vec![Medium, Close]));
     }
 
+    /// Drives [`show`] through egui frames, as the window does.
+    struct Window {
+        /// The egui context, kept across frames.
+        ctx: egui::Context,
+        /// The form being shown.
+        form: QueryForm,
+        /// The newest frame's output.
+        out: egui::FullOutput,
+    }
+
+    impl Window {
+        /// A window showing `form`, not drawn yet.
+        fn new(form: QueryForm) -> Self {
+            Self {
+                ctx: egui::Context::default(),
+                form,
+                out: egui::FullOutput::default(),
+            }
+        }
+
+        /// Draws one frame with `events`; returns what [`show`] returned.
+        fn frame(&mut self, events: Vec<egui::Event>) -> Option<EngineCommand> {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut cmd = None;
+            let form = &mut self.form;
+            self.out = self.ctx.run_ui(input, |ui| {
+                cmd = show(ui, form, &lexicon());
+            });
+            cmd
+        }
+
+        /// Where the newest frame painted exactly `text`.
+        fn find(&self, text: &str) -> egui::Pos2 {
+            self.out
+                .shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text() == text => {
+                        Some(t.pos + t.galley.rect.center().to_vec2())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{text:?} is not on screen"))
+        }
+
+        /// Clicks on `text`: press on one frame, release on the next.
+        /// Returns what [`show`] returned on the release.
+        fn click(&mut self, text: &str) -> Option<EngineCommand> {
+            let pos = self.find(text);
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            self.frame(vec![egui::Event::PointerMoved(pos), button(true)]);
+            let cmd = self.frame(vec![button(false)]);
+            self.frame(Vec::new());
+            cmd
+        }
+    }
+
     #[test]
-    fn the_form_renders_and_adds_only_on_click() {
-        let ctx = egui::Context::default();
-        let mut form = typed("Speaker", "speaker upper body");
-        let mut out = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            out = show(ui, &mut form, &lexicon());
+    fn the_window_follows_the_prompt_until_a_size_is_clicked() {
+        // The prompt is typed before the first frame; nothing calls
+        // `follow` but `show`.
+        let mut w = Window::new(QueryForm {
+            name: "Speaker".into(),
+            prompt: "speaker upper body".into(),
+            ..QueryForm::default()
         });
-        assert_eq!(out, None);
-        assert_eq!(form.prompt, "speaker upper body", "the form is kept");
-        assert!(!form.touched);
+        assert_eq!(w.frame(Vec::new()), None);
+        assert_eq!(w.form.sizes, [false, true, true, false]);
+        w.form.prompt = "speaker close-up".into();
+        w.frame(Vec::new());
+        assert_eq!(w.form.sizes, [false, false, false, true]);
+        assert!(!w.form.touched);
+        // A click on a size hands the sizes to the operator.
+        assert_eq!(w.click("Full"), None);
+        assert!(w.form.touched);
+        assert_eq!(w.form.sizes, [true, false, false, true]);
+        w.form.prompt = "speaker upper body".into();
+        w.frame(Vec::new());
+        assert_eq!(
+            w.form.sizes,
+            [true, false, false, true],
+            "no longer follows"
+        );
+    }
+
+    #[test]
+    fn the_window_adds_only_on_click_and_then_resets() {
+        let mut w = Window::new(QueryForm {
+            name: "Speaker".into(),
+            prompt: "speaker upper body".into(),
+            ..QueryForm::default()
+        });
+        for _ in 0..3 {
+            assert_eq!(w.frame(Vec::new()), None, "drawing never adds");
+        }
+        let Some(EngineCommand::AddQuery {
+            name,
+            prompt,
+            presets,
+            literal,
+        }) = w.click("Add query")
+        else {
+            panic!("Add query sends the command");
+        };
+        assert_eq!(
+            (name.as_str(), prompt.as_str()),
+            ("Speaker", "speaker upper body")
+        );
+        assert_eq!(
+            presets.map(|p| sizes_of(&p)),
+            Some(vec![Medium, MediumClose])
+        );
+        assert!(!literal);
+        assert_eq!(w.form, QueryForm::default(), "the form resets");
+        // An invalid prompt keeps Add disabled.
+        w.form = QueryForm {
+            name: "X".into(),
+            prompt: "close-up".into(),
+            ..QueryForm::default()
+        };
+        w.frame(Vec::new());
+        assert_eq!(w.click("Add query"), None);
+        assert_eq!(w.form.prompt, "close-up");
     }
 }

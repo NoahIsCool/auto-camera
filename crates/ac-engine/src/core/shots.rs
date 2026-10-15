@@ -5,29 +5,34 @@
 //!   on-air subject is never retired, evicted or demoted.
 //! * **Catalog sync.** The shot list is re-derived from the stores and the
 //!   queries ([`crate::catalog`]). A subject's shots follow the presets of
-//!   its primary query, except that a protected subject also keeps every
-//!   shot it already has, whatever happened to its query: removed (the
+//!   every query it answers: its primary query first, then its aliases,
+//!   de-duplicated by preset id (the first query to name an id frames it).
+//!   Prompts that the parser reads to one detector phrase ("speaker upper
+//!   body" and "speaker close-up" both ask for "a person speaking") find the
+//!   same boxes and become aliases of one subject, so each query's shot
+//!   words still make their shots. A protected subject also keeps every
+//!   shot it already has, whatever happened to its queries: removed (the
 //!   subject is an orphan) or replaced by an alias (the store promoted it).
 //!   The operator must never see the shot on air vanish and the program go
 //!   black; the extra shots go once the subject leaves program and preview.
-//! * **Framing.** Every shot's framer steps by `dt` and is rescored. A
-//!   subject's box is framed as what its primary query asks for
-//!   ([`ac_core::Query::framing_extent`]): cut at body lines only when the
-//!   query's basis is a person and the detector marked the box a whole
-//!   person; an orphan (its query removed) keeps the detector's extent.
+//! * **Basis.** Each shot is measured on the basis of the query that asked
+//!   for it ([`ac_core::Basis::framing_extent`]): cut at body lines only
+//!   when that query's basis is a person and the detector marked the box a
+//!   whole person. A protected subject's existing shots keep the basis they
+//!   have, so removing or promoting a query never re-frames a shot on air
+//!   (an orphan's "guitar close-up" keeps the fill rule rather than zooming
+//!   in on the player's head under the operator).
+//! * **Framing.** Every shot's framer steps by `dt` and is rescored.
 
 use std::collections::{HashMap, HashSet};
 
-use ac_core::{Extent, Preset, Query, SubjectId, TrackState};
+use ac_core::{SubjectId, TrackState};
+use ac_subjects::SubjectRecord;
 
 use super::EngineCore;
-use crate::catalog::{SourceFacts, SourceShots, SubjectFacts, SubjectShots, desired_shots};
-
-/// What a subject's box is framed as: what its primary `query` asks for,
-/// or the detector's extent for an orphan; see the module docs.
-fn framing_extent(query: Option<&Query>, detected: Extent) -> Extent {
-    query.map_or(detected, |q| q.framing_extent(detected))
-}
+use crate::catalog::{
+    ShotEntry, ShotPlan, SourceFacts, SourceShots, SubjectFacts, SubjectShots, desired_shots,
+};
 
 impl EngineCore {
     /// Pushes the program and preview subjects to their stores.
@@ -48,16 +53,57 @@ impl EngineCore {
         }
     }
 
-    /// Re-derives the shot list from the stores and queries.
-    ///
-    /// A subject's shots follow the presets of its primary query, except
-    /// while it is protected (on program or preview): then it also keeps
-    /// every shot it has now. Its query may just have been removed (it is
-    /// an orphan) or replaced by an alias (the store promoted it), and in
-    /// both cases the shot on air must not disappear under the operator.
-    /// The extra shots go once the subject leaves the air.
+    /// The shots subject `r` of source `source` should have; see the module
+    /// docs. `held` are the shots it has now (consulted only while it is
+    /// protected).
+    fn plans(&self, r: &SubjectRecord, held: Option<&Vec<&ShotEntry>>) -> Vec<ShotPlan> {
+        let mut plans: Vec<ShotPlan> = Vec::new();
+        for q in r
+            .queries()
+            .filter_map(|id| self.queries.iter().find(|q| q.id == *id))
+        {
+            for p in &q.presets {
+                if !plans.iter().any(|x| x.preset.id == p.id) {
+                    plans.push(ShotPlan {
+                        preset: p.clone(),
+                        basis: q.basis(),
+                        query_name: q.name.clone(),
+                    });
+                }
+            }
+        }
+        let Some(held) = held.filter(|_| r.protected) else {
+            return plans;
+        };
+        let primary = self
+            .queries
+            .iter()
+            .find(|q| q.id == r.subject.query)
+            .map_or(r.subject.query.0.as_str(), |q| &q.name);
+        for e in held {
+            let Some(preset) = &e.preset else { continue };
+            match plans.iter_mut().find(|x| x.preset.id == preset.id) {
+                // On air: the shot keeps how it is measured.
+                Some(plan) => plan.basis = e.basis,
+                None => plans.push(ShotPlan {
+                    preset: preset.clone(),
+                    basis: e.basis,
+                    query_name: primary.to_string(),
+                }),
+            }
+        }
+        plans
+    }
+
+    /// Re-derives the shot list from the stores and queries; see the module
+    /// docs.
     pub(super) fn sync_catalog(&mut self) {
-        let presets = self.subject_presets();
+        let mut held: HashMap<(usize, SubjectId), Vec<&ShotEntry>> = HashMap::new();
+        for e in self.catalog.entries() {
+            if let Some(subject) = e.subject {
+                held.entry((e.source, subject)).or_default().push(e);
+            }
+        }
         let shots: Vec<SourceShots<'_>> = self
             .sources
             .iter()
@@ -71,18 +117,12 @@ impl EngineCore {
                     .records()
                     .filter(|r| !r.hidden || r.protected)
                     .filter_map(|r| {
-                        let id = r.subject.id;
-                        let query = self.queries.iter().find(|q| q.id == r.subject.query);
-                        let presets = match presets.get(&(i, id)) {
-                            Some(merged) => merged.as_slice(),
-                            None => query?.presets.as_slice(),
-                        };
-                        Some(SubjectShots {
-                            id,
+                        let plans = self.plans(r, held.get(&(i, r.subject.id)));
+                        (!plans.is_empty()).then_some(SubjectShots {
+                            id: r.subject.id,
                             bbox: r.subject.bbox,
-                            extent: framing_extent(query, r.subject.extent),
-                            query_name: query.map_or(r.subject.query.0.as_str(), |q| &q.name),
-                            presets,
+                            extent: r.subject.extent,
+                            plans,
                         })
                     })
                     .collect(),
@@ -97,41 +137,6 @@ impl EngineCore {
             .retain(|id, _| self.catalog.get(id).is_some());
     }
 
-    /// The preset lists of protected subjects that have shots: the primary
-    /// query's presets first (so a preset id both define frames as the query
-    /// says now), then the presets of the subject's current shots that the
-    /// query does not have. See [`Self::sync_catalog`].
-    fn subject_presets(&self) -> HashMap<(usize, SubjectId), Vec<Preset>> {
-        let mut held: HashMap<(usize, SubjectId), Vec<&Preset>> = HashMap::new();
-        for e in self.catalog.entries() {
-            if let (Some(subject), Some(p)) = (e.subject, &e.preset) {
-                held.entry((e.source, subject)).or_default().push(p);
-            }
-        }
-        let mut out = HashMap::new();
-        for (i, s) in self.sources.iter().enumerate() {
-            for r in s.vision.store().records().filter(|r| r.protected) {
-                let key = (i, r.subject.id);
-                let Some(current) = held.get(&key) else {
-                    continue;
-                };
-                let mut presets: Vec<Preset> = self
-                    .queries
-                    .iter()
-                    .find(|q| q.id == r.subject.query)
-                    .map(|q| q.presets.clone())
-                    .unwrap_or_default();
-                for p in current {
-                    if !presets.iter().any(|x| x.id == p.id) {
-                        presets.push((*p).clone());
-                    }
-                }
-                out.insert(key, presets);
-            }
-        }
-        out
-    }
-
     /// Steps every shot's framer by `dt` seconds.
     pub(super) fn step_framing(&mut self, dt: f64) {
         let now = self.now;
@@ -144,7 +149,6 @@ impl EngineCore {
             })
             .collect();
         let sources = &self.sources;
-        let queries = &self.queries;
         let output_aspect = self.compositor.config().aspect();
         self.catalog.step(
             dt,
@@ -152,10 +156,9 @@ impl EngineCore {
             |i, id| {
                 let s = sources.get(i)?;
                 let subject = s.vision.store().get(id)?;
-                let query = queries.iter().find(|q| q.id == subject.query);
                 Some(SubjectFacts {
                     bbox: subject.bbox,
-                    extent: framing_extent(query, subject.extent),
+                    extent: subject.extent,
                     tracking: subject.state == TrackState::Tracking,
                     confidence: s.vision.confidence(id),
                 })
