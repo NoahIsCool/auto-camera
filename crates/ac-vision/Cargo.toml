@@ -1,0 +1,29 @@
+[package]
+name = "ac-vision"
+description = "Detector and tracker traits, a pure-Rust template tracker and an optional ONNX open-vocabulary detector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# OWLv2 / OWL-ViT through ONNX Runtime. Off by default: building it downloads
+# ONNX Runtime binaries unless ORT_LIB_LOCATION points at a local build.
+onnx = ["dep:ort", "dep:tokenizers"]
+
+[dependencies]
+ac-core.workspace = true
+ac-media.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+rayon = "1.12"
+ort = { version = "=2.0.0-rc.13", optional = true }
+tokenizers = { version = "0.23", optional = true, default-features = false, features = ["fancy-regex"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.13", optional = true, features = ["coreml"] }
+
+[lints]
+workspace = true
