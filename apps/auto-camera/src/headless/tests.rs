@@ -22,7 +22,8 @@ fn studio() -> StudioConfig {
         id: None,
         name: "Person".into(),
         prompt: "person".into(),
-        presets: vec![PresetSpec::Size(ShotSize::Medium)],
+        presets: Some(vec![PresetSpec::Size(ShotSize::Medium)]),
+        literal: false,
     });
     c.output.width = 320;
     c.output.height = 180;
@@ -203,15 +204,42 @@ fn a_recording_run_finalizes_the_file() {
 
 #[test]
 fn the_summary_is_json() {
-    let s = run(studio(), Path::new("studio.toml"), &options(0.2, None));
+    let mut config = studio();
+    // No presets: the shot words decide, and the role word is rewritten.
+    config
+        .queries
+        .push(QuerySettings::new("Speaker", "speaker upper body"));
+    let s = run(config, Path::new("studio.toml"), &options(0.2, None));
     let v: serde_json::Value = serde_json::to_value(&s).unwrap();
     for key in [
-        "ok", "ticks", "sources", "shots", "program", "director", "timing", "output",
+        "ok", "ticks", "sources", "queries", "shots", "program", "director", "timing", "output",
     ] {
         assert!(v.get(key).is_some(), "{key}");
     }
     assert_eq!(v["director"]["mode"], "off");
     assert_eq!(v["shots"][0]["status"], "wide");
+    assert_eq!(v["shots"][0]["limited_by_zoom"], false);
+    let plain = &v["queries"][0];
+    assert_eq!(plain["prompt"], "person");
+    assert_eq!(plain["detector_phrase"], "person");
+    assert_eq!(plain["presets"], serde_json::json!(["medium"]));
+    let speaker = &v["queries"][1];
+    assert_eq!(speaker["prompt"], "speaker upper body");
+    assert_eq!(speaker["detector_phrase"], "a person speaking");
+    assert_eq!(
+        speaker["shot_words"],
+        serde_json::json!(["medium", "medium_close"])
+    );
+    assert_eq!(
+        speaker["presets"],
+        serde_json::json!(["medium", "medium_close"])
+    );
+    assert_eq!(speaker["basis"], "person");
+    assert_eq!(speaker["literal"], false);
+    assert_eq!(
+        speaker["parse"],
+        "Detector sees: a person speaking · Framing: Medium, Medium close (person)"
+    );
     assert!(v["output"].is_null());
 }
 
@@ -232,7 +260,18 @@ fn the_sample_configs_load() {
     assert_eq!(demo.director.mode, DirectorMode::Suggest);
     assert_eq!(demo.discovery.rate_hz, 10.0);
     let file = StudioConfig::load(&root.join("file-source.example.toml")).unwrap();
-    assert_eq!(file.queries.len(), 2);
+    assert_eq!(file.queries.len(), 3);
+    let queries = file.build_queries().unwrap();
+    // The prompts without shot or role words go to the detector as typed.
+    assert_eq!(
+        queries[0].detector_phrase(),
+        "a person speaking at a lectern"
+    );
+    assert_eq!(queries[1].detector_phrase(), "a person playing guitar");
+    // "drummer wide": the role word is rewritten, the shot word picks Full.
+    assert_eq!(queries[2].detector_phrase(), "a person playing drums");
+    let sizes: Vec<ShotSize> = queries[2].presets.iter().map(|p| p.size).collect();
+    assert_eq!(sizes, [ShotSize::Full]);
     let SourceConfig::File { path, .. } = &file.sources[0].input else {
         panic!("a file source");
     };

@@ -17,14 +17,17 @@
 //!    shut the engine down, which joins every thread and reaps ffmpeg.
 //!
 //! The summary is always produced; `ok` is false and `error` says why when a
-//! phase failed. Program changes are logged from samples taken every
+//! phase failed. It reports how each query's prompt was read (what the
+//! detector was asked for, the shot words' sizes, the basis and any
+//! notices), so a prompt that does not mean what the operator thought shows
+//! up in a headless run too. Program changes are logged from samples taken every
 //! [`SAMPLE`], so two changes closer together than that show as one.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ac_core::ShotId;
+use ac_core::{Basis, ShotId, ShotSize};
 use ac_director::{CandidateKind, ContentProfile, DirectorMode};
 use ac_engine::{
     Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot, MonitorSettings,
@@ -72,6 +75,8 @@ pub struct Summary {
     pub threads_joined: usize,
     /// Per-source counters.
     pub sources: Vec<SourceSummary>,
+    /// The queries and how their prompts were read.
+    pub queries: Vec<QuerySummary>,
     /// Largest number of live subjects seen.
     pub max_subjects: usize,
     /// Shots at the end of the run.
@@ -121,6 +126,31 @@ pub struct SourceSummary {
     pub subjects_retired: u64,
 }
 
+/// One query in the summary: its prompt as read when it was created.
+#[derive(Debug, Clone, Serialize)]
+pub struct QuerySummary {
+    /// Query id.
+    pub id: String,
+    /// Operator-facing name.
+    pub name: String,
+    /// The prompt as the operator typed it.
+    pub prompt: String,
+    /// What the detector is asked for.
+    pub detector_phrase: String,
+    /// The prompt was sent as typed, without reading shot or role words.
+    pub literal: bool,
+    /// Shot sizes the prompt's shot words name, in typed order.
+    pub shot_words: Vec<ShotSize>,
+    /// Ids of the presets its subjects are framed with.
+    pub presets: Vec<String>,
+    /// Person or object.
+    pub basis: Basis,
+    /// The operator window's parse line.
+    pub parse: String,
+    /// The parse's notices, one sentence each.
+    pub notes: Vec<String>,
+}
+
 /// One shot in the summary.
 #[derive(Debug, Clone, Serialize)]
 pub struct ShotSummary {
@@ -132,6 +162,8 @@ pub struct ShotSummary {
     pub status: ShotStatus,
     /// Director quality in `0..=1`.
     pub quality: f32,
+    /// The preset's zoom ceiling keeps the shot looser than its size.
+    pub limited_by_zoom: bool,
 }
 
 /// Program changes in the summary.
@@ -417,6 +449,32 @@ fn summarize(
                     name: v.name.clone(),
                     status: v.status,
                     quality: (v.quality * 100.0).round() / 100.0,
+                    limited_by_zoom: v.limited_by_zoom,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let queries = end
+        .map(|s| {
+            s.queries
+                .iter()
+                .map(|q| QuerySummary {
+                    id: q.id.0.clone(),
+                    name: q.name.clone(),
+                    prompt: q.prompt.clone(),
+                    detector_phrase: q.parse.model_phrase.clone(),
+                    literal: q.parse.literal,
+                    shot_words: q.parse.shots.clone(),
+                    presets: q.presets.iter().map(|p| p.id.clone()).collect(),
+                    basis: q.parse.basis,
+                    parse: q.parse.summary(),
+                    notes: q
+                        .parse
+                        .warnings
+                        .iter()
+                        .filter(|w| !w.is_error())
+                        .map(ToString::to_string)
+                        .collect(),
                 })
                 .collect()
         })
@@ -463,6 +521,7 @@ fn summarize(
         media_seconds: end.map_or(0.0, |s| round(s.media_time.as_secs_f64(), 3)),
         threads_joined: totals.threads_joined,
         sources,
+        queries,
         max_subjects: sampler.max_subjects,
         shots,
         program: ProgramSummary {

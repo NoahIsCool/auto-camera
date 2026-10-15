@@ -59,7 +59,7 @@ fn a_single_subject_is_tracked_and_kept_in_frame() {
     // The synthetic subject crosses the frame in four seconds, faster than
     // a medium shot's pan speed cap follows; a full shot keeps up.
     let mut c = config(1);
-    c.queries[0].presets = vec![PresetSpec::Size(ShotSize::Full)];
+    c.queries[0].presets = Some(vec![PresetSpec::Size(ShotSize::Full)]);
     let mut rig = Rig::new(c);
     rig.run(30);
     let (mut tracked, mut centred) = (0, 0);

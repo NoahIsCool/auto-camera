@@ -57,6 +57,9 @@ fn shot_names_fall_back_to_ids_and_dashes() {
         "gone/1/close"
     );
     assert_eq!(shot_name(&snap, None), NONE);
+    let mut snap = snapshot();
+    snap.shots[0].limited_by_zoom = true;
+    assert_eq!(shot_name(&snap, Some(&wide)), "Wide (limited)");
 }
 
 #[test]
@@ -125,4 +128,91 @@ fn output_text_covers_every_state_and_stat() {
         destinations(&out),
         "rtmp://example.com/app/<key> + /tmp/show.mp4"
     );
+}
+
+/// A live query for `prompt`, read with the built-in lexicon, framed by
+/// `sizes` (the shot words' sizes, or medium and close, when `None`).
+fn query(prompt: &str, literal: bool, sizes: Option<&[ac_core::ShotSize]>) -> QueryView {
+    let lexicon = ac_core::Lexicon::builtin();
+    let parse = ac_engine::read_prompt(prompt, literal, &lexicon);
+    let explicit = sizes.map(ac_engine::shot_presets);
+    QueryView {
+        id: ac_core::QueryId("q".into()),
+        name: "Q".into(),
+        prompt: prompt.into(),
+        presets: ac_engine::queries::settle_presets(explicit, &parse),
+        parse,
+    }
+}
+
+#[test]
+fn the_parse_line_says_what_the_detector_sees_and_the_framing() {
+    let lexicon = ac_core::Lexicon::builtin();
+    let parse = |text: &str| ac_core::parse_prompt(text, &lexicon);
+    assert_eq!(
+        parse_line(&parse("speaker upper body")).as_deref(),
+        Some("Detector sees: a person speaking · Framing: Medium, Medium close (person)")
+    );
+    assert_eq!(
+        parse_line(&parse("guitar")).as_deref(),
+        Some("Detector sees: guitar · Framing: no shot words (object)")
+    );
+    // Nothing typed yet: no line; shot words only: the reason.
+    assert_eq!(parse_line(&parse("  ")), None);
+    let line = parse_line(&parse("close-up")).unwrap();
+    assert!(line.contains("only names a shot size"), "{line}");
+    let literal = ac_core::literal_prompt("speaker upper body", &lexicon);
+    assert!(
+        parse_line(&literal)
+            .unwrap()
+            .contains("speaker upper body (literal)")
+    );
+}
+
+#[test]
+fn parse_notices_are_listed_but_errors_are_not() {
+    let lexicon = ac_core::Lexicon::builtin();
+    let notes = parse_notes(&ac_core::parse_prompt("drummer wide", &lexicon));
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].starts_with("Note: \"wide\"") && notes[0].ends_with('.'),
+        "{notes:?}"
+    );
+    assert!(parse_notes(&ac_core::parse_prompt("close-up", &lexicon)).is_empty());
+    assert!(parse_notes(&ac_core::parse_prompt("guitar", &lexicon)).is_empty());
+}
+
+#[test]
+fn live_queries_show_what_the_detector_is_asked_for() {
+    use ac_core::ShotSize::{Close, Full};
+    assert_eq!(
+        query_line(&query("speaker upper body", false, None)),
+        "“speaker upper body” → a person speaking · Medium, Medium close (person)"
+    );
+    assert_eq!(
+        query_line(&query("guitar", false, None)),
+        "“guitar” · Medium, Close (object)"
+    );
+    // Taken literally the head noun is "body": an object, as typed.
+    assert_eq!(
+        query_line(&query("speaker upper body", true, None)),
+        "“speaker upper body” (literal) · Medium, Close (object)"
+    );
+    let overridden = query("guitarist close-up", false, Some(&[Full]));
+    assert!(overridden.shot_words_overridden());
+    let hover = query_hover(&overridden);
+    assert!(
+        hover.starts_with("Detector sees: a person playing guitar"),
+        "{hover}"
+    );
+    assert!(
+        hover.contains("override the prompt's shot words"),
+        "{hover}"
+    );
+    let agreed = query("guitarist close-up", false, Some(&[Close]));
+    assert!(!query_hover(&agreed).contains("override"));
+    // The form sends sizes widest first; that is not an override.
+    let reordered = query("guitarist close and full", false, Some(&[Full, Close]));
+    assert!(!reordered.shot_words_overridden());
+    assert!(query_hover(&query("drummer wide", false, None)).contains("\nNote: \"wide\""));
 }

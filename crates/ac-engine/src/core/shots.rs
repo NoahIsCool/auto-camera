@@ -10,14 +10,24 @@
 //!   subject is an orphan) or replaced by an alias (the store promoted it).
 //!   The operator must never see the shot on air vanish and the program go
 //!   black; the extra shots go once the subject leaves program and preview.
-//! * **Framing.** Every shot's framer steps by `dt` and is rescored.
+//! * **Framing.** Every shot's framer steps by `dt` and is rescored. A
+//!   subject's box is framed as what its primary query asks for
+//!   ([`ac_core::Query::framing_extent`]): cut at body lines only when the
+//!   query's basis is a person and the detector marked the box a whole
+//!   person; an orphan (its query removed) keeps the detector's extent.
 
 use std::collections::{HashMap, HashSet};
 
-use ac_core::{Preset, SubjectId, TrackState};
+use ac_core::{Extent, Preset, Query, SubjectId, TrackState};
 
 use super::EngineCore;
 use crate::catalog::{SourceFacts, SourceShots, SubjectFacts, SubjectShots, desired_shots};
+
+/// What a subject's box is framed as: what its primary `query` asks for,
+/// or the detector's extent for an orphan; see the module docs.
+fn framing_extent(query: Option<&Query>, detected: Extent) -> Extent {
+    query.map_or(detected, |q| q.framing_extent(detected))
+}
 
 impl EngineCore {
     /// Pushes the program and preview subjects to their stores.
@@ -70,7 +80,7 @@ impl EngineCore {
                         Some(SubjectShots {
                             id,
                             bbox: r.subject.bbox,
-                            extent: r.subject.extent,
+                            extent: framing_extent(query, r.subject.extent),
                             query_name: query.map_or(r.subject.query.0.as_str(), |q| &q.name),
                             presets,
                         })
@@ -134,6 +144,7 @@ impl EngineCore {
             })
             .collect();
         let sources = &self.sources;
+        let queries = &self.queries;
         let output_aspect = self.compositor.config().aspect();
         self.catalog.step(
             dt,
@@ -141,9 +152,10 @@ impl EngineCore {
             |i, id| {
                 let s = sources.get(i)?;
                 let subject = s.vision.store().get(id)?;
+                let query = queries.iter().find(|q| q.id == subject.query);
                 Some(SubjectFacts {
                     bbox: subject.bbox,
-                    extent: subject.extent,
+                    extent: framing_extent(query, subject.extent),
                     tracking: subject.state == TrackState::Tracking,
                     confidence: s.vision.confidence(id),
                 })

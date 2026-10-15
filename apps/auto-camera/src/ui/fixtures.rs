@@ -7,15 +7,17 @@ use std::time::Duration;
 use ac_core::{Rect, ShotId, SourceId, SubjectId};
 use ac_director::CandidateKind;
 use ac_engine::{
-    EngineCore, EngineSnapshot, OutputView, ShotStatus, ShotView, StudioConfig, Tally, TimingView,
+    EngineCore, EngineSnapshot, OutputView, QuerySettings, ShotStatus, ShotView, StudioConfig,
+    Tally, TimingView,
 };
 use ac_media::SourceInfo;
 use ac_output::{EncoderChoice, EncoderStats, Progress};
 use ac_sources::SourceConfig;
 
-/// A snapshot of a fresh one-source studio: the wide shot, nothing on air.
+/// A snapshot of a fresh one-source studio with one query ("speaker upper
+/// body", framed by its shot words): the wide shot, nothing on air.
 pub fn snapshot() -> EngineSnapshot {
-    let config = StudioConfig::with_source(
+    let mut config = StudioConfig::with_source(
         "stage",
         SourceConfig::Synthetic {
             width: 320,
@@ -24,6 +26,9 @@ pub fn snapshot() -> EngineSnapshot {
             subjects: 1,
         },
     );
+    config
+        .queries
+        .push(QuerySettings::new("Speaker", "speaker upper body"));
     let info = SourceInfo {
         id: SourceId("stage".into()),
         width: 320,

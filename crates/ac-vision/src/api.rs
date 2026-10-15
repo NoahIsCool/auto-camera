@@ -35,7 +35,10 @@ use crate::error::VisionError;
 pub struct PromptQuery {
     /// Query the prompt belongs to; detections carry it back.
     pub id: QueryId,
-    /// Open-vocabulary prompt, such as "person's upper body".
+    /// Open-vocabulary prompt, such as "a person playing guitar". The
+    /// engine sends a query's parsed detector phrase here, never the
+    /// operator's prompt: "speaker upper body" arrives as "a person
+    /// speaking" (`ac_core::Query::detector_phrase`).
     pub prompt: String,
 }
 

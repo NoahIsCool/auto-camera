@@ -97,7 +97,7 @@ thumb_rate_hz = 5.0
     c.validate().unwrap();
     let q = &c.queries[0];
     assert_eq!(q.query_id(), QueryId("lead-singer".into()));
-    let presets: Vec<Preset> = q.presets.iter().map(PresetSpec::to_preset).collect();
+    let presets = q.explicit_presets().unwrap();
     assert_eq!(presets[0], preset_for(ShotSize::Medium));
     assert_eq!(presets[1].id, "tight");
     assert_eq!(presets[1].max_zoom, 6.0);
@@ -247,35 +247,21 @@ fn invalid_values_are_rejected_with_a_message() {
         ),
         (
             "empty prompt",
-            Box::new(|c| {
-                c.queries.push(QuerySettings {
-                    id: None,
-                    name: "P".into(),
-                    prompt: " ".into(),
-                    presets: default_presets(),
-                })
-            }),
+            Box::new(|c| c.queries.push(QuerySettings::new("P", " "))),
         ),
         (
             "wide preset",
             Box::new(|c| {
                 c.queries.push(QuerySettings {
-                    id: None,
-                    name: "P".into(),
-                    prompt: "person".into(),
-                    presets: vec![PresetSpec::Size(ShotSize::Wide)],
+                    presets: Some(vec![PresetSpec::Size(ShotSize::Wide)]),
+                    ..QuerySettings::new("P", "person")
                 })
             }),
         ),
         (
             "duplicate query",
             Box::new(|c| {
-                let q = QuerySettings {
-                    id: None,
-                    name: "P".into(),
-                    prompt: "person".into(),
-                    presets: default_presets(),
-                };
+                let q = QuerySettings::new("P", "person");
                 c.queries.push(q.clone());
                 c.queries.push(q);
             }),
@@ -349,11 +335,134 @@ fn round_trips_through_toml() {
     let mut c = minimal();
     c.queries.push(QuerySettings {
         id: Some("p".into()),
-        name: "Person".into(),
-        prompt: "person".into(),
-        presets: default_presets(),
+        ..QuerySettings::new("Person", "person")
     });
+    c.queries.push(QuerySettings {
+        presets: Some(vec![PresetSpec::Size(ShotSize::Close)]),
+        literal: true,
+        ..QuerySettings::new("Speaker", "speaker upper body")
+    });
+    c.lexicon.person_words.push("organist".into());
     let text = toml::to_string(&c).unwrap();
     let back = StudioConfig::parse(&text, false).unwrap();
     assert_eq!(back, c);
+}
+
+/// [`MINIMAL`] followed by `extra`, parsed (not validated).
+fn with(extra: &str) -> StudioConfig {
+    StudioConfig::parse(&format!("{MINIMAL}{extra}"), false).unwrap()
+}
+
+/// The sizes of a query's presets.
+fn sizes(q: &Query) -> Vec<ShotSize> {
+    q.presets.iter().map(|p| p.size).collect()
+}
+
+#[test]
+fn queries_read_their_prompts_once_at_load() {
+    let c = with(
+        r#"
+[[queries]]
+name = "Lectern"
+prompt = "a person speaking at a lectern"
+
+[[queries]]
+name = "Speaker"
+prompt = "speaker upper body"
+
+[[queries]]
+name = "Guitarist"
+prompt = "guitarist close-up"
+presets = ["full"]
+
+[[queries]]
+name = "Experiment"
+prompt = "speaker upper body"
+literal = true
+"#,
+    );
+    c.validate().unwrap();
+    assert_eq!(c.queries[0].presets, None);
+    let q = c.build_queries().unwrap();
+    // No shot or role words: as before shot words, medium and close.
+    assert_eq!(q[0].prompt, "a person speaking at a lectern");
+    assert_eq!(q[0].detector_phrase(), q[0].prompt);
+    assert_eq!(sizes(&q[0]), [ShotSize::Medium, ShotSize::Close]);
+    // Shot words pick the presets; the role word is rewritten.
+    assert_eq!(q[1].prompt, "speaker upper body");
+    assert_eq!(q[1].detector_phrase(), "a person speaking");
+    assert_eq!(sizes(&q[1]), [ShotSize::Medium, ShotSize::MediumClose]);
+    // Explicit presets always win.
+    assert_eq!(sizes(&q[2]), [ShotSize::Full]);
+    assert_eq!(q[2].parse.shots, [ShotSize::Close]);
+    // Literal: as typed, default presets.
+    assert_eq!(q[3].detector_phrase(), "speaker upper body");
+    assert!(q[3].parse.literal);
+    assert_eq!(sizes(&q[3]), [ShotSize::Medium, ShotSize::Close]);
+}
+
+#[test]
+fn the_lexicon_section_extends_the_builtin_words() {
+    let c = with(
+        r#"
+[[queries]]
+name = "Leader"
+prompt = "worship leader cowboy"
+
+[[queries]]
+name = "Speaker"
+prompt = "speaker upper body"
+
+[[queries]]
+name = "Organ"
+prompt = "the organist"
+
+[lexicon]
+roles = [{ word = "worship leader", phrase = "a person singing" }]
+shots = [{ phrase = "cowboy", sizes = ["medium"] }, { phrase = "upper body", sizes = ["medium"] }]
+person_words = ["organist"]
+"#,
+    );
+    c.validate().unwrap();
+    let q = c.build_queries().unwrap();
+    assert_eq!(q[0].detector_phrase(), "a person singing");
+    assert_eq!(sizes(&q[0]), [ShotSize::Medium]);
+    // A built-in entry is replaced, the other built-in words remain.
+    assert_eq!(q[1].detector_phrase(), "a person speaking");
+    assert_eq!(sizes(&q[1]), [ShotSize::Medium]);
+    assert_eq!(q[2].basis(), ac_core::Basis::Person);
+    assert_eq!(minimal().prompt_lexicon(), Lexicon::builtin());
+}
+
+#[test]
+fn prompts_and_lexicons_that_cannot_work_are_rejected() {
+    let invalid = |extra: &str| match with(extra).validate() {
+        Err(ConfigError::Invalid(msg)) => msg,
+        other => panic!("{extra}: expected invalid, got {other:?}"),
+    };
+    let msg = invalid("[[queries]]\nname = \"Tight\"\nprompt = \"close-up\"\n");
+    assert!(
+        msg.contains("\"Tight\"") && msg.contains("only names a shot size"),
+        "{msg}"
+    );
+    // Taken literally, the same prompt is valid.
+    with("[[queries]]\nname = \"Tight\"\nprompt = \"close-up\"\nliteral = true\n")
+        .validate()
+        .unwrap();
+    // Explicitly empty presets are still an error.
+    let msg = invalid("[[queries]]\nname = \"P\"\nprompt = \"person\"\npresets = []\n");
+    assert!(msg.contains("at least one preset"), "{msg}");
+    let msg = invalid("[lexicon]\nshots = [{ phrase = \"snug\", sizes = [\"wide\"] }]\n");
+    assert!(
+        msg.starts_with("lexicon: ") && msg.contains("snug"),
+        "{msg}"
+    );
+    let msg = invalid("[lexicon]\nroles = [{ word = \"the\", phrase = \"a person\" }]\n");
+    assert!(msg.contains("grammar word"), "{msg}");
+    // Unknown keys in the lexicon are typos, not ignored.
+    let text = format!("{MINIMAL}[lexicon]\nrole = []\n");
+    assert!(StudioConfig::parse(&text, false).is_err());
+    let text =
+        format!("{MINIMAL}[lexicon]\nroles = [{{ word = \"x\", phrase = \"y\", needs = 1 }}]\n");
+    assert!(StudioConfig::parse(&text, false).is_err());
 }

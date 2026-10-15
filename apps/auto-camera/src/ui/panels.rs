@@ -3,83 +3,24 @@
 //!
 //! Each panel draws from the snapshot and returns the [`EngineCommand`]s
 //! the operator asked for; none of them talks to the engine. The only state
-//! they own is what the operator is typing ([`QueryForm`], [`OutputForm`]),
-//! and the forms validate themselves into commands without a window, so
-//! the rules (a query needs a name, a prompt and at least one framing; an
-//! output needs a destination) are tested directly.
+//! they own is what the operator is typing ([`QueryForm`], in
+//! [`query_form`], and [`OutputForm`]), and the forms validate themselves
+//! into commands without a window, so the rules (a query needs a name, a
+//! prompt with something to frame and at least one framing; an output needs
+//! a destination) are tested directly.
 
 use std::path::PathBuf;
 
-use ac_core::{Preset, ShotSize, TrackState};
+use ac_core::{Lexicon, TrackState};
 use ac_director::{ContentProfile, DirectorMode};
-use ac_engine::{EngineCommand, EngineSnapshot, OutputState, preset_for};
+use ac_engine::{EngineCommand, EngineSnapshot, OutputState};
 use eframe::egui::{self, Color32, RichText, Ui};
 
+use super::query_form::{self, QueryForm};
 use super::text::{
-    destinations, dropped_line, encoder_lines, output_state, percent, shot_name, source_line,
-    timing_line,
+    destinations, dropped_line, encoder_lines, output_state, percent, query_hover, query_line,
+    shot_name, source_line, timing_line,
 };
-
-/// Framings offered for new queries, with their labels.
-pub const SIZES: [(ShotSize, &str); 4] = [
-    (ShotSize::Full, "Full"),
-    (ShotSize::Medium, "Medium"),
-    (ShotSize::MediumClose, "Medium close"),
-    (ShotSize::Close, "Close"),
-];
-
-/// The add-query form.
-#[derive(Debug, Clone, PartialEq)]
-pub struct QueryForm {
-    /// Operator-facing name.
-    pub name: String,
-    /// Detector prompt.
-    pub prompt: String,
-    /// Which of [`SIZES`] to create shots for.
-    pub sizes: [bool; 4],
-}
-
-impl Default for QueryForm {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            prompt: String::new(),
-            sizes: [false, true, false, true],
-        }
-    }
-}
-
-impl QueryForm {
-    /// The selected framings.
-    pub fn presets(&self) -> Vec<Preset> {
-        SIZES
-            .iter()
-            .zip(self.sizes)
-            .filter(|(_, on)| *on)
-            .map(|((size, _), _)| preset_for(*size))
-            .collect()
-    }
-
-    /// The `AddQuery` command, or why the form is incomplete.
-    pub fn command(&self) -> Result<EngineCommand, &'static str> {
-        let (name, prompt) = (self.name.trim(), self.prompt.trim());
-        if name.is_empty() {
-            return Err("give the query a name");
-        }
-        if prompt.is_empty() {
-            return Err("describe what to look for");
-        }
-        let presets = self.presets();
-        if presets.is_empty() {
-            return Err("pick at least one framing");
-        }
-        Ok(EngineCommand::AddQuery {
-            name: name.to_owned(),
-            prompt: prompt.to_owned(),
-            presets,
-        })
-    }
-}
 
 /// The output form.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -161,8 +102,14 @@ pub fn director(ui: &mut Ui, snap: &EngineSnapshot) -> Vec<EngineCommand> {
     commands
 }
 
-/// The queries panel: live queries, the add form and the subjects.
-pub fn queries(ui: &mut Ui, snap: &EngineSnapshot, form: &mut QueryForm) -> Vec<EngineCommand> {
+/// The queries panel: live queries, the add form (its prompt read with
+/// `lexicon`, the engine's) and the subjects.
+pub fn queries(
+    ui: &mut Ui,
+    snap: &EngineSnapshot,
+    form: &mut QueryForm,
+    lexicon: &Lexicon,
+) -> Vec<EngineCommand> {
     let mut commands = Vec::new();
     ui.heading("Queries");
     if snap.queries.is_empty() {
@@ -175,40 +122,13 @@ pub fn queries(ui: &mut Ui, snap: &EngineSnapshot, form: &mut QueryForm) -> Vec<
                     query: q.id.clone(),
                 });
             }
-            let sizes: Vec<&str> = q.presets.iter().map(|p| p.name.as_str()).collect();
             ui.label(RichText::new(&q.name).strong());
-            ui.label(RichText::new(format!("“{}” · {}", q.prompt, sizes.join(", "))).weak());
+            ui.label(RichText::new(query_line(q)).weak())
+                .on_hover_text(query_hover(q));
         });
     }
     ui.add_space(4.0);
-    egui::Grid::new("query-form").num_columns(2).show(ui, |ui| {
-        ui.label("Name");
-        ui.text_edit_singleline(&mut form.name);
-        ui.end_row();
-        ui.label("Prompt");
-        ui.text_edit_singleline(&mut form.prompt);
-        ui.end_row();
-    });
-    ui.horizontal_wrapped(|ui| {
-        for ((_, label), on) in SIZES.iter().zip(form.sizes.iter_mut()) {
-            ui.checkbox(on, *label);
-        }
-    });
-    let ready = form.command();
-    let add = ui.add_enabled(ready.is_ok(), egui::Button::new("Add query"));
-    match ready {
-        Ok(cmd) if add.clicked() => {
-            commands.push(cmd);
-            *form = QueryForm {
-                sizes: form.sizes,
-                ..QueryForm::default()
-            };
-        }
-        Ok(_) => {}
-        Err(why) => {
-            add.on_disabled_hover_text(why);
-        }
-    }
+    commands.extend(query_form::show(ui, form, lexicon));
     ui.separator();
     ui.heading("Subjects");
     if snap.subjects.is_empty() {
@@ -351,40 +271,6 @@ mod tests {
     use crate::ui::fixtures::snapshot;
 
     #[test]
-    fn a_complete_query_form_adds_a_query() {
-        let form = QueryForm {
-            name: " Lead singer ".into(),
-            prompt: "person singing".into(),
-            sizes: [true, false, false, true],
-        };
-        let Ok(EngineCommand::AddQuery {
-            name,
-            prompt,
-            presets,
-        }) = form.command()
-        else {
-            panic!("a command");
-        };
-        assert_eq!(name, "Lead singer");
-        assert_eq!(prompt, "person singing");
-        let sizes: Vec<ShotSize> = presets.iter().map(|p| p.size).collect();
-        assert_eq!(sizes, [ShotSize::Full, ShotSize::Close]);
-        assert_eq!(QueryForm::default().presets().len(), 2);
-    }
-
-    #[test]
-    fn incomplete_query_forms_say_what_is_missing() {
-        let mut form = QueryForm::default();
-        assert_eq!(form.command(), Err("give the query a name"));
-        form.name = "Pastor".into();
-        form.prompt = "   ".into();
-        assert_eq!(form.command(), Err("describe what to look for"));
-        form.prompt = "person at the lectern".into();
-        form.sizes = [false; 4];
-        assert_eq!(form.command(), Err("pick at least one framing"));
-    }
-
-    #[test]
     fn the_output_form_needs_a_valid_destination() {
         let mut form = OutputForm::new(None, None);
         assert_eq!(form.command(), Err("give an RTMP URL or a recording path"));
@@ -417,10 +303,11 @@ mod tests {
         let mut q = QueryForm::default();
         let mut o = OutputForm::default();
         let mut commands = Vec::new();
+        let lexicon = Lexicon::builtin();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             commands.clear();
             commands.extend(director(ui, &snap));
-            commands.extend(queries(ui, &snap, &mut q));
+            commands.extend(queries(ui, &snap, &mut q, &lexicon));
             commands.extend(output(ui, &snap, &mut o));
             status_bar(ui, &snap, Some(("cut: no preview", true)));
         });

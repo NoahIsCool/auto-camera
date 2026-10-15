@@ -88,7 +88,8 @@ fn two_queries() -> StudioConfig {
         id: None,
         name: "Body".into(),
         prompt: "body".into(),
-        presets: vec![PresetSpec::Size(ShotSize::Full)],
+        presets: Some(vec![PresetSpec::Size(ShotSize::Full)]),
+        literal: false,
     });
     c
 }
@@ -153,18 +154,19 @@ fn an_on_air_shot_survives_its_query_being_replaced_by_an_alias() {
 fn a_kept_shot_frames_with_the_new_query_s_preset() {
     // Both queries define a "close" preset, with different headroom.
     let mut c = config(1);
-    c.queries[0].presets = vec![PresetSpec::Full(Preset {
+    c.queries[0].presets = Some(vec![PresetSpec::Full(Preset {
         id: "close".into(),
         name: "Close".into(),
         size: ShotSize::Close,
         headroom: 0.03,
         max_zoom: 6.0,
-    })];
+    })]);
     c.queries.push(QuerySettings {
         id: None,
         name: "Body".into(),
         prompt: "body".into(),
-        presets: vec![PresetSpec::Size(ShotSize::Close)],
+        presets: Some(vec![PresetSpec::Size(ShotSize::Close)]),
+        literal: false,
     });
     let mut rig = Rig::new(c);
     rig.run(31);

@@ -13,7 +13,7 @@
 
 use std::time::{Duration, Instant};
 
-use ac_core::ShotId;
+use ac_core::{Lexicon, ShotId};
 use ac_engine::{
     CommandError, CommandReply, Engine, EngineCommand, EngineHandle, PendingReply, StudioConfig,
 };
@@ -21,7 +21,8 @@ use eframe::egui;
 
 use super::keys;
 use super::multiview;
-use super::panels::{self, OutputForm, QueryForm};
+use super::panels::{self, OutputForm};
+use super::query_form::QueryForm;
 use super::switching::{self, SwitchState};
 use super::textures::Textures;
 
@@ -83,6 +84,9 @@ pub struct OperatorApp {
     switch: SwitchState,
     /// The add-query form.
     query_form: QueryForm,
+    /// The prompt parser's vocabulary, built from the same config as the
+    /// engine's, so the form reads prompts exactly as the engine will.
+    lexicon: Lexicon,
     /// The output form.
     output_form: OutputForm,
     /// Replies not yet arrived, with their command names.
@@ -111,6 +115,7 @@ impl OperatorApp {
             textures: Textures::default(),
             switch: SwitchState::new(config.switcher.to_transition()),
             query_form: QueryForm::default(),
+            lexicon: config.prompt_lexicon(),
             output_form: OutputForm::new(
                 config.output.rtmp_url.as_deref(),
                 config.output.record_path.as_deref(),
@@ -188,7 +193,12 @@ impl OperatorApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     commands.extend(panels::director(ui, &snap));
                     ui.separator();
-                    commands.extend(panels::queries(ui, &snap, &mut self.query_form));
+                    commands.extend(panels::queries(
+                        ui,
+                        &snap,
+                        &mut self.query_form,
+                        &self.lexicon,
+                    ));
                     ui.separator();
                     commands.extend(panels::output(ui, &snap, &mut self.output_form));
                 });

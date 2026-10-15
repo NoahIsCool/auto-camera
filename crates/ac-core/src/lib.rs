@@ -4,10 +4,12 @@
 //!
 //! * A [`Source`] is a video input (camera, capture card, network feed or file).
 //! * A [`Query`] is a named text prompt, such as "speaker upper body", with the
-//!   framing [`Preset`]s that apply to every subject it matches.
+//!   framing [`Preset`]s that apply to every subject it matches and the
+//!   prompt's [`ParsedPrompt`], read once when the query is created.
 //! * A [`Subject`] is one tracked entity that a query matched on one source;
 //!   its [`Extent`] says whether its box is a whole person or the object
-//!   itself, which decides how its shots are composed.
+//!   itself, which with its query's [`Basis`] decides how its shots are
+//!   composed ([`Query::framing_extent`]).
 //! * A [`Shot`] is a virtual camera: a subject framed by a preset, or a source wide.
 //!
 //! An operator's prompt is not the detector's prompt: [`parse_prompt`] splits

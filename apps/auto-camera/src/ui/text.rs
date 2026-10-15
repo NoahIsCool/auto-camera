@@ -8,9 +8,10 @@
 
 use std::time::Duration;
 
-use ac_core::ShotId;
+use ac_core::{ParsedPrompt, PromptWarning, ShotId};
 use ac_engine::{
-    EngineSnapshot, OutputState, OutputView, ShotStatus, ShotView, SourceView, TimingView,
+    EngineSnapshot, OutputState, OutputView, QueryView, ShotStatus, ShotView, SourceView,
+    TimingView,
 };
 use ac_output::EncoderStats;
 
@@ -72,14 +73,65 @@ pub fn shot_status(shot: &ShotView) -> String {
     }
 }
 
-/// The name of `shot`, or [`NONE`].
+/// The name of `shot` as [`shot_title`] gives it (so the monitors and the
+/// director's suggestion say "(limited)" too), its id when it is gone, or
+/// [`NONE`].
 pub fn shot_name(snap: &EngineSnapshot, shot: Option<&ShotId>) -> String {
     match shot {
-        Some(id) => snap
-            .shot(id)
-            .map_or_else(|| id.0.clone(), |s| s.name.clone()),
+        Some(id) => snap.shot(id).map_or_else(|| id.0.clone(), shot_title),
         None => NONE.into(),
     }
+}
+
+/// The query form's line under the prompt: what the detector will see and
+/// the framings the shot words ask for (`Detector sees: a person speaking ·
+/// Framing: Medium, Medium close (person)`), or why the prompt cannot be
+/// used. Nothing while the prompt is empty.
+pub fn parse_line(parse: &ParsedPrompt) -> Option<String> {
+    match parse.error() {
+        Some(PromptWarning::Empty) => None,
+        _ => Some(parse.summary()),
+    }
+}
+
+/// The parse's notices (not its errors), one sentence each.
+pub fn parse_notes(parse: &ParsedPrompt) -> Vec<String> {
+    parse
+        .warnings
+        .iter()
+        .filter(|w| !w.is_error())
+        .map(|w| format!("Note: {w}."))
+        .collect()
+}
+
+/// A live query's caption: its prompt, what the detector is asked for when
+/// that differs, its framings and basis, as in `“speaker upper body” → a
+/// person speaking · Medium, Medium close (person)`.
+pub fn query_line(q: &QueryView) -> String {
+    let mut line = format!("“{}”", q.prompt);
+    if q.parse.literal {
+        line.push_str(" (literal)");
+    } else if q.parse.model_phrase != q.prompt {
+        line.push_str(&format!(" → {}", q.parse.model_phrase));
+    }
+    let sizes: Vec<&str> = q.presets.iter().map(|p| p.name.as_str()).collect();
+    line.push_str(&format!(
+        " · {} ({})",
+        sizes.join(", "),
+        q.parse.basis.label()
+    ));
+    line
+}
+
+/// A live query's hover text: the parse line, whether presets override the
+/// shot words, and the parse's notices.
+pub fn query_hover(q: &QueryView) -> String {
+    let mut lines = vec![q.parse.summary()];
+    if q.shot_words_overridden() {
+        lines.push("The query's presets override the prompt's shot words.".into());
+    }
+    lines.extend(parse_notes(&q.parse));
+    lines.join("\n")
 }
 
 /// One source's health for the status bar.

@@ -16,6 +16,11 @@ height = 720
 fps = 30
 subjects = 3
 
+# A prompt says who or what to frame, and may also say what shots to make:
+# "person close-up" would make Close shots without a `presets` line. Explicit
+# `presets` always win over such shot words; with neither, a query gets
+# medium and close. The window's query form shows how a prompt reads before
+# it is added ("Detector sees: person · Framing: ...").
 [[queries]]
 name = "Person"
 prompt = "person"

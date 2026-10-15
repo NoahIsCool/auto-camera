@@ -38,14 +38,20 @@ pub enum EngineCommand {
         /// The transition.
         transition: Transition,
     },
-    /// Add a prompt query; its id is a slug of `name`.
+    /// Add a prompt query; its id is a slug of `name`. The prompt is read
+    /// once, with the studio's lexicon ([`crate::queries`]).
     AddQuery {
         /// Operator-facing name.
         name: String,
-        /// Detector prompt.
+        /// The operator's prompt, such as "speaker upper body".
         prompt: String,
-        /// Framings for every matched subject.
-        presets: Vec<Preset>,
+        /// Framings for every matched subject. `Some` always wins over the
+        /// prompt's shot words; `None` takes one preset per shot size they
+        /// name, or medium and close when they name none.
+        presets: Option<Vec<Preset>>,
+        /// Send the prompt to the detector as typed, without reading shot
+        /// or role words.
+        literal: bool,
     },
     /// Remove a query and the subjects only it matched.
     RemoveQuery {
@@ -204,7 +210,8 @@ mod tests {
             EngineCommand::AddQuery {
                 name: "a".into(),
                 prompt: "b".into(),
-                presets: vec![],
+                presets: None,
+                literal: false,
             },
             EngineCommand::RemoveQuery {
                 query: QueryId("a".into()),

@@ -22,7 +22,9 @@
 //!    proposes (and in Auto mode takes) a shot.
 //! 7. **Rendering.** The compositor renders the program; monitors and
 //!    multiview tiles are rendered at their own, lower rates.
-//! 8. **Discovery requests** are issued for sources that are due.
+//! 8. **Discovery requests** are issued for sources that are due, asking
+//!    for each query's parsed detector phrase ([`Query::detector_phrase`]),
+//!    not its prompt.
 //!
 //! Given the same configuration, frames, results and commands, the core
 //! produces the same program, which is what the deterministic tests rely on.
@@ -32,7 +34,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use ac_compositor::{Compositor, CompositorConfig};
-use ac_core::{Preset, QueryId, ShotId, SourceId};
+use ac_core::{Lexicon, Query, QueryId, ShotId, SourceId};
 use ac_director::{Director, DirectorDecision};
 use ac_framing::FramerConfig;
 use ac_media::{SourceInfo, SourceState, VideoFrame};
@@ -40,7 +42,7 @@ use ac_switcher::Switcher;
 use ac_vision::PromptQuery;
 
 use crate::catalog::Catalog;
-use crate::config::{DiscoverySettings, MonitorSettings, PresetSpec, StudioConfig};
+use crate::config::{DiscoverySettings, MonitorSettings, StudioConfig};
 use crate::discovery::{DiscoveryRequest, DiscoveryResult, staleness};
 use crate::schedule::RateMeter;
 use crate::snapshot::DiscoveryStats;
@@ -73,19 +75,6 @@ pub struct TickOutput {
     pub program: VideoFrame,
     /// Discovery requests to hand to the workers, by source index.
     pub requests: Vec<(usize, DiscoveryRequest)>,
-}
-
-/// A prompt query and its presets.
-#[derive(Debug, Clone, PartialEq)]
-pub struct QueryState {
-    /// Stable id.
-    pub id: QueryId,
-    /// Operator-facing name.
-    pub name: String,
-    /// Detector prompt.
-    pub prompt: String,
-    /// Framings.
-    pub presets: Vec<Preset>,
 }
 
 /// Discovery scheduling of one source.
@@ -150,8 +139,11 @@ impl SourceSlot {
 pub struct EngineCore {
     /// Sources in config order.
     sources: Vec<SourceSlot>,
-    /// Prompt queries in creation order.
-    queries: Vec<QueryState>,
+    /// Prompt queries in creation order, each prompt read once when the
+    /// query was created ([`crate::queries`]).
+    queries: Vec<Query>,
+    /// The prompt parser's vocabulary, for queries added by command.
+    lexicon: Lexicon,
     /// Discovery tuning.
     discovery: DiscoverySettings,
     /// Framing tuning for new shots.
@@ -240,16 +232,7 @@ impl EngineCore {
                 },
             });
         }
-        let queries = config
-            .queries
-            .iter()
-            .map(|q| QueryState {
-                id: q.query_id(),
-                name: q.name.clone(),
-                prompt: q.prompt.clone(),
-                presets: q.presets.iter().map(PresetSpec::to_preset).collect(),
-            })
-            .collect();
+        let queries = config.build_queries().map_err(|e| e.to_string())?;
         let mut switcher = Switcher::new();
         switcher
             .set_transition(config.switcher.to_transition())
@@ -264,6 +247,7 @@ impl EngineCore {
         let mut core = Self {
             sources,
             queries,
+            lexicon: config.prompt_lexicon(),
             discovery: config.discovery,
             framing: config.framing,
             monitors: config.monitors,
@@ -304,7 +288,7 @@ impl EngineCore {
     }
 
     /// The live queries.
-    pub fn queries(&self) -> &[QueryState] {
+    pub fn queries(&self) -> &[Query] {
         &self.queries
     }
 
@@ -426,12 +410,14 @@ impl EngineCore {
         let now = self.now;
         let timeout = self.discovery.timeout();
         let interval = self.discovery.interval();
+        // The detector gets each query's parsed phrase, never the operator's
+        // prompt: "speaker upper body" asks for "a person speaking".
         let queries: Vec<PromptQuery> = self
             .queries
             .iter()
             .map(|q| PromptQuery {
                 id: q.id.clone(),
-                prompt: q.prompt.clone(),
+                prompt: q.detector_phrase().to_string(),
             })
             .collect();
         let mut out = Vec::new();

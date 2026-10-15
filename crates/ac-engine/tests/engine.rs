@@ -157,8 +157,10 @@ fn queries_added_at_runtime_create_shots() {
     assert_eq!(
         h.send(EngineCommand::AddQuery {
             name: "Speaker".into(),
-            prompt: "person".into(),
-            presets: vec![ac_engine::preset_for(ac_core::ShotSize::Full)],
+            // No presets: the shot word picks a full shot.
+            prompt: "person full".into(),
+            presets: None,
+            literal: false,
         }),
         Ok(CommandReply::QueryAdded {
             id: QueryId("speaker".into())
@@ -168,7 +170,15 @@ fn queries_added_at_runtime_create_shots() {
         .wait_until(WAIT, |s| s.shot(&shot("stage/1/full")).is_some())
         .expect("shot for the new query");
     assert_eq!(snap.queries.len(), 1);
-    assert_eq!(snap.queries[0].prompt, "person");
+    let q = &snap.queries[0];
+    assert_eq!(q.prompt, "person full");
+    assert_eq!(q.parse.model_phrase, "person");
+    assert_eq!(q.parse.shots, [ac_core::ShotSize::Full]);
+    assert!(
+        snap.shots
+            .iter()
+            .all(|s| s.preset.as_deref() != Some("medium"))
+    );
     engine.shutdown().unwrap();
 }
 

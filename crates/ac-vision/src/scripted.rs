@@ -8,10 +8,11 @@
 //! deterministically, without model files.
 //!
 //! Each detection keeps the [`Extent`](ac_core::Extent) the script gives
-//! it. A script that stands in for people, as the engine's synthetic
-//! ground truth does, marks its boxes `Extent::Person`, so they are framed
-//! exactly like the people-first OWL detector's whole-person boxes; any
-//! other box is `Extent::Object`.
+//! it. A script that stands in for people marks its boxes
+//! `Extent::Person`, so they are framed exactly like the people-first OWL
+//! detector's whole-person boxes; any other box is `Extent::Object`. The
+//! engine's synthetic ground truth answers with coloured rectangles, not
+//! people, so it marks them `Extent::Object`.
 
 use std::collections::BTreeMap;
 use std::fmt;

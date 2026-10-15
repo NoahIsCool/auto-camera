@@ -8,7 +8,11 @@
 //! ```
 //!
 //! How tall the frame should be depends on what the subject's box covers
-//! ([`Extent`]); [`compose_subject`] picks the basis:
+//! ([`Extent`]); [`compose_subject`] picks the basis. The extent passed in
+//! is the one the subject is framed as: the engine marks a box a whole
+//! person only when the detector did and the subject's query asks for a
+//! person (`ac_core::Query::framing_extent`), so "guitar close-up" answered
+//! with the player holding the guitar stays on the object basis.
 //!
 //! * **Object basis** ([`compose`], the fill rule). For a subject box `b` and
 //!   a preset with fill `f` ([`ShotSize::fill`]): frame height `h = b.h / f`,

@@ -90,6 +90,7 @@ impl EngineCore {
                 id: q.id.clone(),
                 name: q.name.clone(),
                 prompt: q.prompt.clone(),
+                parse: q.parse.clone(),
                 presets: q.presets.clone(),
             })
             .collect();

@@ -18,6 +18,26 @@ loop_playback = true
 max_width = 1280
 audio = true
 
+# A prompt names who or what to frame, and may name shots too (ADR 0003):
+#
+# * Shot words at either end, or right after a possessive, pick framings:
+#   close, close-up, cu, head and shoulders, headshot, tight, face (Close);
+#   medium close, mcu, chest up, bust (Medium close); medium, mid shot, ms,
+#   waist up (Medium); upper body, half body (Medium and Medium close, until
+#   Noah picks one); full, full body, full length, head to toe, long shot, fs
+#   (Full); and "wide" after a subject ("drummer wide", Full for now; the
+#   subject with its kit is later work). "speaker's upper body" works too.
+# * Role words are rewritten for the detector when they are the whole
+#   subject: speaker, pastor and preacher ask for "a person speaking",
+#   guitarist for "a person playing guitar", drummer for "a person playing
+#   drums", singer for "a person singing". Each is a hypothesis until
+#   benchmarked on footage; the window shows what the detector sees.
+# * A person subject (a person or role word) is framed at body lines measured
+#   from the head; anything else ("guitar close-up") scales its box.
+# * Explicit `presets` always win over shot words; with neither, a query
+#   gets medium and close. `literal = true` sends the prompt as typed.
+#
+# Prompts without shot or role words, like the first two, behave as before.
 [[queries]]
 name = "Speaker"
 prompt = "a person speaking at a lectern"
@@ -27,6 +47,21 @@ presets = ["medium", "close"]
 name = "Guitarist"
 prompt = "a person playing guitar"
 presets = ["full", { id = "tight", name = "Tight", size = "close", headroom = 0.03, max_zoom = 6.0 }]
+
+[[queries]]
+name = "Drummer"
+# No `presets`: "wide" picks a Full shot, and the detector is asked for
+# "a person playing drums".
+prompt = "drummer wide"
+
+# The parser's words are data. Entries here are added to the built-in ones,
+# and replace a built-in entry with the same words:
+#
+# [lexicon]
+# roles = [{ word = "worship leader", phrase = "a person singing" }]
+# shots = [{ phrase = "cowboy", sizes = ["medium"] },
+#          { phrase = "upper body", sizes = ["medium"] }]
+# person_words = ["organist"]
 
 [detector]
 kind = "owl"

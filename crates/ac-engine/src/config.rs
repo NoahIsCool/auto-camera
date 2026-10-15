@@ -15,11 +15,18 @@
 //! ```
 //!
 //! Sections mirror the pipeline: `sources` (any [`SourceConfig`] plus an id
-//! and a name), `queries` (prompts with their framing presets), `detector`
-//! and `discovery` (the slow open-vocabulary tier), `tracker` (the fast
-//! tier), `subjects` (identity management), `framing`, `director`,
-//! `switcher`, `output` (program size, rate and destinations) and `monitors`
-//! (what the operator UI is sent).
+//! and a name), `queries` (prompts with their framing presets), `lexicon`
+//! (additions to the prompt parser's shot, role and person words),
+//! `detector` and `discovery` (the slow open-vocabulary tier), `tracker`
+//! (the fast tier), `subjects` (identity management), `framing`,
+//! `director`, `switcher`, `output` (program size, rate and destinations)
+//! and `monitors` (what the operator UI is sent).
+//!
+//! A query's prompt is read once, at load, with the built-in lexicon plus
+//! the config's `lexicon` additions ([`StudioConfig::prompt_lexicon`]):
+//! shot words pick its presets when it lists none, role words become the
+//! detector phrase, and `literal = true` sends the text as typed. Explicit
+//! `presets` always win over shot words; see [`crate::queries`].
 //!
 //! The `tracker` and `framing` tables are partial: keys given override the
 //! crate defaults and unknown keys are rejected. Relative file paths
@@ -30,7 +37,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ac_core::{Preset, QueryId, ShotSize, SourceId};
+use ac_core::{Lexicon, Preset, Query, QueryId, ShotSize, SourceId};
 use ac_director::DirectorConfig;
 use ac_framing::FramerConfig;
 use ac_sources::SourceConfig;
@@ -128,14 +135,6 @@ pub fn preset_for(size: ShotSize) -> Preset {
     Preset::new(id, name, size)
 }
 
-/// Default presets of a query: medium and close.
-fn default_presets() -> Vec<PresetSpec> {
-    vec![
-        PresetSpec::Size(ShotSize::Medium),
-        PresetSpec::Size(ShotSize::Close),
-    ]
-}
-
 /// A text prompt and the framings applied to every subject it matches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -145,17 +144,55 @@ pub struct QuerySettings {
     pub id: Option<String>,
     /// Operator-facing name, such as "Pastor".
     pub name: String,
-    /// Prompt given to the detector, such as "person's upper body".
+    /// The operator's prompt, such as "speaker upper body": shot words pick
+    /// framings, role words are rewritten for the detector (see
+    /// [`crate::queries`]).
     pub prompt: String,
-    /// Framing presets (default: medium and close).
-    #[serde(default = "default_presets")]
-    pub presets: Vec<PresetSpec>,
+    /// Framing presets. When given they always win over the prompt's shot
+    /// words; when absent the shot words decide, and without shot words the
+    /// default is medium and close.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presets: Option<Vec<PresetSpec>>,
+    /// Send the prompt to the detector exactly as typed, without reading
+    /// shot or role words (for experiments).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub literal: bool,
 }
 
 impl QuerySettings {
+    /// A query named `name` for `prompt`, with no explicit presets.
+    pub fn new(name: &str, prompt: &str) -> Self {
+        Self {
+            id: None,
+            name: name.into(),
+            prompt: prompt.into(),
+            presets: None,
+            literal: false,
+        }
+    }
+
     /// The query id: the explicit id or a slug of the name.
     pub fn query_id(&self) -> QueryId {
         QueryId(self.id.clone().unwrap_or_else(|| slug(&self.name)))
+    }
+
+    /// The explicit presets, if any.
+    pub fn explicit_presets(&self) -> Option<Vec<Preset>> {
+        self.presets
+            .as_ref()
+            .map(|specs| specs.iter().map(PresetSpec::to_preset).collect())
+    }
+
+    /// The query, its prompt read with `lexicon`; see [`crate::queries`].
+    pub fn build(&self, lexicon: &Lexicon) -> Result<Query, String> {
+        crate::queries::build_query(
+            self.query_id(),
+            &self.name,
+            &self.prompt,
+            self.explicit_presets(),
+            self.literal,
+            lexicon,
+        )
     }
 }
 
@@ -214,6 +251,10 @@ pub struct StudioConfig {
     /// Text prompts and their presets.
     #[serde(default)]
     pub queries: Vec<QuerySettings>,
+    /// Shot, role and person words added to the built-in lexicon; an entry
+    /// with the key of a built-in one replaces it.
+    #[serde(default)]
+    pub lexicon: Lexicon,
     /// The open-vocabulary detector.
     #[serde(default)]
     pub detector: DetectorSettings,
@@ -253,6 +294,7 @@ impl StudioConfig {
                 input,
             }],
             queries: Vec::new(),
+            lexicon: Lexicon::default(),
             detector: DetectorSettings::default(),
             discovery: DiscoverySettings::default(),
             tracker: TemplateTrackerConfig::default(),
@@ -346,18 +388,10 @@ impl StudioConfig {
                 ));
             }
         }
-        let mut queries = HashSet::new();
-        for q in &self.queries {
-            let presets: Vec<Preset> = q.presets.iter().map(PresetSpec::to_preset).collect();
-            validate_query(&q.name, &q.prompt, &presets).map_err(ConfigError::Invalid)?;
-            let id = q.query_id();
-            if !valid_id(&id.0) {
-                return bad(format!("query id {:?} is not a valid id", id.0));
-            }
-            if !queries.insert(id.0.clone()) {
-                return bad(format!("duplicate query id {:?}", id.0));
-            }
-        }
+        self.lexicon
+            .validate()
+            .map_err(|e| ConfigError::Invalid(format!("lexicon: {e}")))?;
+        self.build_queries()?;
         self.detector.validate().map_err(ConfigError::Invalid)?;
         self.discovery.validate().map_err(ConfigError::Invalid)?;
         self.tracker
@@ -374,6 +408,50 @@ impl StudioConfig {
             return bad(format!("output.audio_source {audio:?} is not a source id"));
         }
         self.monitors.validate().map_err(ConfigError::Invalid)
+    }
+
+    /// The prompt parser's vocabulary: the built-in lexicon with the
+    /// config's `lexicon` additions applied in order (an entry with the key
+    /// of an earlier one replaces it).
+    pub fn prompt_lexicon(&self) -> Lexicon {
+        let mut lexicon = Lexicon::builtin();
+        for shot in &self.lexicon.shots {
+            lexicon.set_shot(shot.clone());
+        }
+        for role in &self.lexicon.roles {
+            lexicon.set_role(role.clone());
+        }
+        for word in &self.lexicon.person_words {
+            lexicon.add_person_word(word);
+        }
+        lexicon
+    }
+
+    /// The queries in config order, each prompt read once with
+    /// [`Self::prompt_lexicon`]; fails on the first invalid or duplicate
+    /// query.
+    pub fn build_queries(&self) -> Result<Vec<Query>, ConfigError> {
+        let lexicon = self.prompt_lexicon();
+        let mut ids = HashSet::new();
+        let mut out = Vec::new();
+        for q in &self.queries {
+            let id = q.query_id();
+            if !valid_id(&id.0) {
+                return Err(ConfigError::Invalid(format!(
+                    "query id {:?} is not a valid id",
+                    id.0
+                )));
+            }
+            let query = q.build(&lexicon).map_err(ConfigError::Invalid)?;
+            if !ids.insert(id.0.clone()) {
+                return Err(ConfigError::Invalid(format!(
+                    "duplicate query id {:?}",
+                    id.0
+                )));
+            }
+            out.push(query);
+        }
+        Ok(out)
     }
 
     /// The subject store tuning, validated. Without `subjects.min_score` the

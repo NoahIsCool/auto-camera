@@ -52,10 +52,11 @@ fn config(subjects: u32) -> StudioConfig {
         id: None,
         name: "Person".into(),
         prompt: "person".into(),
-        presets: vec![
+        presets: Some(vec![
             PresetSpec::Size(ShotSize::Medium),
             PresetSpec::Size(ShotSize::Close),
-        ],
+        ]),
+        literal: false,
     });
     c.output.width = W;
     c.output.height = H;
@@ -351,7 +352,8 @@ fn queries_can_be_added_and_removed() {
     let added = rig.apply(EngineCommand::AddQuery {
         name: "Lead Guitar".into(),
         prompt: "guitar".into(),
-        presets: vec![Preset::new("full", "Full", ShotSize::Full)],
+        presets: Some(vec![Preset::new("full", "Full", ShotSize::Full)]),
+        literal: false,
     });
     assert_eq!(
         added,
@@ -363,20 +365,24 @@ fn queries_can_be_added_and_removed() {
         rig.apply(EngineCommand::AddQuery {
             name: "lead guitar".into(),
             prompt: "guitar".into(),
-            presets: vec![Preset::new("full", "Full", ShotSize::Full)],
+            presets: Some(vec![Preset::new("full", "Full", ShotSize::Full)]),
+            literal: false,
         }),
         Err(CommandError::DuplicateQuery(QueryId("lead-guitar".into())))
     );
     for (name, prompt, presets) in [
-        ("", "x", vec![Preset::new("m", "M", ShotSize::Medium)]),
-        ("A", "", vec![Preset::new("m", "M", ShotSize::Medium)]),
-        ("B", "x", vec![]),
+        ("", "x", Some(vec![Preset::new("m", "M", ShotSize::Medium)])),
+        ("A", "", Some(vec![Preset::new("m", "M", ShotSize::Medium)])),
+        ("B", "x", Some(vec![])),
+        // Shot words with nothing to frame.
+        ("C", "close-up", None),
     ] {
         assert!(matches!(
             rig.apply(EngineCommand::AddQuery {
                 name: name.into(),
                 prompt: prompt.into(),
-                presets
+                presets,
+                literal: false,
             }),
             Err(CommandError::Invalid(_))
         ));
