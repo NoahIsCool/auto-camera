@@ -1,0 +1,18 @@
+[package]
+name = "ac-compositor"
+description = "CPU reference compositor: crops, resamples and mixes shots into the program picture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ac-core.workspace = true
+ac-media.workspace = true
+ac-switcher.workspace = true
+thiserror.workspace = true
+rayon = "1.12"
+
+[lints]
+workspace = true
