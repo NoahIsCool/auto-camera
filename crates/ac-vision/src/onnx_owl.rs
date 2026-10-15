@@ -18,7 +18,17 @@
 //!   so steady-state detection runs only the image side.
 //!
 //! The execution provider is CoreML on macOS when the loaded ONNX Runtime has
-//! it (unsupported nodes fall back to the CPU), and the CPU elsewhere.
+//! it (unsupported nodes fall back to the CPU), and the CPU elsewhere. CoreML
+//! is given only nodes with static input shapes: the query axis of both
+//! graphs is dynamic, and handing such nodes to an MLProgram makes MPSGraph
+//! abort the whole process while compiling (a failed assertion, not an
+//! error ONNX Runtime could return). With static shapes the image tower,
+//! where the time goes, still runs on CoreML. Compiling OWLv2 base for CoreML
+//! takes minutes, so each graph's compiled model is cached in
+//! `coreml-cache/` next to it, under a name that includes the graph file's
+//! size and modification time: a re-exported graph gets a fresh compile
+//! instead of a stale one (CoreML keys its cache on graph structure, not
+//! weights).
 //!
 //! Status: exercised in tests against synthetic graphs with the documented
 //! names and shapes; not yet validated against a real OWLv2 export on a Mac.
@@ -204,31 +214,66 @@ fn model_err(e: impl std::fmt::Display) -> VisionError {
     VisionError::Model(e.to_string())
 }
 
-/// Execution providers to register, and the name of the one expected to run.
-fn execution_providers(use_coreml: bool) -> (&'static str, Vec<ExecutionProviderDispatch>) {
+/// The execution provider expected to run: `"CoreML"` when it was asked for
+/// and the loaded ONNX Runtime has it, else `"CPU"`.
+fn provider_name(use_coreml: bool) -> &'static str {
     #[cfg(target_os = "macos")]
     if use_coreml {
         use ort::ep::ExecutionProvider;
-        let coreml =
-            ort::ep::CoreML::default().with_model_format(ort::ep::coreml::ModelFormat::MLProgram);
-        if coreml.is_available().unwrap_or(false) {
-            return ("CoreML", vec![coreml.build()]);
+        if ort::ep::CoreML::default().is_available().unwrap_or(false) {
+            return "CoreML";
         }
     }
     let _ = use_coreml;
-    ("CPU", Vec::new())
+    "CPU"
+}
+
+/// Execution providers to register for the graph at `path` when `provider`
+/// is in use; see the module docs for the CoreML options.
+fn execution_providers(provider: &str, path: &Path) -> Vec<ExecutionProviderDispatch> {
+    #[cfg(target_os = "macos")]
+    if provider == "CoreML" {
+        let mut coreml = ort::ep::CoreML::default()
+            .with_model_format(ort::ep::coreml::ModelFormat::MLProgram)
+            .with_static_input_shapes(true);
+        if let Some(dir) = coreml_cache_dir(path) {
+            coreml = coreml.with_model_cache_dir(dir.display());
+        }
+        return vec![coreml.build()];
+    }
+    let _ = (provider, path);
+    Vec::new()
+}
+
+/// Where CoreML caches its compiled copy of the graph at `path`:
+/// `coreml-cache/<stem>-<size>-<mtime>` next to it, or `None` when the file's
+/// metadata cannot be read.
+fn coreml_cache_dir(path: &Path) -> Option<PathBuf> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let stem = path.file_stem()?.to_string_lossy();
+    let dir = path.parent()?.join("coreml-cache");
+    Some(dir.join(format!("{stem}-{}-{modified}", meta.len())))
 }
 
 /// Loads one graph and checks that it has the expected inputs.
 fn load_session(
     path: &Path,
     inputs: &[&str],
-    eps: &[ExecutionProviderDispatch],
+    provider: &str,
     threads: Option<usize>,
 ) -> Result<Session, VisionError> {
     if !path.is_file() {
         return Err(VisionError::ModelNotFound(path.to_path_buf()));
     }
+    // ONNX Runtime keys CoreML's compiled-model cache on the path, so spell
+    // it the same way however the caller did.
+    let path = &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut builder = Session::builder()
         .map_err(model_err)?
         .with_optimization_level(GraphOptimizationLevel::Level3)
@@ -236,6 +281,7 @@ fn load_session(
     if let Some(n) = threads {
         builder = builder.with_intra_threads(n).map_err(model_err)?;
     }
+    let eps = execution_providers(provider, path);
     if !eps.is_empty() {
         builder = builder.with_execution_providers(eps).map_err(model_err)?;
     }
@@ -287,14 +333,14 @@ impl OnnxOwlDetector {
             .pad_token_id
             .or_else(|| tok.token_to_id("!"))
             .unwrap_or(0);
-        let (provider, eps) = execution_providers(config.use_coreml);
+        let provider = provider_name(config.use_coreml);
         let n = &config.names;
         let threads = config.intra_threads;
         let graphs = match &model {
             OwlModel::Combined { model } => Graphs::Combined(load_session(
                 model,
                 &[&n.input_ids, &n.attention_mask, &n.pixel_values],
-                &eps,
+                provider,
                 threads,
             )?),
             OwlModel::Split {
@@ -304,13 +350,13 @@ impl OnnxOwlDetector {
                 text: load_session(
                     text_encoder,
                     &[&n.input_ids, &n.attention_mask],
-                    &eps,
+                    provider,
                     threads,
                 )?,
                 detector: load_session(
                     detector,
                     &[&n.pixel_values, &n.query_embeds],
-                    &eps,
+                    provider,
                     threads,
                 )?,
             },
