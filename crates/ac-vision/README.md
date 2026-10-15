@@ -145,15 +145,28 @@ detector does not return a prompt's own boxes. By default
 pass also asks for "a person" and for the object each prompt names, and a
 prompt picks the people whose box holds its object; the detections are whole
 people. "a person playing guitar" asks for "a guitar", "a man in a red shirt"
-for "a red shirt". A prompt with no person word ("a guitarist") or no object
-("a woman") attaches its own boxes; "a person" or "people" picks everyone. See
-the `matching` module for the rules and their tests.
+for "a red shirt". A prompt with no person word ("a guitarist") attaches its
+own boxes like an object. A prompt that only describes a person ("a woman", "a
+person speaking", "a tall person"), or whose object is another person ("a man
+next to a woman"), also attaches its own boxes, so it never picks the other
+person. "a person" or "people" picks everyone. See the `matching` module for
+the rules and their tests.
 
-Thresholds: people need an "a person" score of `person_threshold` (0.15); the
-object needs `score_threshold` (now 0.3 by default: real guitars score 0.6 to
-0.75, nothing else above 0.26) and at least 45% of its box inside the
-person's. A "person" box holding two or more other people is a group and is
-dropped. The extra queries cost nothing measurable: 183–185 ms per pass on
+Thresholds come on two scales. OWLv2 scores a named object high and any
+description of a person low, however well it fits. So objects need
+`score_threshold` (0.3 by default: real guitars score 0.6 to 0.75, nothing
+else above 0.26), while everyone and described-person prompts need
+`person_threshold` (0.15), unless a query sets its own threshold; people
+themselves always need an "a person" score of `person_threshold`. A studio's
+subject store would otherwise drop those low person scores, so when
+`[subjects] min_score` is not set, its floor follows `person_threshold`.
+
+An object is a person's when at least 45% of the smaller of the two boxes
+lies inside the other: a guitar mostly inside its player, or a drummer mostly
+inside a drum kit larger than they are. For objects smaller than the person,
+as guitars are, that is the object's own box, so the numbers below are
+unchanged by it. A "person" box holding two or more other people is a group
+and is dropped. The extra queries cost nothing measurable: 183–185 ms per pass on
 CoreML for 2, 3, 5 or 9 queries.
 
 How the strategies compared, on 20 frames each of a band (three guitarists,
@@ -168,12 +181,13 @@ labelled one (Python reference on CPU, best thresholds for each):
 | Prompt score on each person's own box | 58 | 65 | 0 |
 | Prompt's own boxes attached to people | 58 | 9 | 0 |
 | Object ("a guitar") attached to people | 60 | 2 | 1 |
+| Object attached, with 60% of it inside instead of 45% | 45 | 22 | not measured |
 | Both attached | 60 | 2 | 1 |
 | Object attached, in Rust on CoreML, with the group rule | 59 | 2 | 1 |
 
 The two remaining false subjects are the speaker walking right in front of a
 guitar on a stand. The speaker is found once: OWLv2 sees objects, not
-actions, and he never stands at the lectern. "Speaking", "singing" and
+actions, and this speaker never stands at the lectern. "Speaking", "singing" and
 "holding a microphone" (the band's guitarists sing into stand microphones)
 cannot be told apart from boxes; that would take an action- or audio-aware
 model. Prompts work best when they name something visible on the person.
@@ -197,8 +211,8 @@ Preprocessing follows the OWLv2 processor: the frame is placed at the top-left
 of a square and padded with grey (0.5) at the bottom/right, resized to S
 (anti-aliased), and normalized with the CLIP mean and standard deviation.
 Postprocessing applies a sigmoid per (patch, query), keeps scores at or above
-the query's threshold (`OwlConfig::score_threshold`, default 0.1, or
-`query_thresholds`), maps boxes back to the source by undoing the padding,
+the query's threshold (`OwlConfig::score_threshold`, default 0.3, or
+`query_thresholds`; with `people_first`, see the thresholds above), maps boxes back to the source by undoing the padding,
 clips them, and runs class-aware NMS (IoU 0.3, at most 16 per query). OWL-ViT
 v1 exports (`google/owlvit-base-patch32`, S = 768, P = 576) use the same
 graph interface; v1 was trained on stretched rather than padded images, so

@@ -51,7 +51,7 @@ use tokenizers::Tokenizer;
 
 use crate::api::{Detection, Detector, PromptQuery};
 use crate::error::VisionError;
-use crate::matching::{MatchParams, MatchPlan, PERSON_PROMPT};
+use crate::matching::{MatchParams, MatchPlan};
 use crate::owl::{
     DecodeParams, OWL_MAX_TOKENS, OwlOutputs, decode, normalize_prompt, pack_tokens,
     preprocess_into,
@@ -116,8 +116,10 @@ pub struct OwlConfig {
     pub max_tokens: usize,
     /// Padding token id; `None` uses the tokenizer's `!` (OWL's pad token), else 0.
     pub pad_token_id: Option<u32>,
-    /// Score threshold for queries without their own. With `people_first`
-    /// it applies to the object a prompt names (see [`crate::matching`]).
+    /// Score threshold for queries without their own (default 0.3). With
+    /// `people_first` it applies to the object a prompt names; everyone and
+    /// described-person prompts use `person_threshold` (see
+    /// [`crate::matching`]).
     pub score_threshold: f32,
     /// Per-query score thresholds.
     pub query_thresholds: HashMap<QueryId, f32>,
@@ -138,20 +140,23 @@ pub struct OwlConfig {
     pub people_first: bool,
     /// The prompt that finds people when `people_first` is set.
     pub person_prompt: String,
-    /// Lowest person score kept when `people_first` is set.
+    /// Lowest person score kept when `people_first` is set, and the
+    /// threshold of everyone and described-person prompts without their own.
     pub person_threshold: f32,
-    /// Fraction of an object's box that must lie inside a person's box for
-    /// the person to be chosen, when `people_first` is set.
+    /// Fraction of the smaller of an object's and a person's box that must
+    /// lie inside the other for the person to be chosen, when `people_first`
+    /// is set.
     pub min_overlap: f64,
 }
 
 impl Default for OwlConfig {
     fn default() -> Self {
+        let matching = MatchParams::default();
         Self {
             input_size: 960,
             max_tokens: OWL_MAX_TOKENS,
             pad_token_id: None,
-            score_threshold: 0.3,
+            score_threshold: matching.object_threshold,
             query_thresholds: HashMap::new(),
             nms_iou: 0.3,
             max_per_query: 16,
@@ -160,9 +165,9 @@ impl Default for OwlConfig {
             max_cached_prompts: 256,
             names: OwlTensorNames::default(),
             people_first: true,
-            person_prompt: PERSON_PROMPT.into(),
-            person_threshold: 0.15,
-            min_overlap: 0.45,
+            person_prompt: matching.person_prompt,
+            person_threshold: matching.person_threshold,
+            min_overlap: matching.min_overlap,
         }
     }
 }
@@ -554,24 +559,27 @@ impl Detector for OnnxOwlDetector {
         if queries.is_empty() {
             return Ok(Vec::new());
         }
-        let threshold = |id: &QueryId| {
-            *self
-                .config
-                .query_thresholds
-                .get(id)
-                .unwrap_or(&self.config.score_threshold)
-        };
         if !self.config.people_first {
-            let thresholds = queries.iter().map(|q| threshold(&q.id)).collect();
+            let thresholds = queries
+                .iter()
+                .map(|q| {
+                    *self
+                        .config
+                        .query_thresholds
+                        .get(&q.id)
+                        .unwrap_or(&self.config.score_threshold)
+                })
+                .collect();
             let max = self.config.max_per_query;
             return self.detect_queries(frame, queries, thresholds, max);
         }
         let plan = MatchPlan::new(
             queries,
-            threshold,
+            |id| self.config.query_thresholds.get(id).copied(),
             MatchParams {
                 person_prompt: self.config.person_prompt.clone(),
                 person_threshold: self.config.person_threshold,
+                object_threshold: self.config.score_threshold,
                 min_overlap: self.config.min_overlap,
                 max_per_query: self.config.max_per_query,
             },

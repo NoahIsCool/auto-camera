@@ -376,9 +376,16 @@ impl StudioConfig {
         self.monitors.validate().map_err(ConfigError::Invalid)
     }
 
-    /// The subject store tuning, validated.
+    /// The subject store tuning, validated. Without `subjects.min_score` the
+    /// floor is the store default, or the detector's
+    /// [`DetectorSettings::score_floor`] when that is lower.
     pub fn store_config(&self) -> Result<StoreConfig, ConfigError> {
-        let c = self.subjects.to_store_config()?;
+        let mut c = self.subjects.to_store_config()?;
+        if self.subjects.min_score.is_none()
+            && let Some(floor) = self.detector.score_floor()
+        {
+            c.min_score = c.min_score.min(floor);
+        }
         c.validate()
             .map_err(|e| ConfigError::Invalid(format!("subjects: {e}")))?;
         Ok(c)

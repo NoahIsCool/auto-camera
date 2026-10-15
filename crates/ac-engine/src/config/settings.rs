@@ -181,6 +181,25 @@ pub enum DetectorSettings {
 }
 
 impl DetectorSettings {
+    /// The lowest score this detector's detections can carry, when it is
+    /// below the subject store's default: OWL matching people first scores
+    /// everyone and described-person prompts on the person scale (default
+    /// 0.15; see `ac_vision::matching`), and a store floor above that would
+    /// silently drop them.
+    pub fn score_floor(&self) -> Option<f32> {
+        match self {
+            DetectorSettings::Owl {
+                people_first,
+                person_threshold,
+                ..
+            } if people_first.unwrap_or(true) => Some(
+                person_threshold
+                    .unwrap_or(ac_vision::matching::MatchParams::default().person_threshold),
+            ),
+            _ => None,
+        }
+    }
+
     /// Checks scores and sizes.
     pub fn validate(&self) -> Result<(), String> {
         match self {
@@ -288,8 +307,11 @@ impl DiscoverySettings {
 pub struct SubjectSettings {
     /// Soft cap on subjects per source, in `1..=16`.
     pub max_subjects: usize,
-    /// Detections below this score are ignored.
-    pub min_score: f32,
+    /// Detections below this score are ignored. Unset, the store default
+    /// applies, lowered to the detector's person threshold when OWL matches
+    /// people first (see [`DetectorSettings::score_floor`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_score: Option<f32>,
     /// Seconds without a confident observation before a subject is lost.
     pub lost_after_s: f64,
     /// Seconds lost before an unprotected subject is retired.
@@ -303,7 +325,7 @@ impl Default for SubjectSettings {
         let d = StoreConfig::default();
         Self {
             max_subjects: d.max_subjects,
-            min_score: d.min_score,
+            min_score: None,
             lost_after_s: d.lost_after.as_secs_f64(),
             retire_after_s: d.retire_after.as_secs_f64(),
             track_min_confidence: d.track_min_confidence,
@@ -312,7 +334,8 @@ impl Default for SubjectSettings {
 }
 
 impl SubjectSettings {
-    /// The store config, with durations range-checked.
+    /// The store config, with durations range-checked; an unset `min_score`
+    /// becomes the store default.
     pub fn to_store_config(&self) -> Result<StoreConfig, ConfigError> {
         let secs = |name: &str, v: f64| {
             if v.is_finite() && v > 0.0 && v <= 86_400.0 {
@@ -325,7 +348,7 @@ impl SubjectSettings {
         };
         Ok(StoreConfig {
             max_subjects: self.max_subjects,
-            min_score: self.min_score,
+            min_score: self.min_score.unwrap_or(StoreConfig::default().min_score),
             lost_after: secs("lost_after_s", self.lost_after_s)?,
             retire_after: secs("retire_after_s", self.retire_after_s)?,
             track_min_confidence: self.track_min_confidence,

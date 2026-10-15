@@ -122,6 +122,46 @@ thumb_rate_hz = 5.0
             ..
         } if t == 0.2
     ));
+    assert_eq!(
+        c.store_config().unwrap().min_score,
+        0.2,
+        "the store floor follows the person threshold"
+    );
+}
+
+/// An OWL detector section, with `extra` lines appended.
+fn owl_config(extra: &str) -> StudioConfig {
+    let text = format!(
+        "{MINIMAL}\n[detector]\nkind = \"owl\"\nmodel = \"m.onnx\"\ntokenizer = \"t.json\"\n{extra}"
+    );
+    StudioConfig::parse(&text, false).unwrap()
+}
+
+#[test]
+fn the_store_floor_admits_person_scored_detections() {
+    let store_default = ac_subjects::StoreConfig::default().min_score;
+    assert_eq!(minimal().store_config().unwrap().min_score, store_default);
+    assert_eq!(owl_config("").store_config().unwrap().min_score, 0.15);
+    assert_eq!(
+        owl_config("person_threshold = 0.5")
+            .store_config()
+            .unwrap()
+            .min_score,
+        store_default,
+        "a floor above the store default changes nothing"
+    );
+    assert_eq!(
+        owl_config("people_first = false")
+            .store_config()
+            .unwrap()
+            .min_score,
+        store_default
+    );
+    let mut explicit = owl_config("");
+    explicit.subjects.min_score = Some(0.4);
+    assert_eq!(explicit.store_config().unwrap().min_score, 0.4, "set wins");
+    explicit.subjects.min_score = Some(f32::NAN);
+    assert!(explicit.store_config().is_err());
 }
 
 #[test]

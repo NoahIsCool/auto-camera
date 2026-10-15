@@ -23,17 +23,33 @@
 //! [`MatchPlan::new`] turns the operator's queries into the model's queries:
 //!
 //! * the person query ([`PERSON_PROMPT`] unless configured), always first;
-//! * per user prompt, its *object*: [`object_phrase`] parses "a person
-//!   playing guitar" into "a guitar" and "a person speaking at a lectern" into
-//!   "a lectern". A prompt with no person word ("a guitarist", "the drummer")
-//!   or no object ("a woman", "a person speaking") is its own object, so its
-//!   own boxes are attached instead. A prompt that only says "person" picks
-//!   everyone.
+//! * per user prompt, what [`selector`] makes of it:
+//!   * an *object*: [`object_phrase`] parses "a person playing guitar" into
+//!     "a guitar" and "a person speaking at a lectern" into "a lectern". A
+//!     prompt with no person word ("a guitarist", "the drummer") is its own
+//!     object.
+//!   * a *described person*: a person word with no object after it ("a
+//!     woman", "a person speaking", "a tall person"), or whose "object" is
+//!     another person ("a man next to a woman"). The prompt itself is asked
+//!     for and its boxes are attached like an object's; asking for "a woman"
+//!     must not pick the woman next to the man.
+//!   * *everyone*: a prompt that only says "person" ("a person", "people").
 //!
-//! Identical objects are asked for once. [`MatchPlan::assign`] maps the
-//! decoded model detections back to the operator's queries: the output box is
-//! always a person box, and its score is the object's score (the person's,
-//! for an everyone prompt).
+//! Identical model queries are asked for once. [`MatchPlan::assign`] maps
+//! the decoded model detections back to the operator's queries: the output
+//! box is always a person box, and its score is the object's score (the
+//! person's, for an everyone prompt).
+//!
+//! Scores are thresholded on two scales. OWLv2 scores a named object high
+//! (0.6–0.75 for real guitars) but anything describing a person low (about
+//! 0.15–0.3, however well it fits), so objects use the object threshold
+//! (0.3) and described-person and everyone prompts use the person threshold
+//! (0.15), unless the query sets its own.
+//!
+//! An object belongs to the person holding most of it, measured against the
+//! smaller of the two boxes: a guitar must lie mostly inside its player, and
+//! a player must lie mostly inside a drum kit or a piano larger than they
+//! are.
 //!
 //! A "person" box that contains two or more other people is a group (OWLv2
 //! sometimes boxes a whole projection screen of photos, or a whole band, as
@@ -107,13 +123,18 @@ const LINK_WORDS: &[&str] = &[
 pub enum Selector {
     /// Every person ("a person", "people").
     Everyone,
-    /// People with this object inside their box.
+    /// People holding this object; thresholded on the object scale.
     Object(String),
+    /// People this text describes, without an object ("a woman", "a person
+    /// speaking"); the text's own boxes are attached, thresholded on the
+    /// person scale.
+    Described(String),
 }
 
 /// The selector for one prompt; see the module docs.
 pub fn selector(prompt: &str) -> Selector {
-    let text = normalize_prompt(prompt);
+    // Typographic apostrophes would otherwise split "person’s" into two words.
+    let text = normalize_prompt(&prompt.replace(['\u{2018}', '\u{2019}'], "'"));
     let words: Vec<&str> = text
         .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '-'))
         .filter(|w| !w.is_empty())
@@ -130,12 +151,14 @@ pub fn selector(prompt: &str) -> Selector {
         return if only_articles && EVERYONE.contains(&words[k]) {
             Selector::Everyone
         } else {
-            Selector::Object(text)
+            Selector::Described(text)
         };
     }
     match object_phrase(after) {
-        Some(object) => Selector::Object(object),
-        None => Selector::Object(text),
+        Some(object) if !object.split(' ').any(|w| PERSON_WORDS.contains(&w)) => {
+            Selector::Object(object)
+        }
+        _ => Selector::Described(text),
     }
 }
 
@@ -169,9 +192,13 @@ fn is_verb_ing(word: &str) -> bool {
 pub struct MatchParams {
     /// The prompt that finds people.
     pub person_prompt: String,
-    /// Lowest person score kept.
+    /// Lowest person score kept, and the threshold of everyone and
+    /// described-person prompts without their own.
     pub person_threshold: f32,
-    /// Fraction of an object's box that must lie inside a person's box.
+    /// Threshold of object prompts without their own.
+    pub object_threshold: f32,
+    /// Fraction of the smaller of an object's and a person's box that must
+    /// lie inside the other for the object to be the person's.
     pub min_overlap: f64,
     /// Largest number of people returned per query.
     pub max_per_query: usize,
@@ -182,6 +209,7 @@ impl Default for MatchParams {
         Self {
             person_prompt: PERSON_PROMPT.into(),
             person_threshold: 0.15,
+            object_threshold: 0.3,
             min_overlap: 0.45,
             max_per_query: 16,
         }
@@ -204,11 +232,13 @@ pub struct MatchPlan {
 }
 
 impl MatchPlan {
-    /// Plans a pass for `queries`; `threshold` gives each user query's object
-    /// score threshold.
+    /// Plans a pass for `queries`; `explicit` gives a user query's own score
+    /// threshold, if it has one. Without one, object prompts use
+    /// `params.object_threshold` and the others `params.person_threshold`.
+    /// No person below `params.person_threshold` is ever picked.
     pub fn new(
         queries: &[PromptQuery],
-        threshold: impl Fn(&QueryId) -> f32,
+        explicit: impl Fn(&QueryId) -> Option<f32>,
         params: MatchParams,
     ) -> Self {
         let person = normalize_prompt(&params.person_prompt);
@@ -217,11 +247,18 @@ impl MatchPlan {
         let mut by_text: HashMap<String, usize> = HashMap::new();
         let mut routes = Vec::with_capacity(queries.len());
         for q in queries {
-            let t = threshold(&q.id);
-            let route = match selector(&q.prompt) {
-                Selector::Everyone => None,
-                Selector::Object(object) if object == person => None,
-                Selector::Object(object) => {
+            let own = explicit(&q.id);
+            let (t, text) = match selector(&q.prompt) {
+                Selector::Everyone => (own.unwrap_or(params.person_threshold), None),
+                Selector::Object(text) | Selector::Described(text) if text == person => {
+                    (own.unwrap_or(params.person_threshold), None)
+                }
+                Selector::Object(text) => (own.unwrap_or(params.object_threshold), Some(text)),
+                Selector::Described(text) => (own.unwrap_or(params.person_threshold), Some(text)),
+            };
+            let route = match text {
+                None => None,
+                Some(object) => {
                     let i = *by_text.entry(object.clone()).or_insert_with(|| {
                         internal.push(PromptQuery::new(
                             &format!("#object{}", internal.len()),
@@ -338,13 +375,23 @@ pub fn overlap_fraction(inner: &Rect, outer: &Rect) -> f64 {
     inner.intersection(outer).map_or(0.0, |i| i.area() / area)
 }
 
-/// The person (index into `people`) holding `object`: the one containing the
-/// largest fraction of it, if that is at least `min_overlap`. Ties go to the
-/// higher-scored person, which comes first.
+/// Fraction of the smaller of `a` and `b` that lies inside the other: 1 when
+/// either contains the other, 0 when they are disjoint or one has no area.
+pub fn contained_fraction(a: &Rect, b: &Rect) -> f64 {
+    let area = a.area().min(b.area());
+    if area <= 0.0 {
+        return 0.0;
+    }
+    a.intersection(b).map_or(0.0, |i| i.area() / area)
+}
+
+/// The person (index into `people`) holding `object`: the one sharing the
+/// largest [`contained_fraction`] with it, if that is at least
+/// `min_overlap`. Ties go to the higher-scored person, which comes first.
 fn holder(people: &[(Rect, f32)], object: &Rect, min_overlap: f64) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, (person, _)) in people.iter().enumerate() {
-        let f = overlap_fraction(object, person);
+        let f = contained_fraction(object, person);
         if f >= min_overlap && best.is_none_or(|(_, b)| f > b) {
             best = Some((i, f));
         }

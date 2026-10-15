@@ -23,14 +23,15 @@ fn det(id: &str, bbox: Rect, score: f32) -> Detection {
     }
 }
 
-/// A plan for `prompts` (ids `q0`, `q1`, …) at object threshold 0.3.
+/// A plan for `prompts` (ids `q0`, `q1`, …) at the default thresholds:
+/// objects 0.3, people 0.15.
 fn plan(prompts: &[&str]) -> MatchPlan {
     let queries: Vec<PromptQuery> = prompts
         .iter()
         .enumerate()
         .map(|(i, p)| PromptQuery::new(&format!("q{i}"), p))
         .collect();
-    MatchPlan::new(&queries, |_| 0.3, MatchParams::default())
+    MatchPlan::new(&queries, |_| None, MatchParams::default())
 }
 
 /// The id the plan gave the model query asking for `prompt`.
@@ -83,20 +84,49 @@ fn prompts_parse_into_the_object_they_name() {
 fn prompts_without_an_object_are_their_own_object_or_everyone() {
     assert_eq!(selector("a person"), Selector::Everyone);
     assert_eq!(selector("People"), Selector::Everyone);
-    assert_eq!(selector("a woman"), Selector::Object("a woman".into()));
+    assert_eq!(selector("a woman"), Selector::Described("a woman".into()));
     assert_eq!(
         selector("a guitarist"),
         Selector::Object("a guitarist".into())
     );
     assert_eq!(
         selector("a person speaking"),
-        Selector::Object("a person speaking".into())
+        Selector::Described("a person speaking".into())
     );
     assert_eq!(
         selector("a tall person"),
-        Selector::Object("a tall person".into())
+        Selector::Described("a tall person".into())
     );
     assert_eq!(selector(""), Selector::Object(String::new()));
+}
+
+#[test]
+fn another_person_is_never_the_object() {
+    assert_eq!(
+        selector("a man standing next to a woman"),
+        Selector::Described("a man standing next to a woman".into())
+    );
+    assert_eq!(
+        selector("a person with a child"),
+        Selector::Described("a person with a child".into())
+    );
+    assert_eq!(
+        selector("a person with a microphone"),
+        Selector::Object("a microphone".into()),
+        "an ordinary object is still an object"
+    );
+}
+
+#[test]
+fn typographic_apostrophes_are_apostrophes() {
+    assert_eq!(
+        selector("a person\u{2019}s face"),
+        selector("a person's face")
+    );
+    assert_eq!(
+        selector("the drummer\u{2019}s sticks"),
+        Selector::Object("the drummer's sticks".into())
+    );
 }
 
 #[test]
@@ -120,7 +150,7 @@ fn a_shared_object_decodes_at_the_lowest_threshold() {
     ];
     let p = MatchPlan::new(
         &queries,
-        |id| if id.0 == "a" { 0.4 } else { 0.25 },
+        |id| Some(if id.0 == "a" { 0.4 } else { 0.25 }),
         MatchParams::default(),
     );
     assert_eq!(p.thresholds(), [0.15, 0.25]);
@@ -208,7 +238,7 @@ fn everyone_prompts_return_every_person_above_their_threshold() {
     dets.push(det(&person, r(0.0, 0.0, 0.1, 0.1), 0.16)); // below the prompt's 0.3
     let p = MatchPlan::new(
         &[PromptQuery::new("q0", "a person")],
-        |_| 0.19,
+        |_| Some(0.19),
         MatchParams::default(),
     );
     let out = p.assign(&dets);
@@ -218,6 +248,60 @@ fn everyone_prompts_return_every_person_above_their_threshold() {
         "0.20, 0.24 and 0.22 pass 0.19; 0.18 and 0.16 do not"
     );
     assert!(out.windows(2).all(|w| w[0].score >= w[1].score));
+}
+
+#[test]
+fn people_prompts_use_the_person_threshold_by_default() {
+    let p = plan(&["a person", "a woman", "a person speaking"]);
+    let prompts: Vec<&str> = p.queries().iter().map(|q| q.prompt.as_str()).collect();
+    assert_eq!(prompts, ["a person", "a woman", "a person speaking"]);
+    assert_eq!(p.thresholds(), [0.15, 0.15, 0.15]);
+    let (person, woman) = (model_id(&p, PERSON_PROMPT), model_id(&p, "a woman"));
+    let mut dets: Vec<Detection> = stage()
+        .into_iter()
+        .map(|(b, s)| det(&person, b, s))
+        .collect();
+    // OWLv2 scores a fitting description of a person about this low.
+    dets.push(det(&woman, r(0.575, 0.62, 0.62, 0.88), 0.22));
+    let out = p.assign(&dets);
+    let everyone = out.iter().filter(|d| d.query.0 == "q0").count();
+    assert_eq!(everyone, 4, "all four people score at least 0.15");
+    let women: Vec<_> = out.iter().filter(|d| d.query.0 == "q1").collect();
+    assert_eq!(women.len(), 1);
+    assert_eq!(women[0].bbox, stage()[2].0);
+    assert!(
+        out.iter().all(|d| d.query.0 != "q2"),
+        "nothing scored as speaking"
+    );
+}
+
+#[test]
+fn a_person_inside_an_object_larger_than_them_holds_it() {
+    let p = plan(&["a person behind a drum kit"]);
+    let (person, kit) = (model_id(&p, PERSON_PROMPT), model_id(&p, "a drum kit"));
+    let drummer = r(0.45, 0.40, 0.55, 0.80);
+    let dets = vec![
+        det(&person, drummer, 0.21),
+        det(&person, r(0.75, 0.40, 0.85, 0.90), 0.23), // away from the kit
+        // A kit twice the drummer's size: under a third of it overlaps them.
+        det(&kit, r(0.38, 0.55, 0.62, 0.90), 0.64),
+    ];
+    let out = p.assign(&dets);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].bbox, drummer);
+    assert_eq!(out[0].score, 0.64);
+}
+
+#[test]
+fn contained_fraction_is_measured_against_the_smaller_box() {
+    let big = r(0.0, 0.0, 1.0, 1.0);
+    let small = r(0.2, 0.2, 0.4, 0.4);
+    assert_eq!(contained_fraction(&small, &big), 1.0);
+    assert_eq!(contained_fraction(&big, &small), 1.0);
+    let half = r(0.3, 0.2, 0.5, 0.4);
+    assert!((contained_fraction(&half, &small) - 0.5).abs() < 1e-9);
+    let zero = r(0.5, 0.5, 0.5, 0.5);
+    assert_eq!(contained_fraction(&zero, &big), 0.0);
 }
 
 #[test]
@@ -244,7 +328,7 @@ fn each_query_is_capped_and_queries_stay_separate() {
         max_per_query: 2,
         ..MatchParams::default()
     };
-    let p = MatchPlan::new(&queries, |_| 0.15, params);
+    let p = MatchPlan::new(&queries, |_| Some(0.15), params);
     let (person, guitar) = (model_id(&p, PERSON_PROMPT), model_id(&p, "a guitar"));
     let mut dets: Vec<Detection> = stage()
         .into_iter()
@@ -270,7 +354,7 @@ fn the_person_prompt_is_configurable() {
             PromptQuery::new("q0", "person"),
             PromptQuery::new("q1", "a person"),
         ],
-        |_| 0.3,
+        |_| Some(0.3),
         params,
     );
     let prompts: Vec<&str> = p.queries().iter().map(|q| q.prompt.as_str()).collect();
@@ -283,7 +367,7 @@ fn a_box_around_several_people_is_a_group_not_a_person() {
         PromptQuery::new("q0", "a person playing guitar"),
         PromptQuery::new("q1", "people"),
     ];
-    let p = MatchPlan::new(&queries, |_| 0.15, MatchParams::default());
+    let p = MatchPlan::new(&queries, |_| Some(0.15), MatchParams::default());
     let (person, guitar) = (model_id(&p, PERSON_PROMPT), model_id(&p, "a guitar"));
     let screen = r(0.10, 0.17, 0.76, 0.83);
     let dets = vec![
