@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "ac-compositor"
+version = "0.1.0"
+dependencies = [
+ "ac-core",
+ "ac-media",
+ "ac-switcher",
+ "rayon",
+ "thiserror",
+]
+
+[[package]]
 name = "ac-core"
 version = "0.1.0"
 dependencies = [
