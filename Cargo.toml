@@ -21,6 +21,7 @@ ac-director = { path = "crates/ac-director" }
 ac-compositor = { path = "crates/ac-compositor" }
 ac-output = { path = "crates/ac-output" }
 ac-engine = { path = "crates/ac-engine" }
+ac-sources = { path = "crates/ac-sources" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
