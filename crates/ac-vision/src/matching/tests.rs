@@ -1,6 +1,6 @@
 //! Tests for people-first prompt matching, on synthetic boxes.
 
-use ac_core::{QueryId, Rect};
+use ac_core::{Extent, QueryId, Rect};
 
 use super::*;
 
@@ -20,6 +20,7 @@ fn det(id: &str, bbox: Rect, score: f32) -> Detection {
         query: QueryId(id.into()),
         bbox,
         score,
+        extent: Extent::Object,
     }
 }
 
@@ -177,6 +178,7 @@ fn guitars_pick_their_players_whole_bodies() {
             "the box is a person's"
         );
         assert_ne!(d.bbox, stage()[1].0, "the singer has no guitar");
+        assert_eq!(d.extent, Extent::Person, "framed as a whole person");
     }
     assert_eq!(out[0].score, 0.71, "highest object score first");
 }
@@ -248,6 +250,7 @@ fn everyone_prompts_return_every_person_above_their_threshold() {
         "0.20, 0.24 and 0.22 pass 0.19; 0.18 and 0.16 do not"
     );
     assert!(out.windows(2).all(|w| w[0].score >= w[1].score));
+    assert!(out.iter().all(|d| d.extent == Extent::Person));
 }
 
 #[test]

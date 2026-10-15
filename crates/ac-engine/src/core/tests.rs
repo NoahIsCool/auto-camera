@@ -19,6 +19,7 @@ use crate::config::{DetectorSettings, MonitorSettings, PresetSpec, QuerySettings
 use crate::discovery::synthetic_detector;
 use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 
+mod framing;
 mod protection;
 mod vision;
 

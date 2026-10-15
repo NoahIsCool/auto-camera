@@ -152,6 +152,14 @@ next to a woman"), also attaches its own boxes, so it never picks the other
 person. "a person" or "people" picks everyone. See the `matching` module for
 the rules and their tests.
 
+Every detection says what its box covers (`Detection::extent`). People-first
+detections are `Extent::Person`, whole bodies, and framing cuts their shots
+at body lines measured in head heights from the crown, so "Close" on a
+distant speaker is a head-and-shoulders crop (labelled "(limited)" in the
+multiview when the zoom ceiling cannot reach it), not a full-length shot.
+With `people_first` off, and for scripted boxes not marked as people, the
+boxes are `Extent::Object` and keep the fill rule. See `ac_framing::person`.
+
 Thresholds come on two scales. OWLv2 scores a named object high and any
 description of a person low, however well it fits. So objects need
 `score_threshold` (0.3 by default: real guitars score 0.6 to 0.75, nothing

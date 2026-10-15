@@ -1,9 +1,16 @@
 //! A subject as the store keeps it: the shared [`Subject`] plus bookkeeping.
 //!
 //! [`ac_core::Subject`] is the part every other crate needs (id, query, box,
-//! state, pin). [`SubjectRecord`] wraps it with what only identity management
-//! needs: the alias queries, operator flags, observation times and a small
-//! motion model.
+//! extent, state, pin). [`SubjectRecord`] wraps it with what only identity
+//! management needs: the alias queries, operator flags, observation times and
+//! a small motion model.
+//!
+//! The subject's [`Extent`] is that of the newest detection applied to it
+//! (the one that created it, matched it, aliased onto it or recovered it).
+//! Track observations and operator reacquires move the box but keep the
+//! extent: they follow the same entity at the scale it was detected at. A
+//! detection older than the subject's anchor only confirms it and changes
+//! nothing, its extent included.
 //!
 //! # Motion model
 //!
@@ -29,7 +36,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use ac_core::{Point, QueryId, Rect, SourceId, Subject, SubjectId, TrackState};
+use ac_core::{Extent, Point, QueryId, Rect, SourceId, Subject, SubjectId, TrackState};
 
 /// Time constant of the velocity filter, in seconds.
 const VELOCITY_TIME_CONSTANT: f64 = 0.3;
@@ -98,12 +105,14 @@ fn secs(pts: Duration) -> f64 {
 }
 
 impl SubjectRecord {
-    /// A tracking subject admitted from a detection at `pts`.
+    /// A tracking subject admitted from a detection at `pts`, whose box
+    /// covers `extent`.
     pub(crate) fn new(
         id: SubjectId,
         source: SourceId,
         query: QueryId,
         bbox: Rect,
+        extent: Extent,
         score: f32,
         pts: Duration,
     ) -> Self {
@@ -113,6 +122,7 @@ impl SubjectRecord {
                 source,
                 query,
                 bbox,
+                extent,
                 confidence: f64::from(score),
                 state: TrackState::Tracking,
                 pinned: false,
@@ -241,6 +251,7 @@ mod tests {
             SourceId("cam".into()),
             QueryId("person".into()),
             bbox,
+            Extent::Object,
             0.9,
             Duration::ZERO,
         )

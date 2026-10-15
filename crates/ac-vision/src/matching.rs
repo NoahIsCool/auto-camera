@@ -37,8 +37,9 @@
 //!
 //! Identical model queries are asked for once. [`MatchPlan::assign`] maps
 //! the decoded model detections back to the operator's queries: the output
-//! box is always a person box, and its score is the object's score (the
-//! person's, for an everyone prompt).
+//! box is always a whole-person box, marked [`Extent::Person`] so framing
+//! cuts it at body lines rather than filling the frame with it, and its
+//! score is the object's score (the person's, for an everyone prompt).
 //!
 //! Scores are thresholded on two scales. OWLv2 scores a named object high
 //! (0.6–0.75 for real guitars) but anything describing a person low (about
@@ -67,7 +68,7 @@
 
 use std::collections::HashMap;
 
-use ac_core::{QueryId, Rect};
+use ac_core::{Extent, QueryId, Rect};
 
 use crate::api::{Detection, PromptQuery};
 use crate::owl::normalize_prompt;
@@ -293,7 +294,7 @@ impl MatchPlan {
     }
 
     /// Maps decoded model detections (already per-query NMS'd) to person
-    /// detections for the user queries.
+    /// detections for the user queries; every one is [`Extent::Person`].
     pub fn assign(&self, detections: &[Detection]) -> Vec<Detection> {
         let mut people: Vec<(Rect, f32)> = detections
             .iter()
@@ -333,6 +334,7 @@ impl MatchPlan {
                         query: id.clone(),
                         bbox: *bbox,
                         score,
+                        extent: Extent::Person,
                     })
                 })
                 .collect();

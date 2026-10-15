@@ -35,6 +35,19 @@ fn shot_status_reads_like_a_caption() {
 }
 
 #[test]
+fn zoom_limited_shots_are_labelled() {
+    let mut shot = subject_shot("a", ShotStatus::Tracking, 0.9);
+    shot.name = "Person 1 Close".into();
+    assert_eq!(shot_title(&shot), "Person 1 Close");
+    assert!(!shot_hover(&shot).contains("limited"));
+    shot.limited_by_zoom = true;
+    assert_eq!(shot_title(&shot), "Person 1 Close (limited)");
+    let hover = shot_hover(&shot);
+    assert!(hover.starts_with("a\nlimited: "), "{hover}");
+    assert!(hover.ends_with("click: preview · double-click: cut"));
+}
+
+#[test]
 fn shot_names_fall_back_to_ids_and_dashes() {
     let snap = snapshot();
     let wide = ShotId("stage/wide".into());

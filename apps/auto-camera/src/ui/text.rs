@@ -37,6 +37,31 @@ pub fn clock(d: Duration) -> String {
     }
 }
 
+/// Marks a shot whose preset's zoom ceiling keeps it looser than its size.
+pub const LIMITED: &str = "(limited)";
+
+/// A shot's name as its multiview tile shows it: marked [`LIMITED`] when the
+/// zoom ceiling keeps it from its size, as for "Person 1 Close (limited)" on
+/// a distant speaker, so the operator never takes it for a true close-up.
+pub fn shot_title(shot: &ShotView) -> String {
+    if shot.limited_by_zoom {
+        format!("{} {LIMITED}", shot.name)
+    } else {
+        shot.name.clone()
+    }
+}
+
+/// A shot tile's hover text: its id, why it is limited if it is, and what
+/// clicks do.
+pub fn shot_hover(shot: &ShotView) -> String {
+    let limited = if shot.limited_by_zoom {
+        "\nlimited: the preset's max zoom stops this shot reaching its size"
+    } else {
+        ""
+    };
+    format!("{}{limited}\nclick: preview · double-click: cut", shot.id.0)
+}
+
 /// A shot's health and quality, as on its multiview caption.
 pub fn shot_status(shot: &ShotView) -> String {
     match shot.status {

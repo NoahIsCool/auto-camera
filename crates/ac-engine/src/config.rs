@@ -465,6 +465,7 @@ fn validate_framing(f: &FramerConfig) -> Result<(), String> {
         ("dead_zone_x", f.dead_zone_x),
         ("dead_zone_y", f.dead_zone_y),
         ("dead_zone_zoom", f.dead_zone_zoom),
+        ("head_half_life", f.head_half_life),
     ];
     for (name, v) in values {
         if !(v.is_finite() && v > 0.0) {

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::geometry::Rect;
+use crate::geometry::{Extent, Rect};
 
 /// Stable identifier of a video source.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -48,9 +48,12 @@ pub struct Query {
 
 /// Conventional broadcast shot sizes.
 ///
-/// Each size states how much of the output frame height the subject's box
-/// should fill. For a person detected as an upper body this moves from a loose
-/// medium shot to a tight close-up; for objects it scales the object in frame.
+/// What a size means depends on the subject's [`Extent`]. For a whole-person
+/// box it is a lower cut line on the body (tops of the shoulders for
+/// [`ShotSize::Close`], the waist for [`ShotSize::Medium`]), measured in
+/// head heights from the crown by `ac_framing`'s person basis. For any other
+/// box, an object or a part such as an upper body, it is [`ShotSize::fill`]:
+/// how much of the output frame height the box fills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShotSize {
@@ -67,7 +70,13 @@ pub enum ShotSize {
 }
 
 impl ShotSize {
-    /// Fraction of the output frame height the subject box should occupy.
+    /// Fraction of the output frame height the subject box should occupy,
+    /// for boxes framed on the object basis ([`Extent::Object`], and person
+    /// boxes too truncated to measure).
+    ///
+    /// The fractions were tuned on upper-body boxes. Applied to a whole
+    /// person they give shots far too wide: a person half the frame high
+    /// needs a frame 0.54 high for `Close`, which is a full-length shot.
     pub fn fill(self) -> f64 {
         match self {
             ShotSize::Wide => 0.0,
@@ -88,10 +97,12 @@ pub struct Preset {
     pub name: String,
     /// Target shot size.
     pub size: ShotSize,
-    /// Gap between the top of the subject and the top of the frame, as a
-    /// fraction of the output frame height.
+    /// Gap between the top of the subject (the crown, for a person) and the
+    /// top of the frame, as a fraction of the output frame height.
     pub headroom: f64,
-    /// Largest allowed magnification relative to the full source width.
+    /// Largest allowed magnification relative to the full source width. A
+    /// shot that would need more is drawn at this limit, looser than its
+    /// size, and reported as limited by zoom.
     pub max_zoom: f64,
 }
 
@@ -135,6 +146,10 @@ pub struct Subject {
     pub query: QueryId,
     /// Latest bounding box.
     pub bbox: Rect,
+    /// What `bbox` covers: that of the newest detection applied to the
+    /// subject. Absent in older data, where it reads as [`Extent::Object`].
+    #[serde(default)]
+    pub extent: Extent,
     /// Detector confidence in `0.0..=1.0`.
     pub confidence: f64,
     /// Tracking state.

@@ -17,7 +17,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
-use ac_core::{QueryId, Rect, SourceId, SubjectId};
+use ac_core::{Extent, QueryId, Rect, SourceId, SubjectId};
 use ac_subjects::{
     Detection, RetireReason, StoreConfig, StoreEvent, SubjectStore, TrackObservation,
 };
@@ -118,6 +118,7 @@ fn apply(store: &mut SubjectStore, model: &mut Model, op: &Op) -> Vec<StoreEvent
                     query: QueryId(QUERIES[q].into()),
                     bbox: cell(c, j),
                     score,
+                    extent: Extent::Object,
                 })
                 .collect();
             store.ingest_detections(ms(model.now.saturating_sub(*lag_ms)), &dets)

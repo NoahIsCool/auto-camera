@@ -53,6 +53,9 @@ pub struct ShotView {
     pub quality: f32,
     /// Framing settledness in `0..=1`.
     pub settled: f64,
+    /// The preset's zoom ceiling keeps the shot looser than its size, as
+    /// for a close-up of a distant person; the multiview labels it.
+    pub limited_by_zoom: bool,
     /// Health.
     pub status: ShotStatus,
     /// The shot can be put on air.

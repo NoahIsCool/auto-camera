@@ -3,8 +3,34 @@
 //! Coordinates are fractions of the source frame: `x` grows right and `y` grows
 //! down, both in `0.0..=1.0`. Widths and heights are fractions of the source's
 //! width and height, so a 16:9 crop of a 16:9 source has `w == h`.
+//!
+//! A box alone does not say what it covers. [`Extent`] does: a detector
+//! that returns whole people (OWLv2 people-first) and one that returns the
+//! thing a prompt names (a guitar, an upper body) produce boxes that must be
+//! framed differently, so every detection and subject carries its extent
+//! from the detector to the framing.
 
 use serde::{Deserialize, Serialize};
+
+/// What a box covers, which decides how a shot is composed on it.
+///
+/// The detector that made the box sets it; the subject store keeps the
+/// extent of the newest detection applied to a subject, and framing reads it
+/// (`ac_framing::compose_subject`). The default is [`Extent::Object`], the
+/// historical meaning of every box, so data written before extents existed
+/// keeps its framing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Extent {
+    /// The box is exactly the thing to frame: an object, or a part such as
+    /// an upper body. Shots size it by how much of the frame it fills.
+    #[default]
+    Object,
+    /// The box is a whole person, crown at the top and as much of the body
+    /// below as is visible. Shots are cut at body lines measured in head
+    /// heights from the crown.
+    Person,
+}
 
 /// A point in normalized source coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -137,6 +163,13 @@ mod tests {
         assert!(Rect::FULL.contains_rect(&r));
         assert!((r.w - 0.3).abs() < 1e-12 && (r.h - 0.3).abs() < 1e-12);
         assert!((r.right() - 1.0).abs() < 1e-12 && r.y.abs() < 1e-12);
+    }
+
+    #[test]
+    fn extent_defaults_to_object() {
+        // Boxes from before extents existed keep the fill-rule framing.
+        assert_eq!(Extent::default(), Extent::Object);
+        assert_ne!(Extent::Person, Extent::Object);
     }
 
     #[test]
