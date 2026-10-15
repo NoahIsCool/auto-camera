@@ -22,6 +22,7 @@ pub mod api;
 pub mod boxes;
 pub mod error;
 mod image;
+pub mod matching;
 mod ncc;
 #[cfg(feature = "onnx")]
 pub mod onnx_owl;
