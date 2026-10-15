@@ -248,6 +248,7 @@ fn execution_providers(provider: &str, path: &Path) -> Vec<ExecutionProviderDisp
 /// Where CoreML caches its compiled copy of the graph at `path`:
 /// `coreml-cache/<stem>-<size>-<mtime>` next to it, or `None` when the file's
 /// metadata cannot be read.
+#[cfg(target_os = "macos")]
 fn coreml_cache_dir(path: &Path) -> Option<PathBuf> {
     let meta = std::fs::metadata(path).ok()?;
     let modified = meta
