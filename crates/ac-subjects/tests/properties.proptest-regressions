@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 63de13467c914d51c88a4011214d6ca464890c53139bb59c4db8690489f94466 # shrinks to ops = [Detect { advance_ms: 0, lag_ms: 0, dets: [(0, 3, 2, 0.54132235), (0, 4, 0, 0.8080729)] }, Protect([3]), Detect { advance_ms: 0, lag_ms: 0, dets: [] }, Detect { advance_ms: 0, lag_ms: 0, dets: [] }, Detect { advance_ms: 0, lag_ms: 0, dets: [(1, 0, 0, 0.48526484), (0, 0, 2, 0.94915456)] }, Pin(1, false), Tick { advance_ms: 1000 }, Detect { advance_ms: 0, lag_ms: 0, dets: [(0, 1, 0, 0.86515015), (0, 5, 0, 0.7593283), (0, 1, 2, 0.70547056)] }]
