@@ -14,6 +14,13 @@ ac-core = { path = "crates/ac-core" }
 ac-framing = { path = "crates/ac-framing" }
 ac-switcher = { path = "crates/ac-switcher" }
 ac-eval = { path = "crates/ac-eval" }
+ac-media = { path = "crates/ac-media" }
+ac-vision = { path = "crates/ac-vision" }
+ac-subjects = { path = "crates/ac-subjects" }
+ac-director = { path = "crates/ac-director" }
+ac-compositor = { path = "crates/ac-compositor" }
+ac-output = { path = "crates/ac-output" }
+ac-engine = { path = "crates/ac-engine" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 

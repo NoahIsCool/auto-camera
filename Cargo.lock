@@ -26,6 +26,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ac-media"
+version = "0.1.0"
+dependencies = [
+ "ac-core",
+ "thiserror",
+]
+
+[[package]]
 name = "ac-switcher"
 version = "0.1.0"
 dependencies = [
