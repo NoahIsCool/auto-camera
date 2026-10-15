@@ -17,6 +17,22 @@
 //!   burst. Skipped ticks are counted; the media time still advances by the
 //!   skipped amount, so the program clock stays aligned with the sources.
 //!
+//! [`PhaseLock`] keeps the ticks away from the frame boundary of a source
+//! that runs at the tick rate. The engine reads each source's newest frame
+//! when a tick starts. If a 30 fps source publishes its frames at the same
+//! instants as a 30 Hz tick schedule (both run on one clock, so this is the
+//! common case, not bad luck), scheduler jitter decides on every tick whether
+//! the frame arrived first: the engine alternately repeats a frame and skips
+//! one, and the tracker sees a source that stutters. A skipped frame (the
+//! sequence number advanced by two or more) from a source whose frame period
+//! matches the tick period is the signature of that collision; the lock then
+//! delays the schedule by half a period, which puts every tick midway between
+//! two frames. Media time is unaffected (tick `n` still has media time
+//! `n · period`); only the clock readings at which ticks are due move. A
+//! cooldown stops jitter from shifting it back and forth, and a source at a
+//! slightly different rate (29.97 against 30) drifts back into collision only
+//! every few tens of seconds, costing one skipped frame each time.
+//!
 //! [`RateMeter`] measures event rates (source frame rates) over a sliding
 //! window of media time, and [`TickTimer`] keeps tick-duration statistics.
 
@@ -99,6 +115,70 @@ impl TickSchedule {
             late: now.saturating_sub(due) > self.period / 2,
             skipped,
         }
+    }
+
+    /// Moves every future tick `by` later on the clock without changing
+    /// media time; see [`PhaseLock`].
+    pub fn delay(&mut self, by: Duration) {
+        self.origin = self.origin.saturating_add(by);
+    }
+}
+
+/// After a shift, the [`PhaseLock`] waits this long before shifting again.
+pub const PHASE_LOCK_COOLDOWN: Duration = Duration::from_secs(1);
+
+/// Detects ticks that collide with a same-rate source's frames; see the
+/// module docs.
+#[derive(Debug, Clone)]
+pub struct PhaseLock {
+    /// Tick period.
+    period: Duration,
+    /// Sequence number and PTS of the newest frame seen at a tick.
+    last: Option<(u64, Duration)>,
+    /// Ticks left before another shift is allowed.
+    cooldown: u64,
+    /// Shifts made so far.
+    shifts: u64,
+}
+
+impl PhaseLock {
+    /// A lock for ticks of `period`.
+    pub fn new(period: Duration) -> Self {
+        Self {
+            period: period.max(Duration::from_nanos(1)),
+            last: None,
+            cooldown: 0,
+            shifts: 0,
+        }
+    }
+
+    /// Shifts made so far.
+    pub fn shifts(&self) -> u64 {
+        self.shifts
+    }
+
+    /// Observes the reference source's newest frame (`seq`, `pts`) at one
+    /// tick, or `None` when it has none. Returns how far to
+    /// [`TickSchedule::delay`] the schedule, if at all.
+    pub fn observe(&mut self, frame: Option<(u64, Duration)>) -> Option<Duration> {
+        self.cooldown = self.cooldown.saturating_sub(1);
+        let (seq, pts) = frame?;
+        let (last_seq, last_pts) = self.last.replace((seq, pts))?;
+        // A restarted source (lower sequence) or a looped file (lower PTS)
+        // says nothing about the phase.
+        let advanced = seq.checked_sub(last_seq)?;
+        let elapsed = pts.checked_sub(last_pts)?;
+        if advanced < 2 || self.cooldown > 0 {
+            return None;
+        }
+        let frame_period = elapsed / u32::try_from(advanced).ok()?;
+        if frame_period.abs_diff(self.period) > self.period / 16 {
+            return None;
+        }
+        let cooldown = PHASE_LOCK_COOLDOWN.as_nanos() / self.period.as_nanos();
+        self.cooldown = u64::try_from(cooldown).unwrap_or(u64::MAX);
+        self.shifts += 1;
+        Some(self.period / 2)
     }
 }
 
@@ -186,6 +266,79 @@ mod tests {
     /// `v` milliseconds.
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v)
+    }
+
+    /// `frame` as the (sequence, PTS) pair of a 25 fps source.
+    fn f(seq: u64) -> Option<(u64, Duration)> {
+        Some((seq, P * u32::try_from(seq).unwrap()))
+    }
+
+    #[test]
+    fn delay_moves_due_times_but_not_media_time() {
+        let mut s = TickSchedule::new(ms(0), P, Duration::from_secs(1));
+        assert!(matches!(s.poll(ms(0)), TickDecision::Tick { index: 0, .. }));
+        s.delay(ms(20));
+        assert_eq!(s.poll(ms(40)), TickDecision::Wait(ms(20)));
+        match s.poll(ms(60)) {
+            TickDecision::Tick {
+                index,
+                media_time,
+                late,
+                ..
+            } => assert!(index == 1 && media_time == P && !late),
+            other => panic!("expected a tick, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phase_lock_shifts_half_a_period_on_a_same_rate_skip() {
+        let mut lock = PhaseLock::new(P);
+        assert_eq!(lock.observe(f(0)), None);
+        assert_eq!(lock.observe(f(1)), None);
+        assert_eq!(lock.observe(f(1)), None); // a repeat alone is no proof
+        assert_eq!(lock.observe(f(3)), Some(ms(20)));
+        assert_eq!(lock.shifts(), 1);
+    }
+
+    #[test]
+    fn phase_lock_waits_out_its_cooldown() {
+        let mut lock = PhaseLock::new(P);
+        lock.observe(f(0));
+        assert_eq!(lock.observe(f(2)), Some(ms(20)));
+        // 1 s of 40 ms ticks: 25 ticks of cooldown, the shifting tick included.
+        let mut seq = 2;
+        for _ in 0..24 {
+            seq += 2;
+            assert_eq!(lock.observe(f(seq)), None);
+        }
+        assert_eq!(lock.observe(f(seq + 2)), Some(ms(20)));
+        assert_eq!(lock.shifts(), 2);
+    }
+
+    #[test]
+    fn phase_lock_ignores_sources_at_other_rates() {
+        // A 50 fps source always advances two frames per 25 Hz tick.
+        let mut lock = PhaseLock::new(P);
+        for i in 0..10u32 {
+            let seq = u64::from(i) * 2;
+            assert_eq!(lock.observe(Some((seq, ms(20) * i * 2))), None);
+        }
+        // A 12.5 fps source never skips; a 30 fps one is outside the
+        // tolerance of a 25 Hz tick.
+        let mut lock = PhaseLock::new(P);
+        lock.observe(Some((0, ms(0))));
+        assert_eq!(lock.observe(Some((2, ms(67)))), None);
+    }
+
+    #[test]
+    fn phase_lock_ignores_missing_frames_restarts_and_loops() {
+        let mut lock = PhaseLock::new(P);
+        assert_eq!(lock.observe(None), None);
+        lock.observe(f(10));
+        assert_eq!(lock.observe(None), None);
+        assert_eq!(lock.observe(f(2)), None); // restarted: sequence went back
+        assert_eq!(lock.observe(Some((5, ms(0)))), None); // looped: PTS went back
+        assert_eq!(lock.shifts(), 0);
     }
 
     #[test]

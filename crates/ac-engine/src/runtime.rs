@@ -58,7 +58,7 @@ use crate::core::{EngineCore, SourceFeed};
 use crate::discovery::{DiscoveryResult, DiscoveryWorker, build_detector};
 use crate::mailbox::Latest;
 use crate::output::OutputController;
-use crate::schedule::{TickDecision, TickSchedule, TickTimer};
+use crate::schedule::{PhaseLock, TickDecision, TickSchedule, TickTimer};
 use crate::snapshot::{EngineSnapshot, OutputState, OutputView, TimingView};
 
 /// Longest single wait of the engine thread between ticks.
@@ -468,6 +468,7 @@ impl Runtime {
     /// The engine thread's main loop.
     fn run(mut self) -> EngineReport {
         let mut schedule = TickSchedule::new(self.clock.now(), self.period, self.max_lag);
+        let mut phase = PhaseLock::new(self.period);
         loop {
             let (media_time, late, skipped) = match schedule.poll(self.clock.now()) {
                 TickDecision::Wait(d) => {
@@ -485,7 +486,10 @@ impl Runtime {
             if self.apply_commands() {
                 break;
             }
-            self.tick(media_time, skipped);
+            let reference = self.tick(media_time, skipped);
+            if let Some(by) = phase.observe(reference) {
+                schedule.delay(by);
+            }
             self.timer.record(started.elapsed());
             self.late += u64::from(late);
             self.skipped += skipped;
@@ -525,7 +529,10 @@ impl Runtime {
 
     /// One tick: feed the core, dispatch discovery, push the program
     /// (owing the encoder a repeat for each of the `skipped` ticks before).
-    fn tick(&mut self, media_time: Duration, skipped: u64) {
+    /// Returns the sequence number and PTS of the frame the tick read from
+    /// the phase reference (the program audio source, else the first
+    /// source), for the [`PhaseLock`].
+    fn tick(&mut self, media_time: Duration, skipped: u64) -> Option<(u64, Duration)> {
         self.output.poll();
         let results: Vec<DiscoveryResult> = self.results.try_iter().collect();
         let feeds: Vec<SourceFeed> = self
@@ -536,6 +543,10 @@ impl Runtime {
                 frame: s.latest(),
             })
             .collect();
+        let reference = feeds
+            .get(self.audio_source.unwrap_or(0))
+            .and_then(|feed| feed.frame.as_ref())
+            .map(|frame| (frame.seq, frame.pts));
         let out = self.core.tick(media_time, &feeds, results);
         for (i, request) in out.requests {
             if let Some(Some(worker)) = self.workers.get(i) {
@@ -550,6 +561,7 @@ impl Runtime {
             }
         }
         self.output.push(&out.program, program_audio, skipped);
+        reference
     }
 
     /// Publishes the current snapshot and returns it.

@@ -72,7 +72,13 @@ The master clock is *paced* by an injectable `ac_sources::Clock`: the wall
 clock in production, a virtual or sped-up clock in tests (sources are paced
 by the same clock). `TickSchedule` marks a tick late when it starts more
 than half a period after it was due and skips ticks rather than bursting
-when the loop falls more than `max_lag` (1 s) behind. Core crates never read
+when the loop falls more than `max_lag` (1 s) behind. A `PhaseLock` keeps
+ticks midway between the frames of a source running at the tick rate:
+when that source (the program audio source, else the first) skips a frame
+at a tick, the schedule is delayed by half a period (at most once a
+second). Without it a 30 fps source and a 30 Hz tick on the same clock
+collide, and scheduler jitter makes the engine repeat and skip about a
+third of the frames. Core crates never read
 a clock; `EngineCore::tick(now, feeds, results)` takes time as an argument
 and is deterministic, which the core tests rely on (same inputs, identical
 program frames).
