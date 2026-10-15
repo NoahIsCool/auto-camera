@@ -3,8 +3,14 @@
 //! The enum does not mention any model-runtime type, so code that only uses the
 //! traits compiles the same with or without the `onnx` feature. Runtime and
 //! tokenizer failures are carried as their display text.
+//!
+//! [`VisionError::Timeout`] and [`VisionError::Unavailable`] are for
+//! detectors that run outside the process (a sidecar): a pass that missed
+//! its deadline, and a detector that cannot run now (its process is down or
+//! waiting to restart). Both are transient: a later call may succeed.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ac_core::{Rect, SourceId};
 use thiserror::Error;
@@ -47,4 +53,16 @@ pub enum VisionError {
     /// A model output does not have the expected shape.
     #[error("unexpected tensor shape: {0}")]
     Shape(String),
+    /// A detector pass did not finish within its deadline.
+    #[error("{what} timed out after {after:?}")]
+    Timeout {
+        /// What was waited for, such as "the sidecar's result".
+        what: String,
+        /// The deadline that passed.
+        after: Duration,
+    },
+    /// The detector cannot run now; the text says why and, when known,
+    /// when it will try again.
+    #[error("detector unavailable: {0}")]
+    Unavailable(String),
 }

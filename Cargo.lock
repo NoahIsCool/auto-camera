@@ -85,6 +85,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ac-sidecar"
+version = "0.1.0"
+dependencies = [
+ "ac-core",
+ "ac-media",
+ "ac-vision",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ac-sources"
 version = "0.1.0"
 dependencies = [

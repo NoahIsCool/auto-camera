@@ -226,6 +226,7 @@ not guitars (see "Prompts" in the crate README).
 | `ac-media` | Frames, audio blocks and the source trait, with latest-frame mailboxes |
 | `ac-sources` | File (ffmpeg) and synthetic sources; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector |
+| `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
 | `ac-framing` | Ideal crops (fill rule for objects, body cut lines for whole people, zoom-limit flags) and per-shot smoothing |
 | `ac-director` | Shot scoring, suggestions and opt-in auto-takes |
