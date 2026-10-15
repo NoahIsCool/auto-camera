@@ -22,6 +22,7 @@ ac-compositor = { path = "crates/ac-compositor" }
 ac-output = { path = "crates/ac-output" }
 ac-engine = { path = "crates/ac-engine" }
 ac-sources = { path = "crates/ac-sources" }
+ac-sidecar = { path = "crates/ac-sidecar" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
@@ -41,4 +42,8 @@ missing_docs_in_private_items = "warn"
 opt-level = 3
 
 [profile.dev.package.ac-compositor]
+opt-level = 3
+
+# The sidecar host downscales every frame it sends with a box filter.
+[profile.dev.package.ac-sidecar]
 opt-level = 3
