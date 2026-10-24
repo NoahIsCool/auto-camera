@@ -1,0 +1,15 @@
+[package]
+name = "auto-camera"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ac-core.workspace = true
+ac-framing.workspace = true
+ac-switcher.workspace = true
+
+[lints]
+workspace = true
