@@ -16,7 +16,7 @@ use ac_sidecar::service::UNNAMED;
 use ac_sidecar::{DetectorConfig, HostConfig, HostError, HostState, SidecarService};
 use ac_vision::{Detector, PromptQuery, VisionError};
 
-use common::{PROMPT, eventually, exists, fake, frame};
+use common::{PROMPT, WINDOW, backing_off, eventually, exists, fake, frame};
 
 /// Asserts `pid` was reaped (soon: procfs may lag a moment).
 fn assert_reaped(pid: u32) {
@@ -146,7 +146,7 @@ fn detectors_on_many_threads_share_one_process() {
 
 #[test]
 fn deadlines_and_restarts_reach_the_detector_as_vision_errors() {
-    let service = SidecarService::start(fake("slow", &["--delay-ms", "400"])).unwrap();
+    let service = SidecarService::start(backing_off("slow", &["--delay-ms", "400"])).unwrap();
     let first = pid_of(&service);
     let queries = [PromptQuery::new("a", "a person")];
     let f = frame(64, 36, 0);
@@ -159,13 +159,13 @@ fn deadlines_and_restarts_reach_the_detector_as_vision_errors() {
     let mut patient = service.detector(DetectorConfig::default()).unwrap();
     let err = hasty.detect(&f, &queries).unwrap_err();
     assert!(matches!(err, VisionError::Timeout { .. }), "{err}");
-    assert_reaped(first);
     let err = patient.detect(&f, &queries).unwrap_err();
     assert!(
         matches!(&err, VisionError::Unavailable(m) if m.contains("retrying")),
         "{err}"
     );
-    thread::sleep(Duration::from_millis(80));
+    assert_reaped(first);
+    thread::sleep(WINDOW);
     assert_eq!(patient.detect(&f, &queries).unwrap().len(), 1);
     let status = service.status();
     assert_eq!(status.stats.spawns, 2);
@@ -191,7 +191,7 @@ fn error_replies_are_model_errors() {
 fn a_first_start_that_fails_is_retried_by_the_detector() {
     let marker = common::temp_path("fail-load-once");
     let _ = std::fs::remove_file(&marker);
-    let service = SidecarService::start(fake(
+    let service = SidecarService::start(backing_off(
         "fail-load-once",
         &["--marker", marker.to_str().unwrap()],
     ))
@@ -206,7 +206,7 @@ fn a_first_start_that_fails_is_retried_by_the_detector() {
         matches!(&err, VisionError::Unavailable(m) if m.contains("exited before hello") && m.contains("retrying")),
         "{err}"
     );
-    thread::sleep(Duration::from_millis(80));
+    thread::sleep(WINDOW);
     assert_eq!(detector.detect(&frame(8, 8, 1), &queries).unwrap().len(), 1);
     let status = service.status();
     assert_eq!((status.stats.spawns, status.stats.results), (2, 1));

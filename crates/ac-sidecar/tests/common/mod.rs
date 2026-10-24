@@ -34,6 +34,23 @@ pub fn fake(mode: &str, extra: &[&str]) -> HostConfig {
     }
 }
 
+/// A restart backoff long enough that a check that a request is refused
+/// while backing off cannot miss the window. `fake`'s 50 ms is not: on a
+/// loaded macOS runner, reaping the old child and checking it was gone
+/// took longer than that, and the "refused" request started a new one.
+pub const WINDOW: Duration = Duration::from_secs(1);
+
+/// [`fake`] with a [`WINDOW`] restart backoff, doubling up to four times it,
+/// for tests that check refusals during the backoff. Sleeping for `WINDOW`
+/// after such a refusal is always past the backoff, as it began earlier.
+pub fn backing_off(mode: &str, extra: &[&str]) -> HostConfig {
+    HostConfig {
+        restart_backoff: WINDOW,
+        max_restart_backoff: 4 * WINDOW,
+        ..fake(mode, extra)
+    }
+}
+
 /// A `w` by `h` RGBA frame with a gradient, from source "cam".
 pub fn frame(w: u32, h: u32, seq: u64) -> VideoFrame {
     let mut data = Vec::with_capacity((w * h * 4) as usize);

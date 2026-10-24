@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use ac_sidecar::{HostConfig, HostError, HostState, SamHost};
 
-use common::{PROMPT, eventually, exists, fake, grandchild_pid, request, running};
+use common::{
+    PROMPT, WINDOW, backing_off, eventually, exists, fake, grandchild_pid, request, running,
+};
 
 /// A host for the fake in `mode`.
 fn host(mode: &str, extra: &[&str]) -> SamHost {
@@ -193,12 +195,7 @@ fn stop_interrupts_a_startup() {
 
 #[test]
 fn a_crash_after_hello_is_reported_then_restarted_with_backoff() {
-    let config = HostConfig {
-        restart_backoff: Duration::from_millis(100),
-        max_restart_backoff: Duration::from_millis(400),
-        ..fake("crash-after-hello", &[])
-    };
-    let mut host = SamHost::new(config).unwrap();
+    let mut host = SamHost::new(backing_off("crash-after-hello", &[])).unwrap();
     let first = ready_pid(&mut host);
     let err = host
         .detect(request(1, &["a person"], 0.5), PROMPT)
@@ -208,19 +205,19 @@ fn a_crash_after_hello_is_reported_then_restarted_with_backoff() {
     assert!(text.contains("exited during a request"), "{text}");
     assert!(text.contains("exit status: 3"), "{text}");
     assert!(text.contains("fake: crashing after hello"), "{text}");
-    assert_reaped(first);
     // Refused at once while backing off.
     let err = host
         .detect(request(2, &["a person"], 0.5), PROMPT)
         .unwrap_err();
     assert!(
-        matches!(err, HostError::Unavailable { retry_in: Some(d), .. } if d <= Duration::from_millis(100)),
+        matches!(err, HostError::Unavailable { retry_in: Some(d), .. } if d <= WINDOW),
         "{err}"
     );
     assert_eq!(host.status().stats.refused, 1);
     assert_eq!(host.status().stats.spawns, 1);
+    assert_reaped(first);
     // After the backoff, a new process, which crashes again; the wait doubles.
-    thread::sleep(Duration::from_millis(120));
+    thread::sleep(WINDOW);
     assert!(host.detect(request(3, &["a person"], 0.5), PROMPT).is_err());
     let status = host.status();
     assert_eq!((status.stats.spawns, status.stats.failures), (2, 2));
@@ -229,7 +226,7 @@ fn a_crash_after_hello_is_reported_then_restarted_with_backoff() {
         .detect(request(4, &["a person"], 0.5), PROMPT)
         .unwrap_err();
     assert!(
-        matches!(err, HostError::Unavailable { retry_in: Some(d), .. } if d > Duration::from_millis(100)),
+        matches!(err, HostError::Unavailable { retry_in: Some(d), .. } if d > WINDOW),
         "{err}"
     );
     assert_eq!(host.pid(), None);
