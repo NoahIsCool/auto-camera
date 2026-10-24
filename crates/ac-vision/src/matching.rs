@@ -49,7 +49,11 @@
 //! An object belongs to the person holding most of it, measured against the
 //! smaller of the two boxes: a guitar must lie mostly inside its player, and
 //! a player must lie mostly inside a drum kit or a piano larger than they
-//! are.
+//! are. Fractions that differ only by floating-point rounding are equal, and
+//! an object two people hold equally goes to the higher-scored one. That
+//! case is common: a box that contains a person also contains any smaller
+//! "person" box nested in them (their head and shoulders), and both
+//! fractions are then 1, so rounding alone must not decide between them.
 //!
 //! A "person" box that contains two or more other people is a group (OWLv2
 //! sometimes boxes a whole projection screen of photos, or a whole band, as
@@ -64,6 +68,11 @@
 //! of an instrument on a stand holds it, as far as boxes can tell. Prompts
 //! work best when they
 //! name something visible on the person: an instrument, a garment, a prop.
+//! A described person whose description is an action ("a person speaking",
+//! "a person singing") scores every person alike on OWLv2, so the
+//! [`Selector::Described`] route at the person threshold picks everyone
+//! (measured on 40 labelled frames: the speaker in 20 of 20, with 300 false
+//! boxes).
 
 use std::collections::HashMap;
 
@@ -375,8 +384,9 @@ pub fn overlap_fraction(inner: &Rect, outer: &Rect) -> f64 {
     inner.intersection(outer).map_or(0.0, |i| i.area() / area)
 }
 
-/// Fraction of the smaller of `a` and `b` that lies inside the other: 1 when
-/// either contains the other, 0 when they are disjoint or one has no area.
+/// Fraction of the smaller of `a` and `b` that lies inside the other: 1 (up
+/// to floating-point rounding, so possibly a hair above) when either
+/// contains the other, 0 when they are disjoint or one has no area.
 pub fn contained_fraction(a: &Rect, b: &Rect) -> f64 {
     let area = a.area().min(b.area());
     if area <= 0.0 {
@@ -385,14 +395,23 @@ pub fn contained_fraction(a: &Rect, b: &Rect) -> f64 {
     a.intersection(b).map_or(0.0, |i| i.area() / area)
 }
 
-/// The person (index into `people`) holding `object`: the one sharing the
-/// largest [`contained_fraction`] with it, if that is at least
-/// `min_overlap`. Ties go to the higher-scored person, which comes first.
+/// How much two [`contained_fraction`]s may differ and still be a tie in
+/// [`holder`]. The fraction goes through [`Rect::intersection`], which
+/// recomputes widths as `right - left`, so exact containment can come out
+/// as 1.0000000000000002 for one box and 1.0 for another; real differences
+/// in where a box lies are many orders of magnitude larger.
+const FRACTION_TIE: f64 = 1e-9;
+
+/// The person (index into `people`, which is sorted by score, highest
+/// first) holding `object`: the one sharing the largest
+/// [`contained_fraction`] with it, if that is at least `min_overlap`.
+/// Fractions within [`FRACTION_TIE`] of each other are ties, and ties go to
+/// the higher-scored person, which comes first.
 fn holder(people: &[(Rect, f32)], object: &Rect, min_overlap: f64) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, (person, _)) in people.iter().enumerate() {
         let f = contained_fraction(object, person);
-        if f >= min_overlap && best.is_none_or(|(_, b)| f > b) {
+        if f >= min_overlap && best.is_none_or(|(_, b)| f > b + FRACTION_TIE) {
             best = Some((i, f));
         }
     }
