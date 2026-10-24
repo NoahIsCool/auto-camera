@@ -3,7 +3,15 @@
 //! [`ac_core::Subject`] is the part every other crate needs (id, query, box,
 //! extent, state, pin). [`SubjectRecord`] wraps it with what only identity
 //! management needs: the alias queries, operator flags, observation times and
-//! a small motion model.
+//! a small motion model, plus the label evidence ([`crate::labels`]) that
+//! says which of its queries frame shots.
+//!
+//! Every query in [`SubjectRecord::queries`] continues the subject; only
+//! those in [`SubjectRecord::shot_queries`] make its shots. The second list
+//! is the first one filtered, in the same order (primary first, then the
+//! aliases sorted), and always holds the primary query: an alias joins it
+//! once it has been seen in enough observing passes and leaves it after
+//! enough passes without it, while it goes on continuing the subject.
 //!
 //! The subject's [`Extent`] is that of the newest detection applied to it
 //! (the one that created it, matched it, aliased onto it or recovered it).
@@ -33,10 +41,12 @@
 //! (`MAX_PREDICTION`) either side of the box's PTS, and lost subjects do not
 //! move at all.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use ac_core::{Extent, Point, QueryId, Rect, SourceId, Subject, SubjectId, TrackState};
+
+use crate::labels::LabelEvidence;
 
 /// Time constant of the velocity filter, in seconds.
 const VELOCITY_TIME_CONSTANT: f64 = 0.3;
@@ -97,6 +107,11 @@ pub struct SubjectRecord {
     /// First detection batch at which the subject was unmatched while sitting
     /// on top of a matched subject (a likely duplicate), until that ends.
     pub(crate) shadowed_since: Option<Duration>,
+    /// Evidence for each query the subject answers, counted in the detection
+    /// passes that observed it ([`crate::labels`]); it decides
+    /// [`Self::shot_queries`] and nothing else. One entry per answered query
+    /// after any such pass.
+    pub labels: BTreeMap<QueryId, LabelEvidence>,
 }
 
 /// Seconds of `pts` as a float, for signed time arithmetic.
@@ -143,6 +158,7 @@ impl SubjectRecord {
                 velocity: Point::default(),
             },
             shadowed_since: None,
+            labels: BTreeMap::new(),
         }
     }
 
@@ -171,6 +187,15 @@ impl SubjectRecord {
     /// in sorted order.
     pub fn queries(&self) -> impl Iterator<Item = &QueryId> {
         std::iter::once(&self.subject.query).chain(&self.aliases)
+    }
+
+    /// The queries whose shots the subject should have, in the order of
+    /// [`Self::queries`]: the primary query always, then each alias whose
+    /// label frames shots ([`crate::labels`]). An alias seen in a single
+    /// stray pass continues the subject but frames nothing.
+    pub fn shot_queries(&self) -> impl Iterator<Item = &QueryId> {
+        let frames = |q: &&QueryId| self.labels.get(*q).is_some_and(|e| e.frames);
+        std::iter::once(&self.subject.query).chain(self.aliases.iter().filter(frames))
     }
 
     /// Smoothed centre velocity, in normalized units per second.

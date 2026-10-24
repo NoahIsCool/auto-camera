@@ -19,15 +19,16 @@
 //!    unmatched subjects that answer the query through an alias.
 //! 4. **Aliasing.** A detection still unmatched that is the same entity as a
 //!    subject is that subject seen through another prompt: its query becomes
-//!    an alias and, if the subject was not observed yet in this batch, the
-//!    detection counts as an observation of it. A box is the same entity as
-//!    a subject when it overlaps above `alias_iou` either the subject's
-//!    predicted box or the box another query's detection applied to it in
-//!    this same batch. The second reference matters for late results: the
-//!    tracker may hold a newer, differently sized box that the detection
-//!    agrees with but does not replace, and the identical boxes one pass
-//!    gives one entity for several prompts must still alias. A detection of
-//!    the *same* query there is a duplicate box and is dropped.
+//!    an alias at once (identity does not wait; whether the alias frames
+//!    shots is phase 7's business) and, if the subject was not observed yet
+//!    in this batch, the detection counts as an observation of it. A box is
+//!    the same entity as a subject when it overlaps above `alias_iou` either
+//!    the subject's predicted box or the box another query's detection
+//!    applied to it in this same batch. The second reference matters for
+//!    late results: the tracker may hold a newer, differently sized box that
+//!    the detection agrees with but does not replace, and the identical boxes
+//!    one pass gives one entity for several prompts must still alias. A
+//!    detection of the *same* query there is a duplicate box and is dropped.
 //! 5. **Shadows.** An unprotected tracking subject left unmatched while it
 //!    sits above `alias_iou` on a matched subject is probably a duplicate (its
 //!    tracker drifted onto someone else). If that lasts for `lost_after` it
@@ -38,6 +39,13 @@
 //!    score order, so one prompt cannot take every slot. At capacity, the
 //!    longest-lost subject that is not retained is evicted to make room;
 //!    without one, the candidate is dropped.
+//! 7. **Labels.** Every subject the batch observed counts it as one
+//!    observing pass in its label evidence ([`crate::labels`]): each query
+//!    a detection of the batch reached it with (a match, an alias, a
+//!    duplicate box of a query it already answers, its admission) gains a
+//!    sighting, once however many boxes, and every other query it answers a
+//!    miss. Subjects the batch did not observe are not counted. This phase
+//!    changes no identity: it only decides which queries frame shots.
 //!
 //! A matched detection is authoritative. If it overlaps the subject's current
 //! box by less than `reseed_iou`, the fast tracker drifted: the box jumps to
@@ -92,6 +100,17 @@ struct Batch {
     applied: BTreeMap<SubjectId, Rect>,
     /// Events in the order they happened.
     events: Vec<StoreEvent>,
+    /// The queries whose detections in this batch reached each subject:
+    /// matched it, aliased onto it, landed on it as a duplicate box or
+    /// admitted it. Phase 7 counts them as sightings ([`crate::labels`]).
+    seen: BTreeMap<SubjectId, BTreeSet<QueryId>>,
+}
+
+impl Batch {
+    /// Records that a detection of `query` reached subject `id`.
+    fn saw(&mut self, id: SubjectId, query: &QueryId) {
+        self.seen.entry(id).or_default().insert(query.clone());
+    }
 }
 
 impl SubjectStore {
@@ -142,6 +161,7 @@ impl SubjectStore {
         }
         self.update_shadows(pts, &mut batch);
         self.admit(pts, &clean, fresh, &mut batch);
+        self.update_labels(&batch);
         batch.events
     }
 
@@ -200,7 +220,14 @@ impl SubjectStore {
     }
 
     /// Phase 4: `det` overlaps subject `id` above `alias_iou`.
+    ///
+    /// The detection is a sighting of its query on the subject either way,
+    /// also when it is a second box of a query the subject answers: a
+    /// subject already observed in this batch is no phase 3 candidate, so
+    /// this is how an alias is seen in the passes that box one entity
+    /// identically for several prompts.
     fn alias(&mut self, id: SubjectId, det: &Clean<'_>, pts: Duration, batch: &mut Batch) {
+        batch.saw(id, det.query);
         let rec = self
             .subjects
             .get_mut(&id)
@@ -220,6 +247,7 @@ impl SubjectStore {
     fn observe(&mut self, id: SubjectId, det: &Clean<'_>, pts: Duration, batch: &mut Batch) {
         batch.observed.insert(id);
         batch.applied.insert(id, det.bbox);
+        batch.saw(id, det.query);
         let reseed_iou = self.config.reseed_iou;
         let rec = self.subjects.get_mut(&id).expect("matched ids are live");
         rec.subject.confidence = f64::from(det.score);
@@ -347,6 +375,16 @@ impl SubjectStore {
         }
     }
 
+    /// Phase 7: counts the batch in the label evidence of every subject it
+    /// observed ([`crate::labels`]).
+    fn update_labels(&mut self, batch: &Batch) {
+        for id in &batch.observed {
+            if let Some(rec) = self.subjects.get_mut(id) {
+                rec.count_labels(batch.seen.get(id), &self.config);
+            }
+        }
+    }
+
     /// Retires the longest-lost subject that is not retained; false when
     /// there is none.
     fn evict(&mut self, batch: &mut Batch) -> bool {
@@ -384,6 +422,7 @@ impl SubjectStore {
         self.subjects.insert(id, rec);
         batch.observed.insert(id);
         batch.applied.insert(id, det.bbox);
+        batch.saw(id, det.query);
         batch
             .events
             .push(StoreEvent::Created { id, bbox: det.bbox });

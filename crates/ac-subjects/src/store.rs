@@ -35,6 +35,12 @@
 //!   detections alone until the next matching detection retries the start.
 //! * Fast-track observations never create or revive a subject; only
 //!   detections and operator reacquires do.
+//! * Shot labels ([`crate::labels`]) change only in detection passes that
+//!   observe the subject and in [`SubjectStore::remove_query`]. Ticks,
+//!   losses, retention flags and reacquires leave them alone, so a lost
+//!   subject keeps every label through the gap. Protected and pinned
+//!   subjects get no exemption: their labels follow the evidence like any
+//!   other's (the engine keeps the shots an on-air subject already holds).
 //!
 //! Association of detections lives in [`crate::associate`].
 
@@ -255,10 +261,11 @@ impl SubjectStore {
 
     /// The operator removed `query`.
     ///
-    /// The query is dropped from every alias list. A subject whose primary
-    /// query it was is promoted to its first alias when it has one, kept as an
-    /// orphan while it is protected, and retired otherwise (pinned and hidden
-    /// subjects included: this is an operator action, not automatic).
+    /// The query is dropped from every alias list, with its label evidence. A
+    /// subject whose primary query it was is promoted to its first alias when
+    /// it has one, kept as an orphan while it is protected, and retired
+    /// otherwise (pinned and hidden subjects included: this is an operator
+    /// action, not automatic).
     pub fn remove_query(&mut self, query: &QueryId) -> Vec<StoreEvent> {
         let mut events = Vec::new();
         let ids: Vec<SubjectId> = self.subjects.keys().copied().collect();
@@ -267,6 +274,7 @@ impl SubjectStore {
                 continue;
             };
             let mut changed = rec.aliases.remove(query);
+            rec.labels.remove(query);
             if rec.subject.query == *query && !rec.orphaned {
                 if let Some(first) = rec.aliases.pop_first() {
                     rec.subject.query = first;

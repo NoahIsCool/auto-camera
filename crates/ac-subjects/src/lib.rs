@@ -11,7 +11,10 @@
 //!   assignment against motion-predicted boxes, and re-anchor them;
 //! * track observations move subjects between detections but never create
 //!   or revive one;
-//! * prompts that find the same entity become aliases of one subject;
+//! * prompts that find the same entity become aliases of one subject at
+//!   once, while an alias frames shots only after it has been seen in
+//!   several detection passes and stops after several passes without it
+//!   ([`labels`]), so one stray box never makes a lasting shot;
 //! * admission is fair across prompts and bounded by a soft cap (hard cap
 //!   [`HARD_CAP`]);
 //! * operator intent wins: pinned, hidden and on-air (protected) subjects are
@@ -39,17 +42,21 @@
 //!    [`SubjectStore::set_protected`] whenever they change.
 //! 5. Stop sending detections for a query before calling
 //!    [`SubjectStore::remove_query`].
+//! 6. Make each subject's shots from [`SubjectRecord::shot_queries`], not
+//!    from every query it answers ([`SubjectRecord::queries`]).
 
 mod assignment;
 pub mod associate;
 pub mod config;
 pub mod event;
+pub mod labels;
 pub mod observation;
 pub mod record;
 pub mod store;
 
 pub use config::{HARD_CAP, StoreConfig};
 pub use event::{RetireReason, StoreError, StoreEvent};
+pub use labels::LabelEvidence;
 pub use observation::{Detection, TrackObservation};
 pub use record::SubjectRecord;
 pub use store::SubjectStore;
