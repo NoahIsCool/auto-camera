@@ -20,7 +20,16 @@ Invariants
 ----------
 * stdout carries protocol frames only; logs and everything else go to stderr.
 * A bad command line is reported as a fatal error frame (exit code 2), so the
-  host sees why the child refused to start.
+  host sees why the child refused to start. That includes a ``--side`` SAM 3.1
+  cannot run at (not a multiple of 28 in 224..1008), checked here in
+  milliseconds rather than after hashing and loading gigabytes of weights.
+* The process never outlives the host: a watchdog thread exits with
+  ``EXIT_HOST_GONE`` (5) as soon as the parent process is gone (the child is
+  re-parented, so ``os.getppid()`` changes). That covers a host killed
+  without closing stdin (SIGKILL, a crash, a closed terminal) while this
+  process is busy loading or answering, on macOS too, which has no
+  parent-death signal. The check runs between Python bytecodes, so a native
+  call that holds the GIL delays it until the call returns.
 * The process exits on stdin EOF; see ``sam3_sidecar.loop`` for exit codes.
 * This file and the package import only the standard library; the MLX
   backend imports MLX itself when it loads.
@@ -33,6 +42,8 @@ import io
 import logging
 import os
 import sys
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn
@@ -43,9 +54,9 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from sam3_sidecar.backend import MAX_SIDE, MIN_SIDE, Backend  # noqa: E402
+from sam3_sidecar.backend import MAX_SIDE, MIN_SIDE, SAM31_PATCH, Backend, check_side  # noqa: E402
 from sam3_sidecar.fake import FakeBackend  # noqa: E402
-from sam3_sidecar.loop import send_fatal, serve  # noqa: E402
+from sam3_sidecar.loop import EXIT_HOST_GONE, send_fatal, serve  # noqa: E402
 
 #: Exit code for a bad command line (argparse's own convention).
 EXIT_USAGE = 2
@@ -61,6 +72,9 @@ BACKENDS = ("mlx", "fake")
 
 #: Names accepted by ``--log-level``.
 LOG_LEVELS = ("debug", "info", "warning", "error")
+
+#: How often the watchdog checks that the parent is still there, in seconds.
+PARENT_POLL_S = 0.25
 
 
 class UsageError(Exception):
@@ -86,7 +100,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--side",
         type=int,
         default=DEFAULT_SIDE,
-        help=f"square side the model runs at, {MIN_SIDE}..{MAX_SIDE} (default {DEFAULT_SIDE})",
+        help=(
+            f"square side the model runs at, a multiple of {2 * SAM31_PATCH} in "
+            f"{MIN_SIDE}..{MAX_SIDE} (default {DEFAULT_SIDE})"
+        ),
     )
     parser.add_argument("--backend", choices=BACKENDS, default="mlx", help="default mlx")
     parser.add_argument(
@@ -102,8 +119,10 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     """Parse and cross-check arguments; raise ``UsageError`` when invalid."""
     args = build_parser().parse_args(argv)
-    if not MIN_SIDE <= args.side <= MAX_SIDE:
-        raise UsageError(f"--side must be in {MIN_SIDE}..{MAX_SIDE}, got {args.side}")
+    try:
+        check_side(args.side, SAM31_PATCH)
+    except ValueError as exc:
+        raise UsageError(f"--side {args.side}: {exc}") from exc
     if args.backend == "mlx" and args.model is None:
         raise UsageError("--model is required with --backend mlx")
     return args
@@ -155,8 +174,35 @@ def make_loader(args: argparse.Namespace) -> Callable[[], Backend]:
     return load_mlx
 
 
+def watch_parent(
+    parent: int,
+    exit_now: Callable[[int], object] = os._exit,
+    poll_s: float = PARENT_POLL_S,
+) -> threading.Thread:
+    """Start a daemon thread that exits the process once ``parent`` is gone.
+
+    ``exit_now`` ends the process with ``EXIT_HOST_GONE`` (``os._exit``: no
+    cleanup, which could block on the dead host's pipes). Returns the thread.
+    """
+
+    def watch() -> None:
+        """Poll the parent id until it changes."""
+        while os.getppid() == parent:
+            time.sleep(poll_s)
+        try:
+            # stderr is a pipe to the dead host: the log may fail.
+            logging.getLogger("sam3_sidecar").error("the host (pid %d) is gone; exiting", parent)
+        finally:
+            exit_now(EXIT_HOST_GONE)
+
+    thread = threading.Thread(target=watch, name="parent-watchdog", daemon=True)
+    thread.start()
+    return thread
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the sidecar and return its exit code."""
+    watch_parent(os.getppid())
     reader, writer = claim_stdio()
     try:
         args = parse_args(argv)

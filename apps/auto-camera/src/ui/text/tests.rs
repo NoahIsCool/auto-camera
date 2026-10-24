@@ -168,7 +168,8 @@ fn query(prompt: &str, literal: bool, sizes: Option<&[ac_core::ShotSize]>) -> Qu
     }
 }
 
-/// A pass on `source` that found `count` boxes, the best at `best`.
+/// A pass on `source` that found `count` boxes, the best at `best`, all
+/// above the 0.35 floor.
 fn found(source: &str, count: usize, best: Option<f32>) -> MatchView {
     MatchView {
         source: ac_core::SourceId(source.into()),
@@ -176,6 +177,8 @@ fn found(source: &str, count: usize, best: Option<f32>) -> MatchView {
         pts: Duration::from_secs(75),
         count,
         best,
+        kept: count,
+        floor: 0.35,
     }
 }
 
@@ -192,6 +195,118 @@ fn prompt_feedback_counts_matches_and_rounds_the_best_score() {
     assert_eq!(match_text(&found("s", 0, None)), NO_MATCHES);
     // A count without a score cannot happen; it reads as nothing found.
     assert_eq!(match_text(&found("s", 2, None)), NO_MATCHES);
+}
+
+#[test]
+fn prompt_feedback_says_how_many_boxes_fall_below_the_store_floor() {
+    let below = MatchView {
+        kept: 0,
+        floor: 0.5,
+        ..found("s", 1, Some(0.4))
+    };
+    assert_eq!(
+        match_text(&below),
+        "1 match below the 0.50 floor · best 0.40"
+    );
+    let mixed = MatchView {
+        kept: 2,
+        floor: 0.5,
+        ..found("s", 3, Some(0.71))
+    };
+    assert_eq!(
+        match_text(&mixed),
+        "2 matches · best 0.71 · 1 below the 0.50 floor"
+    );
+    let mut snap = snapshot();
+    snap.sources[0].discovery_enabled = true;
+    let mut q = snap.queries[0].clone();
+    q.matches = vec![MatchView {
+        source: snap.sources[0].id.clone(),
+        ..below
+    }];
+    assert_eq!(match_lines(&snap, &q)[0].1, Tone::Warning, "nothing framed");
+    q.matches[0] = MatchView {
+        source: snap.sources[0].id.clone(),
+        ..mixed
+    };
+    assert_eq!(match_lines(&snap, &q)[0].1, Tone::Plain);
+}
+
+#[test]
+fn a_failing_detector_replaces_the_old_feedback_with_its_reason() {
+    use ac_engine::PassOutcome;
+    let mut snap = snapshot();
+    snap.sources[0].discovery_enabled = true;
+    let mut q = snap.queries[0].clone();
+    // The startup failed before any pass: not "no detector pass yet".
+    let d = &mut snap.sources[0].discovery;
+    d.errors = 4;
+    d.last_error = Some("detector unavailable: the sidecar exited before hello".into());
+    d.last_outcome = Some(PassOutcome::Failed);
+    let lines = match_lines(&snap, &q);
+    assert_eq!(lines[0].0, DETECTOR_ERROR);
+    assert_eq!(lines[0].1, Tone::Warning);
+    assert!(lines[0].2.contains("exited before hello"), "{}", lines[0].2);
+    assert!(
+        lines[0].2.contains("no pass has been applied"),
+        "{}",
+        lines[0].2
+    );
+    // Mid-show: the old numbers move to the hover text.
+    q.matches = vec![found("stage", 3, Some(0.71))];
+    let lines = match_lines(&snap, &q);
+    assert_eq!(lines[0].0, DETECTOR_ERROR);
+    assert!(
+        lines[0]
+            .2
+            .contains("last applied pass found 3 matches · best 0.71 on frame 41 at 1:15"),
+        "{}",
+        lines[0].2
+    );
+    let d = &mut snap.sources[0].discovery;
+    d.stale = 5;
+    d.last_outcome = Some(PassOutcome::Stale);
+    assert_eq!(
+        match_lines(&snap, &q)[0].0,
+        "detector answers too old (5 dropped)"
+    );
+    let d = &mut snap.sources[0].discovery;
+    d.timeouts = 1;
+    d.last_outcome = Some(PassOutcome::TimedOut);
+    assert_eq!(
+        match_lines(&snap, &q)[0].0,
+        "detector not answering (1 timed out)"
+    );
+    snap.sources[0].discovery.last_outcome = Some(PassOutcome::Applied);
+    assert_eq!(match_lines(&snap, &q)[0].0, "3 matches · best 0.71");
+}
+
+#[test]
+fn the_status_bar_counts_detector_failures_and_warns() {
+    use ac_engine::PassOutcome;
+    let mut snap = snapshot();
+    let s = &mut snap.sources[0];
+    s.discovery_enabled = true;
+    let plain = source_line(s);
+    assert!(!plain.contains("detect "), "{plain}");
+    assert_eq!(source_tone(s), Tone::Plain);
+    assert_eq!(source_hover(s), "");
+    s.discovery.last_latency = Some(Duration::from_millis(640));
+    s.discovery.errors = 3;
+    s.discovery.stale = 2;
+    s.discovery.timeouts = 1;
+    s.discovery.last_error = Some("the sidecar is unavailable: crashed".into());
+    s.discovery.last_outcome = Some(PassOutcome::Failed);
+    let line = source_line(s);
+    assert!(
+        line.ends_with("detect 640.0 ms · 3 detector errors · 2 too old · 1 timed out · NO SIGNAL"),
+        "{line}"
+    );
+    assert_eq!(source_tone(s), Tone::Warning);
+    assert_eq!(
+        source_hover(s),
+        "newest detector error: the sidecar is unavailable: crashed"
+    );
 }
 
 #[test]
@@ -217,6 +332,15 @@ fn prompt_feedback_lines_name_sources_only_when_there_are_several() {
     second.id = ac_core::SourceId("pulpit".into());
     second.name = "Pulpit".into();
     snap.sources.push(second);
+    // Neither source has a pass yet: one line, not one per source.
+    let empty = QueryView {
+        matches: Vec::new(),
+        ..q.clone()
+    };
+    assert_eq!(
+        match_lines(&snap, &empty),
+        [(NO_PASS_YET.to_string(), Tone::Weak, String::new())]
+    );
     q.matches.push(found("pulpit", 0, None));
     let lines = match_lines(&snap, &q);
     let texts: Vec<(&str, Tone)> = lines.iter().map(|l| (l.0.as_str(), l.1)).collect();

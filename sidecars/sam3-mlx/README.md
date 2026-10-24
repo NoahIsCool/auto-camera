@@ -82,7 +82,9 @@ models/sam3/.venv/bin/python sidecars/sam3-mlx/server.py --model models/sam31-ml
 ```
 
 The real-model smoke test sends a grey 1280x720 frame, and optionally a
-picture with a person in it, through the real server:
+picture with a person in it, through the real server. The picture is
+turned upright by its EXIF orientation and shrunk to at most 1008 px on its
+longer side, as the Rust host does, so a full-size phone photo works:
 
 ```sh
 cd ~/repos/auto-camera/sidecars/sam3-mlx
@@ -116,7 +118,7 @@ without numpy and the smoke test without `AC_SAM3_MODEL`. Lint with
 |---|---|
 | `--backend mlx\|fake` | detector (default `mlx`) |
 | `--model PATH` | MLX weights folder; required for `mlx`, ignored by `fake` |
-| `--side N` | square side the model runs at, 224 to 1008 and a multiple of 28 for SAM 3.1 (default 672) |
+| `--side N` | square side the model runs at, 224 to 1008 and a multiple of 28 for SAM 3.1 (default 672); checked on the command line, so a bad side exits with 2 at once, before any loading |
 | `--log-level debug\|info\|warning\|error` | stderr log level (default `info`) |
 
 ## Protocol v1
@@ -148,8 +150,11 @@ The authoritative description is the docstring of
 
 Exit codes: `0` stdin closed (the shutdown signal), `1` Python crash
 (traceback on stderr), `2` bad command line, `3` model failed to load, `4`
-the host broke the protocol, `5` stdout closed. Cases 2 to 4 send a fatal
-error frame first.
+the host broke the protocol, `5` the host is gone: stdout closed, or the
+parent process ended (a watchdog thread checks `os.getppid()` every 0.25 s
+from the start, loading included, so a host that is killed or crashes
+leaves no sidecar behind; macOS has no parent-death signal). Cases 2 to 4
+send a fatal error frame first.
 
 ## What the MLX backend does
 

@@ -121,7 +121,9 @@ impl SidecarSettings {
         let Some(program) = self.command.first() else {
             return Err(
                 "detector.command must name the sidecar's program and its arguments, \
-                 as in [\"python3\", \"server.py\"]"
+                 as in [\"../models/sam3/.venv/bin/python\", \"../sidecars/sam3-mlx/server.py\", \
+                 \"--model\", \"../models/sam31-mlx\"] (paths with a \"/\" are relative to \
+                 the config file)"
                     .into(),
             );
         };
@@ -183,13 +185,17 @@ impl SidecarSettings {
     }
 
     /// The detector configuration of every source, telling people from
-    /// objects with `lexicon` (the studio's prompt lexicon).
-    pub fn detector_config(&self, lexicon: Lexicon) -> DetectorConfig {
+    /// objects with `lexicon` (the studio's prompt lexicon) and skipping a
+    /// frame that waited longer than `max_age` (the studio's
+    /// `discovery.max_result_age_s`, past which its answer would be
+    /// dropped anyway) for the shared process.
+    pub fn detector_config(&self, lexicon: Lexicon, max_age: Duration) -> DetectorConfig {
         DetectorConfig {
             threshold: self.score_threshold,
             thresholds: Default::default(),
             send_side: self.send_side,
             request_timeout: Duration::from_secs_f64(self.request_timeout_s),
+            max_age: Some(max_age),
             lexicon,
         }
     }
@@ -240,9 +246,10 @@ mod tests {
         assert_eq!(host.startup_timeout, Duration::from_secs(60));
         assert_eq!(host.command, s.command);
         assert_eq!(host.current_dir, None);
-        let d = s.detector_config(Lexicon::builtin());
+        let d = s.detector_config(Lexicon::builtin(), Duration::from_secs(2));
         assert!(d.validate().is_ok());
         assert_eq!(d.request_timeout, Duration::from_secs(5));
+        assert_eq!(d.max_age, Some(Duration::from_secs(2)));
         assert!(d.thresholds.is_empty());
     }
 

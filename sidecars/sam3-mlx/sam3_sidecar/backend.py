@@ -63,6 +63,11 @@ MIN_SIDE = 224
 #: Largest square side the model may be configured to (PoC bound).
 MAX_SIDE = 1008
 
+#: ViT patch size of SAM 3.1 (``patch_size`` in its vision config). A side
+#: must be a multiple of twice it (28 px), so the command line can be checked
+#: before anything loads; the loaded model's own value is checked again.
+SAM31_PATCH = 14
+
 #: ``(x0, y0, x1, y1)`` normalized to the image sent.
 BoxXyxy = tuple[float, float, float, float]
 

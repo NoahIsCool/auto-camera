@@ -65,8 +65,8 @@ pub mod service;
 
 pub use detector::{DEFAULT_REQUEST_TIMEOUT, DEFAULT_THRESHOLD, DetectorConfig, SidecarDetector};
 pub use host::{
-    DetectReply, DetectRequest, HostConfig, HostError, HostState, HostStats, HostStatus, SamHost,
-    StopHandle,
+    DetectReply, DetectRequest, Freshness, HostConfig, HostError, HostState, HostStats, HostStatus,
+    SamHost, StopHandle,
 };
 pub use prep::{DEFAULT_SEND_SIDE, RgbImage, prepare, send_size};
 pub use protocol::{Capabilities, Found, Hello, Phrase, ProtocolError};

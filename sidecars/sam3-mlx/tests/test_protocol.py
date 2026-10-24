@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shlex
+import signal
 import struct
+import subprocess
+import sys
+import time
 import unittest
 from collections.abc import Iterator
 from typing import Any
@@ -45,7 +51,16 @@ from sam3_sidecar.protocol import (
     write_frame,
 )
 
-from .support import detect_bytes, detect_header, parse_frames, pixels_for, run_python, run_server
+from .support import (
+    CHILD_TIMEOUT_S,
+    SERVER,
+    detect_bytes,
+    detect_header,
+    parse_frames,
+    pixels_for,
+    run_python,
+    run_server,
+)
 
 
 class TrickleReader:
@@ -532,7 +547,14 @@ class ProcessTests(unittest.TestCase):
 
     def test_bad_command_line_is_a_fatal_frame(self) -> None:
         """Invalid arguments are reported on the protocol, exit code 2."""
-        for args in (["--side", "100"], ["--backend", "mlx"], ["--backend", "torch"], ["--nope"]):
+        for args in (
+            ["--side", "100"],
+            ["--side", "1000"],
+            ["--backend", "mlx", "--model", "/nonexistent/sam31-mlx", "--side", "686"],
+            ["--backend", "mlx"],
+            ["--backend", "torch"],
+            ["--nope"],
+        ):
             with self.subTest(args=args):
                 code, frames, _ = run_server(args, b"")
                 self.assertEqual(code, 2)
@@ -540,6 +562,59 @@ class ProcessTests(unittest.TestCase):
                 self.assertEqual(frames[0].header["type"], "error")
                 self.assertIsNone(frames[0].header["id"])
                 self.assertIn("bad command line", frames[0].header["message"])
+
+    def test_a_side_sam_cannot_run_at_is_a_usage_error(self) -> None:
+        """``--side`` must be a multiple of 28; checked before any model loads."""
+        import server
+
+        for side in (1000, 686, 223, 1036):
+            with self.subTest(side=side):
+                with self.assertRaises(server.UsageError) as caught:
+                    server.parse_args(["--backend", "mlx", "--model", "m", "--side", str(side)])
+                self.assertIn("multiple of 28", str(caught.exception))
+        for side in (224, 672, 700, 1008):
+            args = server.parse_args(["--backend", "fake", "--side", str(side)])
+            self.assertEqual(args.side, side)
+
+    def test_the_watchdog_exits_once_the_parent_is_gone(self) -> None:
+        """A parent id that is not ours any more makes the watchdog exit with 5."""
+        import server
+
+        exits: list[int] = []
+        with self.assertLogs("sam3_sidecar", "ERROR"):
+            thread = server.watch_parent(os.getppid() + 1_000_000, exits.append, poll_s=0.01)
+            thread.join(timeout=5.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(exits, [EXIT_HOST_GONE])
+
+    def test_the_server_does_not_outlive_its_host(self) -> None:
+        """A host that dies without closing stdin leaves no server behind.
+
+        ``sh`` starts the server in the background, prints its pid and exits,
+        while this test keeps the server's stdin open: only the watchdog can
+        end it.
+        """
+        read_end, write_end = os.pipe()
+        try:
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(SERVER))} --backend fake"
+            proc = subprocess.run(
+                ["sh", "-c", f"{command} >/dev/null 2>&1 & echo $!"],
+                stdin=read_end,
+                capture_output=True,
+                timeout=CHILD_TIMEOUT_S,
+                check=True,
+            )
+            pid = int(proc.stdout.strip())
+            deadline = time.monotonic() + 10.0
+            while _running(pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            alive = _running(pid)
+            if alive:
+                os.kill(pid, signal.SIGKILL)
+            self.assertFalse(alive, "the server outlived its host")
+        finally:
+            os.close(read_end)
+            os.close(write_end)
 
     def test_missing_model_folder_is_a_fatal_load_error(self) -> None:
         """The MLX backend checks its folder before importing MLX."""
@@ -580,6 +655,20 @@ class ProcessTests(unittest.TestCase):
         self.assertIn("native noise", err)
         self.assertIn("protocol in b'from host'", err)
         self.assertIn("fd 0 now b''", err)
+
+
+def _running(pid: int) -> bool:
+    """Tell whether ``pid`` exists and is not a zombie (no init may reap it)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        ps = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+        return ps.returncode == 0 and not ps.stdout.strip().startswith("Z")
 
 
 if __name__ == "__main__":

@@ -75,8 +75,91 @@ fn each_query_reports_its_count_and_best_score_per_source() {
             pts: looked_at.pts,
             count: 2,
             best: Some(0.9),
+            kept: 2,
+            floor: 0.35,
         }]
     );
+}
+
+/// A detector answering every query with the pattern's boxes at `scores`
+/// (cycled).
+fn scored(pattern: SyntheticPattern, scores: &'static [f32]) -> ScriptedDetector {
+    ScriptedDetector::from_fn("scored", move |frame, queries| {
+        let truth = pattern.ground_truth(frame.pts);
+        Ok(queries
+            .iter()
+            .flat_map(|q| {
+                truth
+                    .iter()
+                    .zip(scores.iter().cycle())
+                    .map(|(g, s)| Detection {
+                        query: q.id.clone(),
+                        bbox: g.bbox,
+                        score: *s,
+                        extent: ac_core::Extent::Object,
+                    })
+            })
+            .collect())
+    })
+}
+
+#[test]
+fn matches_below_the_store_floor_are_counted_apart() {
+    let mut rig = Rig::new(config(2));
+    let pattern = rig.pattern.clone();
+    rig = rig.with_detector(scored(pattern, &[0.9, 0.2]));
+    until_a_pass_is_pending(&mut rig);
+    rig.step();
+    let m = &matches(&rig.snapshot(), "person")[0];
+    assert_eq!((m.count, m.kept, m.best, m.floor), (2, 1, Some(0.9), 0.35));
+    // Nothing usable: every box is below the floor.
+    let mut c = config(1);
+    c.subjects.min_score = Some(0.5);
+    let mut rig = Rig::new(c);
+    let pattern = rig.pattern.clone();
+    rig = rig.with_detector(scored(pattern, &[0.4]));
+    until_a_pass_is_pending(&mut rig);
+    rig.step();
+    let snap = rig.snapshot();
+    let m = &matches(&snap, "person")[0];
+    assert_eq!((m.count, m.kept, m.floor), (1, 0, 0.5));
+    assert!(
+        snap.subjects.is_empty(),
+        "nothing above the floor is framed"
+    );
+}
+
+#[test]
+fn the_newest_outcome_says_whether_the_feedback_is_current() {
+    use crate::snapshot::PassOutcome;
+    let mut rig = Rig::new(config(1));
+    let outcome = |rig: &Rig| rig.snapshot().sources[0].discovery.last_outcome;
+    assert_eq!(outcome(&rig), None);
+    until_a_pass_is_pending(&mut rig);
+    rig.step();
+    assert_eq!(outcome(&rig), Some(PassOutcome::Applied));
+    let latency = rig.snapshot().sources[0].discovery.last_latency;
+    rig.pending.clear();
+    rig.pending.push(DiscoveryResult {
+        source: 0,
+        frame: rig.frame(),
+        queries: vec![QueryId("person".into())],
+        outcome: Err("the sidecar is unavailable: crashed".into()),
+        latency: Duration::from_secs(9),
+    });
+    rig.step();
+    let d = rig.snapshot().sources[0].discovery.clone();
+    assert_eq!(d.last_outcome, Some(PassOutcome::Failed));
+    assert_eq!(d.last_latency, latency, "a failed pass is not timed");
+    rig.pending.push(DiscoveryResult {
+        source: 0,
+        frame: rig.pattern.frame(&cam(), 0),
+        queries: vec![QueryId("person".into())],
+        outcome: Ok(Vec::new()),
+        latency: Duration::ZERO,
+    });
+    rig.step();
+    assert_eq!(outcome(&rig), Some(PassOutcome::Stale));
 }
 
 #[test]

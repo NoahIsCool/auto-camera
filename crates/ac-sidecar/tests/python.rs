@@ -21,7 +21,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use ac_core::{Extent, QueryId};
-use ac_sidecar::{DetectorConfig, HostConfig, HostState, SamHost, SidecarService};
+use ac_sidecar::{DetectorConfig, HostConfig, HostError, HostState, SamHost, SidecarService};
 use ac_vision::{Detector, PromptQuery, VisionError};
 
 use common::{PROMPT, eventually, exists, frame, request};
@@ -217,10 +217,10 @@ fn a_fatal_error_reaches_the_host_with_its_reason() {
     if !have_python() {
         return;
     }
-    // A bad command line (exit 2) and a model folder that does not exist
-    // (exit 3) both send a fatal error frame before exiting, without
-    // importing MLX.
-    for (args, reason) in [
+    // A bad command line (exit 2, a side SAM 3.1 cannot run at included)
+    // and a model folder that does not exist (exit 3) both send a fatal
+    // error frame before exiting, without importing MLX or hashing weights.
+    for (args, why) in [
         (&["--backend", "mlx"][..], "--model is required"),
         (
             &["--backend", "mlx", "--model", "/nonexistent/sam31-mlx"][..],
@@ -228,14 +228,27 @@ fn a_fatal_error_reaches_the_host_with_its_reason() {
         ),
         (
             &["--backend", "fake", "--side", "5"][..],
-            "--side must be in",
+            "--side 5: side must be a multiple of 28",
+        ),
+        (
+            &[
+                "--backend",
+                "mlx",
+                "--model",
+                "/nonexistent/m",
+                "--side",
+                "1000",
+            ][..],
+            "--side 1000: side must be a multiple of 28",
         ),
     ] {
         let service = SidecarService::start(server(args)).unwrap();
         let pid = service.status().pid.unwrap();
-        let err = service.detector(DetectorConfig::default()).unwrap_err();
+        // The first start fails; the detector would retry it, so ask the
+        // client for the start's own error.
+        let err = service.client().ready().unwrap_err();
         assert!(
-            matches!(&err, VisionError::Unavailable(m) if m.contains("the sidecar failed") && m.contains(reason)),
+            matches!(&err, HostError::Unavailable { reason, .. } if reason.contains("the sidecar failed") && reason.contains(why)),
             "{args:?}: {err:?}"
         );
         assert_reaped(pid);

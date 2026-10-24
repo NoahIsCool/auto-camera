@@ -246,7 +246,7 @@ score_threshold = 0.3        # default 0.5; SAM's scores are not OWLv2's
 
 [discovery]
 rate_hz = 1.0
-max_result_age_s = 3.0       # a 0.5 to 1.1 s pass needs more than the 2 s default
+max_result_age_s = 3.0       # answers are one pass old; room for slower passes
 ```
 
 ```sh
@@ -259,11 +259,19 @@ cargo run -p auto-camera -- --config config/sam3-sidecar.example.toml
   and every such path must exist, and the process must start, or the
   studio does not start and says why.
 - The model loads while the sources play (4.6 s on Noah's M3 Max, then a
-  warm-up pass). A sidecar that fails to load (a wrong `--model` is
-  reported in milliseconds) turns every discovery request into an error
-  that says why; one that crashes or misses a deadline later is restarted
-  after a backoff of 1 s, doubling up to 30 s. Quitting closes its stdin,
-  waits up to 2 s, then kills and reaps it: no process is left behind.
+  warm-up pass). A sidecar that fails to start (a wrong `--model` is
+  reported in milliseconds, a cold load can miss `startup_timeout_s`), or
+  that crashes or misses a deadline later, is restarted after a backoff of
+  1 s, doubling up to 30 s; meanwhile its passes fail with the reason,
+  shown in amber in the window. Quitting, by closing the window or with
+  Ctrl-C, closes its stdin, waits up to 2 s, then kills and reaps it, and
+  the sidecar exits by itself if the app dies: no process is left behind.
+- Sources take turns: one frame is with the sidecar at a time, and the
+  source that waited longest goes next with its newest frame. Answers are
+  then about one pass old whatever the number of sources, so the 2 s
+  `max_result_age_s` default fits; each source gets a pass about every
+  N × the pass time, and `max_undetected_s` should cover about three of
+  those intervals.
 - Measured at 672 px: 0.48 s per pass for 1 prompt, 0.64 s for 3, 1.05 s
   for 9. "a person speaking" found the speaker in 10 of 20 labelled frames
   at a 0.5 threshold and 14 of 20 at 0.3. The subject store's floor follows

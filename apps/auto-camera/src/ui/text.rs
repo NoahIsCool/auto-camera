@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use ac_core::{ParsedPrompt, PromptWarning, ShotId};
 use ac_engine::{
-    EngineSnapshot, MatchView, OutputState, OutputView, QueryView, ShotStatus, ShotView,
-    SourceView, TimingView,
+    EngineSnapshot, MatchView, OutputState, OutputView, PassOutcome, QueryView, ShotStatus,
+    ShotView, SourceView, TimingView,
 };
 use ac_output::EncoderStats;
 
@@ -153,68 +153,146 @@ pub const NO_MATCHES: &str = "no matches";
 /// Prompt feedback for a query no applied pass has looked for yet.
 pub const NO_PASS_YET: &str = "no detector pass yet";
 
+/// Prompt feedback for a source whose newest detector pass failed.
+pub const DETECTOR_ERROR: &str = "detector error";
+
+/// Prompt feedback for a source whose newest answer came too late to use.
+pub const TOO_OLD: &str = "detector answers too old";
+
+/// Prompt feedback for a source whose newest request got no answer.
+pub const NOT_ANSWERING: &str = "detector not answering";
+
 /// How a prompt feedback line is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     /// Matches were found.
     Plain,
-    /// Nothing was found: the prompt may need other words (amber).
+    /// Nothing usable was found, or the detector is failing (amber).
     Warning,
     /// No pass has looked for the query yet.
     Weak,
 }
 
 /// What one pass found for a query (spec M2): "3 matches · best 0.71",
-/// "1 match · best 0.42", or [`NO_MATCHES`].
+/// "1 match · best 0.42", [`NO_MATCHES`], and, when some boxes score below
+/// the subject store's floor (they are never framed), how many: "1 match
+/// below the 0.50 floor · best 0.40", or "3 matches · best 0.71 · 1 below
+/// the 0.50 floor".
 pub fn match_text(m: &MatchView) -> String {
-    match (m.count, m.best) {
-        (0, _) | (_, None) => NO_MATCHES.into(),
-        (1, Some(best)) => format!("1 match · best {best:.2}"),
-        (n, Some(best)) => format!("{n} matches · best {best:.2}"),
+    let Some(best) = m.best.filter(|_| m.count > 0) else {
+        return NO_MATCHES.into();
+    };
+    let below = m.count.saturating_sub(m.kept);
+    let plural = |n: usize| if n == 1 { "match" } else { "matches" };
+    if m.kept == 0 {
+        return format!(
+            "{below} {} below the {:.2} floor · best {best:.2}",
+            plural(below),
+            m.floor
+        );
+    }
+    let mut text = format!("{} {} · best {best:.2}", m.kept, plural(m.kept));
+    if below > 0 {
+        text.push_str(&format!(" · {below} below the {:.2} floor", m.floor));
+    }
+    text
+}
+
+/// How `m` is drawn: amber when nothing it found can be framed.
+fn match_tone(m: &MatchView) -> Tone {
+    if m.kept == 0 {
+        Tone::Warning
+    } else {
+        Tone::Plain
     }
 }
 
-/// A query row's prompt feedback: one line per source whose newest pass
-/// looked for it, named after the source when the studio has several, with
-/// how to draw it and its hover text (the frame the pass looked at). When
-/// discovery runs but no pass has looked for the query yet, a single
-/// [`NO_PASS_YET`] line; when discovery is off everywhere, nothing.
-pub fn match_lines(snap: &EngineSnapshot, q: &QueryView) -> Vec<(String, Tone, String)> {
-    if q.matches.is_empty() {
-        let discovering = snap.sources.iter().any(|s| s.discovery_enabled);
-        return if discovering {
-            vec![(NO_PASS_YET.into(), Tone::Weak, String::new())]
-        } else {
-            Vec::new()
-        };
+/// "the last applied pass found 3 matches · best 0.71 on frame 41 at
+/// 1:15", or that there was none.
+fn last_pass(m: Option<&MatchView>) -> String {
+    match m {
+        Some(m) => format!(
+            "the last applied pass found {} on frame {} at {}",
+            match_text(m),
+            m.seq,
+            clock(m.pts)
+        ),
+        None => "no pass has been applied for this query yet".into(),
     }
-    let several = snap.sources.len() > 1;
-    q.matches
-        .iter()
-        .map(|m| {
-            let name = snap
-                .source(&m.source)
-                .map_or(m.source.0.as_str(), |s| &s.name);
-            let mut text = match_text(m);
-            if several {
-                text = format!("{name}: {text}");
-            }
-            let tone = if m.count == 0 {
-                Tone::Warning
-            } else {
-                Tone::Plain
-            };
-            let hover = format!(
-                "newest detector pass on {name}: frame {} at {}",
+}
+
+/// One source's feedback for a query, with its tone and hover text. When
+/// the source's newest request failed, came back too late or got no
+/// answer, that is what the line says (amber, with the reason on hover),
+/// since the last applied pass's numbers would look current.
+fn source_feedback(source: &SourceView, m: Option<&MatchView>) -> (String, Tone, String) {
+    let d = &source.discovery;
+    let failing = match d.last_outcome {
+        Some(PassOutcome::Failed) => Some((
+            DETECTOR_ERROR.to_owned(),
+            d.last_error.clone().unwrap_or_default(),
+        )),
+        Some(PassOutcome::Stale) => Some((
+            format!("{TOO_OLD} ({} dropped)", d.stale),
+            "answers arrived more than discovery.max_result_age_s after their frame, \
+             so they were dropped"
+                .to_owned(),
+        )),
+        Some(PassOutcome::TimedOut) => Some((
+            format!("{NOT_ANSWERING} ({} timed out)", d.timeouts),
+            "no answer within discovery.timeout_s (a model may still be loading)".to_owned(),
+        )),
+        Some(PassOutcome::Applied) | None => None,
+    };
+    if let Some((text, why)) = failing {
+        return (text, Tone::Warning, format!("{why}\n{}", last_pass(m)));
+    }
+    match m {
+        Some(m) => (
+            match_text(m),
+            match_tone(m),
+            format!(
+                "newest detector pass on {}: frame {} at {}",
+                source.name,
                 m.seq,
                 clock(m.pts)
-            );
-            (text, tone, hover)
-        })
-        .collect()
+            ),
+        ),
+        None => (NO_PASS_YET.into(), Tone::Weak, String::new()),
+    }
 }
 
-/// One source's health for the status bar.
+/// A query row's prompt feedback: one line per source that runs discovery,
+/// named after the source when the studio has several, with how to draw
+/// it and its hover text (the frame the pass looked at, or why the
+/// detector is failing there). When no source has anything to say yet, a
+/// single [`NO_PASS_YET`] line; when discovery is off everywhere, nothing.
+pub fn match_lines(snap: &EngineSnapshot, q: &QueryView) -> Vec<(String, Tone, String)> {
+    let several = snap.sources.len() > 1;
+    let lines: Vec<(String, Tone, String)> = snap
+        .sources
+        .iter()
+        .filter(|s| s.discovery_enabled)
+        .map(|s| {
+            let m = q.matches.iter().find(|m| m.source == s.id);
+            let (text, tone, hover) = source_feedback(s, m);
+            let text = if several {
+                format!("{}: {text}", s.name)
+            } else {
+                text
+            };
+            (text, tone, hover)
+        })
+        .collect();
+    if lines.len() > 1 && lines.iter().all(|(_, tone, _)| *tone == Tone::Weak) {
+        return vec![(NO_PASS_YET.into(), Tone::Weak, String::new())];
+    }
+    lines
+}
+
+/// One source's health for the status bar: frames, the newest successful
+/// detector pass's time, and how many requests failed, came back too late
+/// or got no answer.
 pub fn source_line(source: &SourceView) -> String {
     let fps = if source.frames == 0 {
         NONE.to_owned()
@@ -225,13 +303,42 @@ pub fn source_line(source: &SourceView) -> String {
         "{} {fps}/{:.0} fps · {} missed",
         source.name, source.nominal_fps, source.missed
     );
-    if let Some(latency) = source.discovery.last_latency {
+    let d = &source.discovery;
+    if let Some(latency) = d.last_latency {
         line.push_str(&format!(" · detect {}", millis(latency)));
+    }
+    for (n, what) in [
+        (d.errors, "detector errors"),
+        (d.stale, "too old"),
+        (d.timeouts, "timed out"),
+    ] {
+        if n > 0 {
+            line.push_str(&format!(" · {n} {what}"));
+        }
     }
     if !source.available {
         line.push_str(" · NO SIGNAL");
     }
     line
+}
+
+/// How a source's status-bar line is drawn: amber while its newest
+/// detector request failed, came back too late or got no answer.
+pub fn source_tone(source: &SourceView) -> Tone {
+    match source.discovery.last_outcome {
+        Some(PassOutcome::Failed | PassOutcome::Stale | PassOutcome::TimedOut) => Tone::Warning,
+        Some(PassOutcome::Applied) | None => Tone::Plain,
+    }
+}
+
+/// A source's status-bar hover text: the newest detector error, if any.
+pub fn source_hover(source: &SourceView) -> String {
+    source
+        .discovery
+        .last_error
+        .as_ref()
+        .map(|e| format!("newest detector error: {e}"))
+        .unwrap_or_default()
 }
 
 /// Tick timing for the status bar.

@@ -6,8 +6,9 @@
 //!
 //! Two studios run in turn: a synthetic one with ground-truth discovery,
 //! recording with ffmpeg (when installed), and one whose detector is a
-//! sidecar process (`kind = "sidecar"`, ADR 0004) shut down while it is
-//! answering.
+//! sidecar process (`kind = "sidecar"`, ADR 0004) shut down while the
+//! sidecar hangs in a pass, which must not hold the quit up for the
+//! request deadline.
 //!
 //! This binary runs without libtest's harness (`harness = false` in
 //! `Cargo.toml`), for two reasons:
@@ -16,7 +17,7 @@
 //!   counted;
 //! * it is also the fake sidecar of the second studio. Started with
 //!   [`FAKE_FLAG`], `main` speaks protocol v1 on stdin and stdout
-//!   ([`fake_sidecar`]) instead of testing. `ac-sidecar`'s own
+//!   ([`unix::fake_sidecar`]) instead of testing. `ac-sidecar`'s own
 //!   `ac-fake-sidecar` binary cannot be named reliably from another
 //!   crate's tests, and libtest would print to stdout, which carries the
 //!   protocol.
@@ -35,20 +36,128 @@ const FAKE_FLAG: &str = "--fake-sidecar";
 #[cfg(unix)]
 const NAME: &str = "shutdown_joins_every_thread_and_reaps_every_child";
 
-/// Runs the fake sidecar or the test, like a one-test libtest binary:
-/// `--list` names the test, and a filter that does not match it skips it.
+/// What the command line asks of this binary.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Asked {
+    /// Be the fake sidecar, with these arguments.
+    Fake(Vec<String>),
+    /// List the test if it is selected.
+    List(bool),
+    /// Run the test if it is selected.
+    Run(bool),
+}
+
+/// libtest options that take a value as the next argument; it is not a
+/// filter.
+#[cfg(unix)]
+const VALUED: [&str; 7] = [
+    "--test-threads",
+    "--skip",
+    "--format",
+    "--color",
+    "--logfile",
+    "--shuffle-seed",
+    "-Z",
+];
+
+/// Reads the command line like a one-test libtest binary: filters (exact
+/// with `--exact`), `--skip`, `--ignored` (this test is not ignored, so it
+/// selects nothing), `--list`, and the values of the options in [`VALUED`],
+/// which are not filters. Other options are accepted and ignored.
+#[cfg(unix)]
+fn asked(args: &[String]) -> Asked {
+    if args.first().map(String::as_str) == Some(FAKE_FLAG) {
+        return Asked::Fake(args[1..].to_vec());
+    }
+    let (mut filters, mut skips) = (Vec::new(), Vec::new());
+    let (mut exact, mut ignored_only, mut list) = (false, false, false);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--list" => list = true,
+            "--exact" => exact = true,
+            "--ignored" => ignored_only = true,
+            "--skip" => skips.extend(it.next().cloned()),
+            a if a.starts_with("--skip=") => skips.push(a["--skip=".len()..].to_owned()),
+            a if VALUED.contains(&a) => {
+                it.next();
+            }
+            a if a.starts_with('-') => {}
+            filter => filters.push(filter.to_owned()),
+        }
+    }
+    let hits = |f: &String| {
+        if exact {
+            NAME == f
+        } else {
+            NAME.contains(f.as_str())
+        }
+    };
+    let selected = !ignored_only
+        && (filters.is_empty() || filters.iter().any(hits))
+        && !skips.iter().any(hits);
+    if list {
+        Asked::List(selected)
+    } else {
+        Asked::Run(selected)
+    }
+}
+
+/// Checks [`asked`] on the command lines `cargo test` passes.
+#[cfg(unix)]
+fn check_asked() {
+    let ask = |line: &str| {
+        asked(
+            &line
+                .split_whitespace()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+        )
+    };
+    let cases = [
+        ("", Asked::Run(true)),
+        ("--test-threads 1", Asked::Run(true)),
+        ("--test-threads=1 --nocapture", Asked::Run(true)),
+        ("shutdown", Asked::Run(true)),
+        ("unrelated", Asked::Run(false)),
+        ("--skip shutdown", Asked::Run(false)),
+        ("--skip=shutdown", Asked::Run(false)),
+        ("--skip unrelated", Asked::Run(true)),
+        ("--ignored", Asked::Run(false)),
+        ("--include-ignored", Asked::Run(true)),
+        ("--exact shutdown", Asked::Run(false)),
+        (&format!("--exact {NAME}"), Asked::Run(true)),
+        ("--format terse --color never -q", Asked::Run(true)),
+        ("--list", Asked::List(true)),
+        ("--list --ignored", Asked::List(false)),
+        (
+            "--fake-sidecar --hang-after 4",
+            Asked::Fake(vec!["--hang-after".into(), "4".into()]),
+        ),
+    ];
+    for (line, want) in cases {
+        assert_eq!(ask(line), want, "{line:?}");
+    }
+}
+
+/// Runs the fake sidecar or the test, like a one-test libtest binary; see
+/// [`asked`].
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some(FAKE_FLAG) {
-        return unix::fake_sidecar();
-    }
-    if args.iter().any(|a| a == "--list") {
-        println!("{NAME}: test");
-        return std::process::ExitCode::SUCCESS;
-    }
-    let filters: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-    if !filters.is_empty() && !filters.iter().any(|f| NAME.contains(f.as_str())) {
+    let selected = match asked(&args) {
+        Asked::Fake(args) => return unix::fake_sidecar(&args),
+        Asked::List(selected) => {
+            if selected {
+                println!("{NAME}: test");
+            }
+            return std::process::ExitCode::SUCCESS;
+        }
+        Asked::Run(selected) => selected,
+    };
+    check_asked();
+    if !selected {
         println!("\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 1 filtered out\n");
         return std::process::ExitCode::SUCCESS;
     }
@@ -205,8 +314,15 @@ mod unix {
         }
     }
 
+    /// How many requests the fake answers before it hangs: two per source.
+    const ANSWERED: u32 = 4;
+
     /// Two sources whose detector is this binary as a fake sidecar: one
-    /// process for both, shut down while it is answering.
+    /// process for both, taking turns. Once each source has applied two
+    /// passes the fake hangs in the middle of the next one and ignores the
+    /// end of its input, so shutdown must interrupt the pass and kill the
+    /// process after its 2 s grace rather than wait out the 30 s request
+    /// deadline (the engine drops the sidecar before it joins the workers).
     fn sidecar_studio() {
         let mut config = studio(1);
         let second = config.sources[0].clone();
@@ -215,10 +331,16 @@ mod unix {
             ..second
         });
         let me = std::env::current_exe().expect("this test binary");
-        config.detector = DetectorSettings::Sidecar(SidecarSettings::new([
-            me.to_str().expect("a UTF-8 path").to_owned(),
-            FAKE_FLAG.to_owned(),
-        ]));
+        config.detector = DetectorSettings::Sidecar(SidecarSettings {
+            request_timeout_s: 30.0,
+            ..SidecarSettings::new([
+                me.to_str().expect("a UTF-8 path").to_owned(),
+                FAKE_FLAG.to_owned(),
+                "--hang-after".into(),
+                ANSWERED.to_string(),
+            ])
+        });
+        config.discovery.timeout_s = 60.0;
         let engine = start(config);
         let h = engine.handle();
         let snap = h
@@ -236,7 +358,20 @@ mod unix {
             let workers = threads.iter().filter(|n| n.starts_with("ac-discovery"));
             assert_eq!(workers.count(), 2, "{threads:?}");
         }
+        // The next request is the one the fake hangs on.
+        let requested = |s: &ac_engine::EngineSnapshot| {
+            s.sources.iter().map(|v| v.discovery.requests).sum::<u64>()
+        };
+        h.wait_until(WAIT, |s| requested(s) > u64::from(ANSWERED))
+            .expect("a request the fake hangs on");
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
         let report = engine.shutdown().unwrap();
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(4),
+            "shutdown waited for the hung pass: {took:?}"
+        );
         assert!(!report.final_snapshot.running);
         assert_eq!(
             report.threads_joined, 3,
@@ -245,9 +380,27 @@ mod unix {
     }
 
     /// The fake sidecar: hello, then one box per phrase for every request
-    /// (after a short pause, so shutdown can land during a pass), until
-    /// stdin ends.
-    pub fn fake_sidecar() -> ExitCode {
+    /// after a short pause, until stdin ends. With `--hang-after N` it
+    /// answers N requests, then hangs in the next one and ignores stdin. It
+    /// exits once its parent is gone, so a failed test leaves none behind.
+    pub fn fake_sidecar(args: &[String]) -> ExitCode {
+        let hang_after = match args {
+            [] => None,
+            [flag, n] if flag == "--hang-after" => match n.parse::<u32>() {
+                Ok(n) => Some(n),
+                Err(_) => return ExitCode::from(64),
+            },
+            _ => return ExitCode::from(64),
+        };
+        let parent = std::os::unix::process::parent_id();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(50));
+                if std::os::unix::process::parent_id() != parent {
+                    std::process::exit(5);
+                }
+            }
+        });
         let mut input = BufReader::new(io::stdin().lock());
         let mut out = BufWriter::new(io::stdout().lock());
         let hello = Message::Hello(Hello {
@@ -260,12 +413,18 @@ mod unix {
         if write_message(&mut out, &hello, &[]).is_err() {
             return ExitCode::from(5);
         }
+        let mut answered = 0;
         loop {
             let detect = match read_message(&mut input) {
                 Ok(Some((Message::Detect(d), _pixels))) => d,
                 Ok(None) => return ExitCode::SUCCESS,
                 Ok(Some(_)) | Err(_) => return ExitCode::from(4),
             };
+            if hang_after.is_some_and(|n| answered >= n) {
+                loop {
+                    std::thread::sleep(Duration::from_secs(3600));
+                }
+            }
             std::thread::sleep(Duration::from_millis(20));
             let detections = detect
                 .phrases
@@ -289,6 +448,7 @@ mod unix {
             if write_message(&mut out, &result, &[]).is_err() {
                 return ExitCode::from(5);
             }
+            answered += 1;
         }
     }
 }

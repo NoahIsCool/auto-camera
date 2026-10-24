@@ -11,8 +11,8 @@ answers every query on every source.
 |---|---|
 | `protocol` | Pure codec for protocol v1: frames, `hello` / `detect` / `result` / `error`, strict validation |
 | `prep` | Pure frame preparation: RGBA to RGB8, box-filtered so the longer side is at most `send_side` (default 1008 px); never enlarges |
-| `SamHost` | Single owner of one sidecar process: spawn, pipe threads, deadlines, stale-reply dropping, kill/reap, restart backoff |
-| `SidecarService` | Puts a `SamHost` on its own thread so every source's detector shares one process |
+| `SamHost` | Single owner of one sidecar process: spawn, pipe threads, deadlines, stale-reply dropping, expired-frame skipping, kill/reap, restart backoff |
+| `SidecarService` | Puts a `SamHost` on its own thread so every source's detector shares one process; skips a frame that waited too long |
 | `SidecarClient` | Cheap, non-owning handle to the service; makes detectors |
 | `SidecarDetector` | The `Detector`: groups queries by phrase, applies per-query thresholds, marks people as whole people |
 | `ac-fake-sidecar` | Test binary that speaks the protocol with no model and misbehaves on demand |
@@ -97,9 +97,25 @@ line. An `error` reply with the request's id fails only that request; the
 child stays up. A result or an error reply resets the backoff. A `hello` does
 not, so a sidecar that loads and then dies on every request still backs off.
 
-The first start is different. `SidecarClient::detector` waits for the first
-`hello`, and if that start fails, the failure comes back as the detector's
-load error.
+The first start is no different. `SidecarClient::detector` waits for the
+first `hello`, so a detector made after a good start is named after its
+model. If that start fails (an exit before `hello`, a missed startup
+deadline, a refusal while backing off), the detector is returned anyway,
+named `sidecar` (`service::UNNAMED`): its passes fail with the reason while
+the host restarts the process under its backoff, and work once a restart
+says `hello`. So a cold first load or one crash during load does not turn
+detection off for the session. Only an invalid `DetectorConfig` or a
+stopped service fails `detector`.
+
+**Frames that waited too long.** A `DetectRequest` may carry a `Freshness`:
+when its frame was taken and how old an answer may be
+(`DetectorConfig::max_age`; the engine passes `discovery.max_result_age_s`).
+Once the host is ready to send, after any restart and `hello` that
+`detect` had to wait for, a frame already older than that is not sent: the
+request fails with `HostError::Expired` (counted as `expired`; the detector
+reports it as `Unavailable`), and the engine's next request brings a fresh
+frame. The sidecar's time goes only to frames whose answer can still be
+used.
 
 ## Ownership and threads
 
@@ -116,7 +132,13 @@ discovery thread ──detect──▶ SidecarDetector ──job──▶ ac-sam
   the host's only user.
 * **Message passing.** Detectors send jobs over a channel and block on their
   reply. Each detector has at most one job queued, so the queue is bounded
-  by the number of sources and served oldest first.
+  by the number of sources and served oldest first. A queue alone would
+  break the latest-frame rule (a frame is fixed when its job is queued, so
+  with N sources each answer would be about N passes old), so the engine
+  keeps one request in flight for the whole studio when its detector is
+  shared, taking the sources in turn with their newest frames, and the
+  queue normally holds one job; a job that still waited too long is
+  skipped (above).
 * **No locks across I/O.** The log ring is the only shared structure; its
   lock is held only to push or copy lines.
 * **Stopping.** `StopHandle::stop` interrupts a wait in progress. Dropping
@@ -139,10 +161,12 @@ use ac_sidecar::{DetectorConfig, HostConfig, SidecarService};
 let service = SidecarService::start(HostConfig::new([
     "../models/sam3/.venv/bin/python", "../sidecars/sam3-mlx/server.py", "--side", "672",
 ]))?;
-// In each source's DetectorLoader (runs on its discovery thread): waits for hello.
+// In each source's DetectorLoader (runs on its discovery thread): waits for
+// hello; fails only for a bad config or a stopped service (see above).
 let client = service.client();
 let loader: DetectorLoader = Box::new(move || {
-    let detector = client.detector(DetectorConfig::default()).map_err(|e| e.to_string())?;
+    let config = DetectorConfig { max_age: Some(max_result_age), ..DetectorConfig::default() };
+    let detector = client.detector(config).map_err(|e| e.to_string())?;
     Ok(Box::new(detector) as Box<dyn Detector>)
 });
 // At shutdown, before joining the discovery workers: interrupts a pass or a
@@ -155,7 +179,9 @@ owns the service. The engine drops it *before* it joins the discovery
 workers, so a worker blocked in a pass or waiting for `hello` gets
 `Unavailable` at once and quitting never waits out a request deadline.
 Detectors that outlive the service, and loaders still waiting for `hello`,
-get `Unavailable`.
+get `Unavailable`. The app also runs this shutdown on Ctrl-C, `SIGTERM` and
+`SIGHUP`, and the sidecar exits by itself once its parent is gone (status
+5), so a host that is killed outright leaves no sidecar behind either.
 
 Before spawning, the engine checks that the program exists (a path, or a
 name found on `PATH`) and that every path-like element of the command
@@ -166,9 +192,10 @@ with the reason.
 |---|---|---|---|
 | `command` | `HostConfig::command` | — (required) | An argv list; elements with a `/` that do not start with `-` or `~` are paths, resolved against the config file |
 | `startup_timeout_s` | `HostConfig::startup_timeout` | 60 | Wait for `hello` |
-| `request_timeout_s` | `DetectorConfig::request_timeout` | 5 | Must be below `discovery.timeout_s` (checked); with N sources sharing, a request may also queue behind N-1 others |
+| `request_timeout_s` | `DetectorConfig::request_timeout` | 5 | Must be below `discovery.timeout_s` (checked) |
 | `score_threshold` | `DetectorConfig::threshold` | 0.5 | Every query; the subject store's floor follows it when lower than 0.35 |
 | `send_side` | `DetectorConfig::send_side` | 1008 | Longest side of the image sent, `1..=4096` |
+| `discovery.max_result_age_s` | `DetectorConfig::max_age` | 2 | A frame older than this when the sidecar is free is skipped (`expired`) |
 | — | `DetectorConfig::lexicon` | | Always the studio's prompt lexicon (`StudioConfig::prompt_lexicon()`), so person words added in the config also mark sidecar boxes as whole people |
 
 Not exposed in the config yet: `DetectorConfig::thresholds` (per-query
@@ -187,7 +214,7 @@ every job:
   the retry time) or `Stopped`;
 * the child's pid and `hello`;
 * counters: spawns, failures, requests, results, rejected, timeouts, stale,
-  refused, protocol errors, detached threads;
+  refused, expired, protocol errors, detached threads;
 * the last pass latency and round trip.
 
 `logs()` returns the recent stderr lines, with the host's own `[host]` notes
@@ -210,10 +237,12 @@ checked against each other (hello, boxes, thresholds at the boundary,
 error replies, fatal errors at startup, clean exit on end of input); it
 skips itself when `python3` 3.10 or newer is not on `PATH`. The other
 integration tests need no Python; they drive the host, the service and the
-detector through every mode of `ac-fake-sidecar`: `ok`, `slow`, `hang`, `crash-after-hello`,
-`crash-before-hello`, `crash-once`, `garbage`, `wrong-seq`, `never-ready`,
-`error-reply`, `fatal-error`, and `--grandchild` for helper processes (see
-`src/bin/ac-fake-sidecar.rs`).
+detector through every mode of `ac-fake-sidecar`: `ok`, `slow`, `hang`,
+`crash-after-hello`, `crash-before-hello`, `crash-once`, `fail-load-once`,
+`garbage`, `wrong-seq`, `never-ready`, `error-reply`, `fatal-error`, plus
+`--hello-delay-ms` for a slow load and `--grandchild` for helper processes
+(see `src/bin/ac-fake-sidecar.rs`). Like the real sidecar, the fake exits
+once its parent is gone.
 
 * Every test checks that its child was reaped.
 * `tests/leftovers.rs`, a single-test binary, then checks that this process

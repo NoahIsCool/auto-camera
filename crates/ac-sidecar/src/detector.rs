@@ -18,7 +18,11 @@
 //!    with an empty phrase are not sent.
 //! 2. **Prepare.** The frame becomes RGB8 with its longer side at most
 //!    [`DetectorConfig::send_side`] ([`crate::prep`]).
-//! 3. **Send and wait,** under [`DetectorConfig::request_timeout`].
+//! 3. **Send and wait,** under [`DetectorConfig::request_timeout`]. The
+//!    request carries the frame's [`Freshness`]: taken when `detect` was
+//!    called, worth a pass for [`DetectorConfig::max_age`]. A request that
+//!    waited longer for the shared process (behind a restart, or behind
+//!    other sources) is skipped without a pass.
 //! 4. **Map.** Each returned box becomes one [`Detection`] per query of
 //!    its phrase whose own threshold it meets. Its extent is
 //!    [`Extent::Person`] when the phrase's head noun is a person (the
@@ -36,9 +40,9 @@
 //! # Errors
 //!
 //! A missed deadline is [`VisionError::Timeout`]; a sidecar that is down
-//! or waiting to restart is [`VisionError::Unavailable`]; an error reply
-//! for the request is [`VisionError::Model`]. All are transient: the next
-//! call may succeed.
+//! or waiting to restart, and a frame skipped because it waited too long,
+//! are [`VisionError::Unavailable`]; an error reply for the request is
+//! [`VisionError::Model`]. All are transient: the next call may succeed.
 //!
 //! # Invariants
 //!
@@ -54,7 +58,7 @@ use ac_core::{Basis, Extent, Lexicon, QueryId, Rect, literal_prompt};
 use ac_media::VideoFrame;
 use ac_vision::{Detection, Detector, PromptQuery, VisionError, sanitize_detections};
 
-use crate::host::{DetectRequest, HostError};
+use crate::host::{DetectRequest, Freshness, HostError};
 use crate::prep::{DEFAULT_SEND_SIDE, MAX_SEND_SIDE, prepare};
 use crate::protocol::{Found, Phrase};
 use crate::service::SidecarClient;
@@ -79,6 +83,12 @@ pub struct DetectorConfig {
     pub send_side: u32,
     /// Deadline of one pass, from when it reaches the sidecar.
     pub request_timeout: Duration,
+    /// Oldest a frame may be when the sidecar gets to it (see
+    /// [`crate::host::Freshness`]); a request that waited longer is
+    /// skipped without a pass. `None` sends every request however long it
+    /// waited. The engine sets its `discovery.max_result_age_s`, past which
+    /// it drops an answer anyway.
+    pub max_age: Option<Duration>,
     /// Vocabulary that tells people from objects.
     pub lexicon: Lexicon,
 }
@@ -90,6 +100,7 @@ impl Default for DetectorConfig {
             thresholds: HashMap::new(),
             send_side: DEFAULT_SEND_SIDE,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            max_age: None,
             lexicon: Lexicon::builtin(),
         }
     }
@@ -122,6 +133,11 @@ impl DetectorConfig {
         if self.request_timeout.is_zero() {
             return Err(VisionError::InvalidConfig(
                 "sidecar request_timeout must be positive".into(),
+            ));
+        }
+        if self.max_age.is_some_and(|a| a.is_zero()) {
+            return Err(VisionError::InvalidConfig(
+                "sidecar max_age must be positive".into(),
             ));
         }
         Ok(())
@@ -238,9 +254,10 @@ impl From<HostError> for VisionError {
             HostError::Rejected(m) => {
                 VisionError::Model(format!("the sidecar rejected the request: {m}"))
             }
-            e @ (HostError::Spawn(_) | HostError::Unavailable { .. } | HostError::Stopped) => {
-                VisionError::Unavailable(e.to_string())
-            }
+            e @ (HostError::Spawn(_)
+            | HostError::Unavailable { .. }
+            | HostError::Expired { .. }
+            | HostError::Stopped) => VisionError::Unavailable(e.to_string()),
         }
     }
 }
@@ -283,6 +300,7 @@ impl Detector for SidecarDetector {
         frame: &VideoFrame,
         queries: &[PromptQuery],
     ) -> Result<Vec<Detection>, VisionError> {
+        let freshness = self.config.max_age.map(Freshness::now);
         let plan = Plan::new(queries, &self.config);
         if plan.is_empty() {
             return Ok(Vec::new());
@@ -301,6 +319,7 @@ impl Detector for SidecarDetector {
             pts: frame.pts,
             image,
             phrases: plan.phrases(),
+            freshness,
         };
         let reply = self.client.detect(request, self.config.request_timeout)?;
         Ok(plan.detections(&reply.detections, queries))

@@ -22,7 +22,9 @@ line, reported by the server):
 * ``EXIT_OK`` (0): stdin ended cleanly;
 * ``EXIT_LOAD_FAILED`` (3): the backend failed to load; a fatal error was sent;
 * ``EXIT_PROTOCOL`` (4): the host broke the protocol; a fatal error was sent;
-* ``EXIT_HOST_GONE`` (5): stdout closed (the host went away) mid-reply.
+* ``EXIT_HOST_GONE`` (5): stdout closed (the host went away) mid-reply;
+  ``server.py``'s parent watchdog exits with it too, once the parent
+  process is gone.
 
 Invariants
 ----------
@@ -65,7 +67,8 @@ EXIT_LOAD_FAILED = 3
 #: The host broke the protocol; a fatal error was sent.
 EXIT_PROTOCOL = 4
 
-#: stdout was closed while replying; the host is gone.
+#: The host is gone: stdout was closed while replying, or (server.py's
+#: watchdog) the parent process ended.
 EXIT_HOST_GONE = 5
 
 #: Longest error message sent to the host, in characters.

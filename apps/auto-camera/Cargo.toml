@@ -21,6 +21,9 @@ ac-output.workspace = true
 ac-switcher.workspace = true
 serde.workspace = true
 clap = { version = "4.6", features = ["derive"] }
+# Ctrl-C, SIGTERM and SIGHUP ("termination") run the normal shutdown, so the
+# detector sidecar (in its own process group) never outlives the app.
+ctrlc = { version = "3.5", features = ["termination"] }
 # OpenGL (glow) renderer and X11 windowing: both load their system libraries
 # at run time, so the app builds on Linux CI without GUI development
 # packages. eframe 0.35 is the newest release supporting Rust 1.92.

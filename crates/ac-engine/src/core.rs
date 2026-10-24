@@ -12,12 +12,17 @@
 //!
 //! 1. **Protection.** The subjects of the program and preview shots are
 //!    pushed to their stores, so on-air subjects are never retired.
-//! 2. **Discovery results** are applied unless stale
+//! 2. **Discovery results** free their source's request slot (unless a
+//!    newer request replaced a timed-out one) and are applied unless stale
 //!    ([`crate::discovery::staleness`]). Each applied result also becomes
 //!    the prompt feedback of every live query it looked for on that source
-//!    (spec M2): how many detections it returned and the best score
-//!    ([`crate::snapshot::MatchView`]), tagged with the frame's sequence
-//!    number and PTS. Stale and failed results change no feedback.
+//!    (spec M2): how many detections it returned, how many of them reach
+//!    the subject store's floor (only those can become shots) and the best
+//!    score ([`crate::snapshot::MatchView`]), tagged with the frame's
+//!    sequence number and PTS. Stale and failed results change no
+//!    feedback; they are recorded as the source's newest outcome
+//!    ([`crate::snapshot::PassOutcome`]), so the window can say the
+//!    feedback is no longer current.
 //! 3. **Frames.** Each source's newest frame, if new, advances its tracker
 //!    and store (media time = the frame's PTS).
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
@@ -26,9 +31,19 @@
 //!    proposes (and in Auto mode takes) a shot.
 //! 7. **Rendering.** The compositor renders the program; monitors and
 //!    multiview tiles are rendered at their own, lower rates.
-//! 8. **Discovery requests** are issued for sources that are due, asking
-//!    for each query's parsed detector phrase ([`Query::detector_phrase`]),
-//!    not its prompt.
+//! 8. **Discovery requests** are issued for sources that are due (at most
+//!    `discovery.rate_hz` each, never while one is in flight), with each
+//!    source's newest frame, asking for each query's parsed detector
+//!    phrase ([`Query::detector_phrase`]), not its prompt. When one
+//!    detector process serves every source (the sidecar,
+//!    [`crate::config::DetectorSettings::is_shared`]), the studio keeps
+//!    one request in flight in all, and the due source that waited longest
+//!    since its last turn goes next. Requests then never queue behind each
+//!    other's passes, so an answer is about one pass old rather than one
+//!    pass per source (two sources at 1.05 s a pass would otherwise get
+//!    every answer back 2.1 s old, past the 2 s age limit), and each
+//!    source's rate falls to what the process can serve: with N sources, a
+//!    pass every N pass times at most.
 //!
 //! Given the same configuration, frames, results and commands, the core
 //! produces the same program, which is what the deterministic tests rely on.
@@ -49,7 +64,7 @@ use crate::catalog::Catalog;
 use crate::config::{DiscoverySettings, MonitorSettings, StudioConfig};
 use crate::discovery::{DiscoveryRequest, DiscoveryResult, staleness};
 use crate::schedule::RateMeter;
-use crate::snapshot::{DiscoveryStats, MatchView};
+use crate::snapshot::{DiscoveryStats, MatchView, PassOutcome};
 use crate::vision::SourceVision;
 
 mod commands;
@@ -90,6 +105,9 @@ struct DiscoveryState {
     next_due: Duration,
     /// When the request in flight was sent.
     in_flight_since: Option<Duration>,
+    /// When the newest request was sent, for taking turns on a shared
+    /// detector.
+    last_sent: Option<Duration>,
     /// Sequence number of the newest frame requested.
     last_requested: Option<u64>,
     /// Sequence number of the newest frame whose results were applied.
@@ -153,6 +171,9 @@ pub struct EngineCore {
     lexicon: Lexicon,
     /// Discovery tuning.
     discovery: DiscoverySettings,
+    /// One detector process serves every source, one pass at a time (the
+    /// sidecar): the studio keeps one request in flight in all.
+    shared_detector: bool,
     /// Framing tuning for new shots.
     framing: FramerConfig,
     /// Monitor and tile rendering.
@@ -256,6 +277,7 @@ impl EngineCore {
             queries,
             lexicon: config.prompt_lexicon(),
             discovery: config.discovery,
+            shared_detector: config.detector.is_shared(),
             framing: config.framing,
             monitors: config.monitors,
             catalog: Catalog::new(),
@@ -366,40 +388,54 @@ impl EngineCore {
             return;
         };
         let d = &mut s.discovery;
-        d.in_flight_since = None;
-        d.stats.last_latency = Some(r.latency);
+        // A late answer to a request that timed out does not free the slot
+        // of the newer request now in flight.
+        if d.last_requested == Some(r.frame.seq) {
+            d.in_flight_since = None;
+        }
         let detections = match r.outcome {
-            Ok(dets) if r.frame.source == s.id => dets,
+            Ok(dets) if r.frame.source == s.id => {
+                d.stats.last_latency = Some(r.latency);
+                dets
+            }
             Ok(_) => {
                 d.stats.errors += 1;
                 d.stats.last_error = Some("result for another source".into());
+                d.stats.last_outcome = Some(PassOutcome::Failed);
                 return;
             }
             Err(e) => {
                 d.stats.errors += 1;
                 d.stats.last_error = Some(e);
+                d.stats.last_outcome = Some(PassOutcome::Failed);
                 return;
             }
         };
         let newest = s.frame.as_ref().map(|f| f.pts);
         if staleness(r.frame.seq, r.frame.pts, d.last_applied, newest, max_age).is_some() {
             d.stats.stale += 1;
+            d.stats.last_outcome = Some(PassOutcome::Stale);
             return;
         }
         d.last_applied = Some(r.frame.seq);
         d.stats.applied += 1;
+        d.stats.last_outcome = Some(PassOutcome::Applied);
+        let floor = s.vision.store().config().min_score;
         for id in r.queries.iter().filter(|id| live.contains(id)) {
-            let scores = detections.iter().filter(|det| &det.query == id);
-            let (count, best) = scores.fold((0, None), |(n, best): (usize, Option<f32>), det| {
-                (n + 1, Some(best.map_or(det.score, |b| b.max(det.score))))
-            });
-            let feedback = MatchView {
+            let mut feedback = MatchView {
                 source: s.id.clone(),
                 seq: r.frame.seq,
                 pts: r.frame.pts,
-                count,
-                best,
+                count: 0,
+                best: None,
+                kept: 0,
+                floor,
             };
+            for det in detections.iter().filter(|det| &det.query == id) {
+                feedback.count += 1;
+                feedback.kept += usize::from(det.score >= floor);
+                feedback.best = Some(feedback.best.map_or(det.score, |b| b.max(det.score)));
+            }
             d.matches.insert(id.clone(), feedback);
         }
         s.vision
@@ -426,7 +462,8 @@ impl EngineCore {
         s.vision.on_frame(frame);
     }
 
-    /// Issues discovery requests for sources that are due.
+    /// Issues discovery requests for sources that are due; see the module
+    /// docs for how sources take turns on a shared detector.
     fn schedule_discovery(&mut self) -> Vec<(usize, DiscoveryRequest)> {
         let now = self.now;
         let timeout = self.discovery.timeout();
@@ -441,24 +478,49 @@ impl EngineCore {
                 prompt: q.detector_phrase().to_string(),
             })
             .collect();
-        let mut out = Vec::new();
-        for (i, s) in self.sources.iter_mut().enumerate() {
+        for s in &mut self.sources {
             let d = &mut s.discovery;
-            if !d.enabled {
-                continue;
-            }
-            if let Some(since) = d.in_flight_since {
-                if now.saturating_sub(since) < timeout {
-                    continue;
-                }
+            if let Some(since) = d.in_flight_since
+                && now.saturating_sub(since) >= timeout
+            {
                 d.in_flight_since = None;
                 d.stats.timeouts += 1;
+                d.stats.last_outcome = Some(PassOutcome::TimedOut);
             }
+        }
+        let due = self.sources.iter().enumerate().filter(|(_, s)| {
+            let d = &s.discovery;
+            d.enabled
+                && d.in_flight_since.is_none()
+                && now >= d.next_due
+                && !queries.is_empty()
+                && s.frame
+                    .as_ref()
+                    .is_some_and(|f| d.last_requested != Some(f.seq))
+        });
+        let chosen: Vec<usize> = if !self.shared_detector {
+            due.map(|(i, _)| i).collect()
+        } else if self
+            .sources
+            .iter()
+            .any(|s| s.discovery.in_flight_since.is_some())
+        {
+            Vec::new()
+        } else {
+            // The source that waited longest since its last turn (never
+            // first), so every source gets a turn.
+            due.min_by_key(|(i, s)| (s.discovery.last_sent, *i))
+                .map(|(i, _)| i)
+                .into_iter()
+                .collect()
+        };
+        let mut out = Vec::new();
+        for i in chosen {
+            let s = &mut self.sources[i];
             let Some(frame) = &s.frame else { continue };
-            if queries.is_empty() || now < d.next_due || d.last_requested == Some(frame.seq) {
-                continue;
-            }
+            let d = &mut s.discovery;
             d.in_flight_since = Some(now);
+            d.last_sent = Some(now);
             d.next_due = now + interval;
             d.last_requested = Some(frame.seq);
             d.stats.requests += 1;

@@ -13,8 +13,10 @@
 //! process once, as an [`ac_sidecar::SidecarService`], and gives every
 //! source a loader holding a non-owning [`ac_sidecar::SidecarClient`].
 //! Each source still has its own detector on its own worker thread; the
-//! service serves their passes one at a time, oldest first, so the queue is
-//! bounded by the number of sources (ADR 0004).
+//! core sends them one request at a time in turns
+//! ([`DetectorSettings::is_shared`]), each with its source's newest frame,
+//! and a request that still waited longer than `discovery.max_result_age_s`
+//! for the process is skipped without a pass (ADR 0004).
 //!
 //! # Failing early
 //!
@@ -24,9 +26,12 @@
 //! (the script, the model folder; see [`SidecarSettings`] for what counts
 //! as a path), and the process must spawn. What can only fail once it runs
 //! (a wrong `--model` makes the sidecar send a fatal error and exit, a load
-//! misses `startup_timeout_s`) fails each source's loader instead, and every
-//! request of that source then reports the reason, as for a model that
-//! fails to load in-process.
+//! misses `startup_timeout_s`) does not fail the loaders: a cold first
+//! load, or one crash during load, must not turn detection off for the
+//! session. Each source gets its detector anyway; its passes fail with the
+//! reason (so the window shows it) while the host restarts the process
+//! under its backoff (1 s, doubling up to 30 s), and work once a restart
+//! says hello. Only an invalid detector configuration fails a loader.
 //!
 //! # Ownership
 //!
@@ -91,7 +96,8 @@ impl Detectors {
             .map_err(EngineError::Sidecar)?;
         let service = SidecarService::start(settings.host_config())
             .map_err(|e| EngineError::Sidecar(e.to_string()))?;
-        let detector = settings.detector_config(config.prompt_lexicon());
+        let detector =
+            settings.detector_config(config.prompt_lexicon(), config.discovery.max_result_age());
         let loaders = config
             .sources
             .iter()
@@ -104,8 +110,9 @@ impl Detectors {
     }
 }
 
-/// A loader that waits for the sidecar's hello on the worker thread and
-/// returns a detector on `client`.
+/// A loader that waits for the sidecar's first hello on the worker thread
+/// and returns a detector on `client`, also when that start failed (see
+/// the module docs).
 fn sidecar_loader(client: SidecarClient, config: DetectorConfig) -> DetectorLoader {
     Box::new(move || {
         let detector = client.detector(config).map_err(|e| e.to_string())?;
@@ -215,7 +222,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_sidecar_that_dies_before_hello_fails_every_loader_with_its_reason() {
+    fn a_failed_first_start_is_retried_and_its_reason_reported() {
         let c = studio(DetectorSettings::Sidecar(SidecarSettings {
             startup_timeout_s: 5.0,
             ..SidecarSettings::new(["sh", "-c", "echo no model here >&2; exit 3"])
@@ -223,14 +230,26 @@ mod tests {
         let mut built = Detectors::build(&c).unwrap();
         let service = built.sidecar.take().expect("one shared sidecar");
         let loader = built.loaders.remove(0).expect("a loader");
-        let err = loader().map(|d| d.name().to_owned()).unwrap_err();
+        // The start failed, but the detector exists: its passes go through
+        // the host, which restarts the process after its backoff.
+        let mut detector = loader().expect("a failed start is not a load failure");
+        assert_eq!(detector.name(), ac_sidecar::service::UNNAMED);
+        let pattern = ac_sources::SyntheticPattern::new(64, 36, 30.0, 1).unwrap();
+        let queries = [ac_vision::PromptQuery::new("q", "a person")];
+        let frame = pattern.frame(&ac_core::SourceId("cam".into()), 1);
+        let err = detector.detect(&frame, &queries).unwrap_err().to_string();
         assert!(
             err.contains("before hello") && err.contains("no model here"),
             "{err}"
         );
-        let pid_gone = service.status().pid.is_none();
+        assert!(service.status().pid.is_none(), "the dead child was reaped");
+        // After the 1 s backoff, a pass starts the process again.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let frame = pattern.frame(&ac_core::SourceId("cam".into()), 2);
+        let err = detector.detect(&frame, &queries).unwrap_err().to_string();
+        assert!(err.contains("no model here"), "{err}");
+        assert_eq!(service.status().stats.spawns, 2, "restarted once");
         drop(service);
-        assert!(pid_gone, "the dead child was reaped");
     }
 
     #[test]

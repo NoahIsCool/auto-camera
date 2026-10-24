@@ -73,6 +73,48 @@ impl HostConfig {
     }
 }
 
+/// How long a request's frame stays worth a pass: the engine drops an
+/// answer about a frame older than `max_age`, so the host does not send a
+/// request that has already waited that long (behind a restart, or behind
+/// other sources' passes) and answers it with [`HostError::Expired`]
+/// instead of spending a pass on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Freshness {
+    /// When the frame was handed to the detector.
+    pub taken: Instant,
+    /// Oldest the frame may be when the pass starts.
+    pub max_age: Duration,
+}
+
+impl Freshness {
+    /// A frame taken now that stays useful for `max_age`.
+    pub fn now(max_age: Duration) -> Self {
+        Self {
+            taken: Instant::now(),
+            max_age,
+        }
+    }
+
+    /// The frame's age at `now`.
+    pub fn age(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.taken)
+    }
+
+    /// `Ok` while a pass starting at `now` is still useful, else the
+    /// [`HostError::Expired`] to answer with.
+    pub fn check(&self, now: Instant) -> Result<(), HostError> {
+        let waited = self.age(now);
+        if waited > self.max_age {
+            Err(HostError::Expired {
+                waited,
+                max_age: self.max_age,
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// One detector pass to run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DetectRequest {
@@ -86,6 +128,9 @@ pub struct DetectRequest {
     pub image: RgbImage,
     /// Prompts, with the score each needs; at least one.
     pub phrases: Vec<Phrase>,
+    /// How long the frame is worth a pass; `None` sends it however long
+    /// it waited.
+    pub freshness: Option<Freshness>,
 }
 
 /// The answer to a [`DetectRequest`].
@@ -132,6 +177,20 @@ pub enum HostError {
     /// The sidecar answered the request with an error; it stays up.
     #[error("the sidecar rejected the request: {0}")]
     Rejected(String),
+    /// The request was not sent: its frame had waited longer than its
+    /// [`Freshness::max_age`] by the time the sidecar was free, so its
+    /// answer would be thrown away. The process is fine.
+    #[error(
+        "skipped: the frame waited {:.1} s for the sidecar, longer than the {:.1} s a result may be old",
+        .waited.as_secs_f64(),
+        .max_age.as_secs_f64()
+    )]
+    Expired {
+        /// How long the frame had waited.
+        waited: Duration,
+        /// The limit it passed.
+        max_age: Duration,
+    },
     /// The host was stopped ([`StopHandle::stop`]).
     #[error("the sidecar host was stopped")]
     Stopped,
@@ -187,6 +246,9 @@ pub struct HostStats {
     pub stale: u64,
     /// Requests refused while waiting to restart.
     pub refused: u64,
+    /// Requests not sent because their frame was too old
+    /// ([`HostError::Expired`]).
+    pub expired: u64,
     /// Protocol errors (each also a failure).
     pub protocol_errors: u64,
     /// Pipe threads that did not end after their child died (a grandchild

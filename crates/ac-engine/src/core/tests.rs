@@ -22,6 +22,7 @@ use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 mod feedback;
 mod framing;
 mod protection;
+mod shared;
 mod vision;
 
 /// Source and output width.

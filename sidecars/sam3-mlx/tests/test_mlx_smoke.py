@@ -9,14 +9,20 @@ the venv's Python so MLX is importable::
 
 ``AC_SAM3_IMAGE`` is optional: a picture with at least one person in it,
 decoded with Pillow (from the venv). Without it only a grey frame is sent.
+The picture is sent as the Rust host sends a frame: turned upright by its
+EXIF orientation and shrunk so its longer side is at most 1008 px (the
+host's ``DEFAULT_SEND_SIDE``), so a 24 MP phone photo fits the protocol's
+64 MiB payload limit and a portrait shot is not sent sideways.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from sam3_sidecar.loop import EXIT_OK
 
@@ -31,20 +37,74 @@ IMAGE = os.environ.get("AC_SAM3_IMAGE")
 #: Load, fingerprint and warm-up allowance; the first run compiles kernels.
 TIMEOUT_S = 300.0
 
+#: Longest side of a picture sent, as the Rust host's ``DEFAULT_SEND_SIDE``.
+SEND_SIDE = 1008
+
+try:
+    import PIL  # noqa: F401
+
+    HAVE_PIL = True
+except ImportError:
+    HAVE_PIL = False
+
+
+def prepare_picture(path: str | Path) -> Any:
+    """Open ``path`` as the host would send it: upright, RGB, longer side <= 1008."""
+    from PIL import Image, ImageOps
+
+    with Image.open(Path(path).expanduser()) as picture:
+        upright = ImageOps.exif_transpose(picture)
+        rgb = upright.convert("RGB")
+    rgb.thumbnail((SEND_SIDE, SEND_SIDE))
+    return rgb
+
 
 def _image_request(path: str, request_id: int) -> bytes:
     """Encode ``path`` as an RGB8 ``detect`` asking for ``a person``."""
-    from PIL import Image
+    rgb = prepare_picture(path)
+    header = detect_header(
+        request_id,
+        width=rgb.width,
+        height=rgb.height,
+        phrases=[{"text": "a person", "threshold": 0.5}],
+    )
+    return detect_bytes(header, rgb.tobytes())
 
-    with Image.open(Path(path).expanduser()) as picture:
-        rgb = picture.convert("RGB")
-        header = detect_header(
-            request_id,
-            width=rgb.width,
-            height=rgb.height,
-            phrases=[{"text": "a person", "threshold": 0.5}],
-        )
-        return detect_bytes(header, rgb.tobytes())
+
+@unittest.skipUnless(HAVE_PIL, "needs Pillow")
+class PicturePrepTests(unittest.TestCase):
+    """The smoke test's picture is sent the way the host sends a frame."""
+
+    def test_large_rotated_pictures_are_turned_upright_and_shrunk(self) -> None:
+        """A sideways 24 MP photo comes out upright with its longer side at 1008."""
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "portrait.jpg"
+            stored = Image.new("RGB", (5712, 4284), (200, 120, 40))
+            exif = Image.Exif()
+            exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to view.
+            stored.save(path, exif=exif)
+            prepared = prepare_picture(path)
+        self.assertEqual(prepared.size, (756, 1008))
+        self.assertEqual(prepared.mode, "RGB")
+        request = _image_request_from(prepared)
+        self.assertLess(len(request), 64 * 1024 * 1024)
+
+    def test_small_pictures_are_not_enlarged(self) -> None:
+        """A picture already within 1008 px keeps its size."""
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "small.png"
+            Image.new("RGBA", (640, 360)).save(path)
+            self.assertEqual(prepare_picture(path).size, (640, 360))
+
+
+def _image_request_from(rgb: Any) -> bytes:
+    """Encode an already prepared picture as a ``detect``."""
+    header = detect_header(3, width=rgb.width, height=rgb.height)
+    return detect_bytes(header, rgb.tobytes())
 
 
 @unittest.skipUnless(MODEL, "set AC_SAM3_MODEL to the MLX SAM 3.1 weights folder")

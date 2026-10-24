@@ -31,10 +31,12 @@ mod textures;
 use ac_engine::{Engine, StudioConfig};
 use eframe::egui;
 
+use crate::signals::QuitSignal;
 use app::OperatorApp;
 
-/// Starts the engine from `config` and runs the window until it is closed.
-pub fn run(config: StudioConfig) -> Result<(), String> {
+/// Starts the engine from `config` and runs the window until it is closed,
+/// or until `quit` is requested (a termination signal), which closes it.
+pub fn run(config: StudioConfig, quit: QuitSignal) -> Result<(), String> {
     let engine = Engine::start(config.clone()).map_err(|e| e.to_string())?;
     let title = match config.sources.as_slice() {
         [one] => format!("Auto Camera · {}", one.display_name()),
@@ -50,7 +52,14 @@ pub fn run(config: StudioConfig) -> Result<(), String> {
     eframe::run_native(
         "auto-camera",
         options,
-        Box::new(move |_cc| Ok(Box::new(OperatorApp::new(engine, &config)))),
+        Box::new(move |cc| {
+            let ctx = cc.egui_ctx.clone();
+            quit.wake_with(move || {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                ctx.request_repaint();
+            });
+            Ok(Box::new(OperatorApp::new(engine, &config).with_quit(quit)))
+        }),
     )
     .map_err(|e| format!("cannot open the operator window: {e}"))
 }

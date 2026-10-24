@@ -18,9 +18,14 @@
 //!   [`HostConfig::startup_timeout`] (60 s by default; SAM 3.1 loads in
 //!   4.6 s, measured) counted from the spawn.
 //! * **Requests.** One at a time: [`SamHost::detect`] takes `&mut self`,
-//!   so the type system enforces the protocol's one-in-flight rule. Each
-//!   request gets a fresh id and its own deadline, counted from when it is
-//!   handed to the writer. The answer must echo the request's id, source,
+//!   so the type system enforces the protocol's one-in-flight rule. A
+//!   request whose frame has already waited longer than its
+//!   [`Freshness::max_age`] once the process is ready (behind a restart's
+//!   load, or behind other sources' passes) is not sent: it fails with
+//!   [`HostError::Expired`], so no pass is spent on an answer the engine
+//!   would throw away, and the caller's next request brings a newer frame.
+//!   Each request that is sent gets a fresh id and its own deadline,
+//!   counted from when it is handed to the writer. The answer must echo the request's id, source,
 //!   sequence number and PTS; a reply that does not is dropped and counted
 //!   in [`HostStats::stale`], and the wait goes on. An `error` reply with
 //!   the request's id fails that request only; the process stays up.
@@ -56,16 +61,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::backoff::Backoff;
-use crate::child::{Event, Outgoing, Process, SendFailure, Wake};
+use crate::child::{Outgoing, Process, SendFailure, Wake};
 use crate::logs::LogRing;
-use crate::protocol::{
-    Detect, ErrorReply, Hello, Message, PixelFormat, check_payload, encode_header,
-};
+use crate::protocol::{Detect, Hello, Message, PixelFormat, check_payload, encode_header};
 
 mod types;
+mod wait;
 
 pub use types::{
-    DetectReply, DetectRequest, HostConfig, HostError, HostState, HostStats, HostStatus,
+    DetectReply, DetectRequest, Freshness, HostConfig, HostError, HostState, HostStats, HostStatus,
 };
 
 /// How long a child that is exiting by itself (its stdout closed, or it
@@ -95,16 +99,6 @@ impl StopHandle {
     pub fn is_stopped(&self) -> bool {
         self.wake.is_set()
     }
-}
-
-/// The outcome of one wait.
-enum Wait {
-    /// An event arrived.
-    Event(Event),
-    /// The deadline passed.
-    Timeout,
-    /// The host was stopped.
-    Stopped,
 }
 
 /// Owner of one sidecar process; see the module docs.
@@ -261,6 +255,7 @@ impl SamHost {
             pts,
             image,
             phrases,
+            freshness,
         } = request;
         let detect = Detect {
             id: self.next_id,
@@ -278,6 +273,10 @@ impl SamHost {
         let header = encode_header(&message).map_err(invalid)?;
         check_payload(&message, image.data.len()).map_err(invalid)?;
         self.ready()?;
+        if let Some(Err(expired)) = freshness.map(|f| f.check(Instant::now())) {
+            self.stats.expired += 1;
+            return Err(expired);
+        }
         self.next_id += 1;
         let sent = Instant::now();
         let outgoing = Outgoing {
@@ -296,188 +295,6 @@ impl SamHost {
         }
         self.stats.requests += 1;
         self.await_result(&detect, sent, timeout)
-    }
-
-    /// Waits for the answer to `detect`, sent at `sent`.
-    fn await_result(
-        &mut self,
-        detect: &Detect,
-        sent: Instant,
-        timeout: Duration,
-    ) -> Result<DetectReply, HostError> {
-        let deadline = sent + timeout;
-        let mut written = false;
-        loop {
-            let event = match self.next(deadline) {
-                Wait::Event(event) => event,
-                Wait::Stopped => return Err(HostError::Stopped),
-                Wait::Timeout => {
-                    self.stats.timeouts += 1;
-                    let what = if written {
-                        "the sidecar's result"
-                    } else {
-                        "the sidecar reading its request"
-                    };
-                    let detail = self.fail(what.into(), Duration::ZERO);
-                    return Err(HostError::Timeout {
-                        what: detail,
-                        after: timeout,
-                    });
-                }
-            };
-            match event {
-                Event::Written(id) => written |= id == detect.id,
-                Event::Message(Message::Result(r)) => {
-                    let answers = r.id == detect.id
-                        && r.source == detect.source
-                        && r.seq == detect.seq
-                        && r.pts_ns == detect.pts_ns;
-                    if !answers {
-                        self.stats.stale += 1;
-                        continue;
-                    }
-                    let n = detect.phrases.len();
-                    if let Some(bad) = r.detections.iter().find(|f| f.phrase as usize >= n) {
-                        self.stats.protocol_errors += 1;
-                        let reason = format!(
-                            "protocol error: a detection names phrase {} of a request with {n}",
-                            bad.phrase
-                        );
-                        return Err(self.lost(&reason, Duration::ZERO));
-                    }
-                    let detections = r
-                        .detections
-                        .into_iter()
-                        .filter(|f| f.score >= detect.phrases[f.phrase as usize].threshold)
-                        .collect();
-                    let latency =
-                        Duration::try_from_secs_f64(r.latency_ms / 1000.0).unwrap_or(Duration::MAX);
-                    let round_trip = sent.elapsed();
-                    self.healthy();
-                    self.stats.results += 1;
-                    self.last_latency = Some(latency);
-                    self.last_round_trip = Some(round_trip);
-                    return Ok(DetectReply {
-                        detections,
-                        latency,
-                        round_trip,
-                    });
-                }
-                Event::Message(Message::Error(ErrorReply {
-                    id: Some(id),
-                    message,
-                })) => {
-                    if id == detect.id {
-                        self.healthy();
-                        self.stats.rejected += 1;
-                        return Err(HostError::Rejected(message));
-                    }
-                    self.stats.stale += 1;
-                }
-                event => return Err(self.unexpected(event, "during a request")),
-            }
-        }
-    }
-
-    /// Waits for the running process's hello, until its startup deadline.
-    fn await_hello(&mut self) -> Result<Hello, HostError> {
-        let deadline = self.started + self.config.startup_timeout;
-        loop {
-            let event = match self.next(deadline) {
-                Wait::Event(event) => event,
-                Wait::Stopped => return Err(HostError::Stopped),
-                Wait::Timeout => {
-                    self.stats.timeouts += 1;
-                    let detail = self.fail("the sidecar's hello".into(), Duration::ZERO);
-                    return Err(HostError::Timeout {
-                        what: detail,
-                        after: self.config.startup_timeout,
-                    });
-                }
-            };
-            match event {
-                Event::Message(Message::Hello(hello)) => {
-                    self.note_hello(&hello);
-                    self.hello = Some(hello.clone());
-                    return Ok(hello);
-                }
-                Event::Written(_) => {}
-                event => return Err(self.unexpected(event, "before hello")),
-            }
-        }
-    }
-
-    /// Handles events that arrived while no one waited: accepts the hello
-    /// of a process started with [`SamHost::start`], counts late replies
-    /// as stale, and notices a process that died meanwhile, returning the
-    /// error for it.
-    fn drain_idle(&mut self) -> Result<(), HostError> {
-        while let Some(event) = self.process.as_ref().and_then(Process::try_event) {
-            match event {
-                Event::Message(Message::Hello(hello)) if self.hello.is_none() => {
-                    self.note_hello(&hello);
-                    self.hello = Some(hello);
-                }
-                Event::Message(Message::Result(_))
-                | Event::Message(Message::Error(ErrorReply { id: Some(_), .. })) => {
-                    self.stats.stale += 1;
-                }
-                Event::Written(_) | Event::Interrupt => {}
-                event => {
-                    let when = if self.hello.is_none() {
-                        "before hello"
-                    } else {
-                        "while idle"
-                    };
-                    return Err(self.unexpected(event, when));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Ends the process for an event that has no place `when`, and returns
-    /// the error for it.
-    fn unexpected(&mut self, event: Event, when: &str) -> HostError {
-        match event {
-            Event::Message(Message::Error(ErrorReply { id: None, message })) => {
-                self.lost(&format!("the sidecar failed: {message}"), EXITING_GRACE)
-            }
-            Event::Message(message) => {
-                self.stats.protocol_errors += 1;
-                let reason = format!("protocol error: unexpected {} {when}", message.kind());
-                self.lost(&reason, Duration::ZERO)
-            }
-            Event::Closed => self.lost(&format!("the sidecar exited {when}"), EXITING_GRACE),
-            Event::Broken(e) => {
-                self.stats.protocol_errors += 1;
-                self.lost(&format!("protocol error {when}: {e}"), Duration::ZERO)
-            }
-            Event::WriteFailed(e) => {
-                self.lost(&format!("cannot write to the sidecar: {e}"), EXITING_GRACE)
-            }
-            // Every wait handles these itself; they never end a process.
-            Event::Written(_) | Event::Interrupt => HostError::Stopped,
-        }
-    }
-
-    /// The next event of the running process, until `until`.
-    fn next(&self, until: Instant) -> Wait {
-        if self.wake.is_set() {
-            return Wait::Stopped;
-        }
-        let Some(process) = &self.process else {
-            return Wait::Event(Event::Closed);
-        };
-        let event = process.next_event(until);
-        if self.wake.is_set() {
-            return Wait::Stopped;
-        }
-        match event {
-            Some(Event::Interrupt) => Wait::Stopped,
-            Some(event) => Wait::Event(event),
-            None => Wait::Timeout,
-        }
     }
 
     /// Starts a process; a failure counts like a lost process.

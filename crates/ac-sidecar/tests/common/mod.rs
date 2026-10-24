@@ -71,6 +71,7 @@ pub fn request(seq: u64, phrases: &[&str], threshold: f32) -> DetectRequest {
                 threshold,
             })
             .collect(),
+        freshness: None,
     }
 }
 
@@ -172,4 +173,10 @@ pub fn grandchild_pid(logs: &[String]) -> Option<u32> {
     logs.iter()
         .find_map(|l| l.strip_prefix("fake: grandchild "))
         .and_then(|p| p.trim().parse().ok())
+}
+
+/// A path in the temporary directory unique to this process and `name`,
+/// for marker files; nothing is created.
+pub fn temp_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("ac-sidecar-{name}-{}", std::process::id()))
 }

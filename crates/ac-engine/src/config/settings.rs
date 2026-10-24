@@ -208,6 +208,13 @@ impl DetectorSettings {
         }
     }
 
+    /// True when one detector process serves every source, one pass at a
+    /// time (the sidecar), so the engine keeps one request in flight for
+    /// the whole studio instead of one per source (see `crate::core`).
+    pub fn is_shared(&self) -> bool {
+        matches!(self, DetectorSettings::Sidecar(_))
+    }
+
     /// Checks scores and sizes.
     pub fn validate(&self) -> Result<(), String> {
         match self {

@@ -2,9 +2,11 @@
 //!
 //! Each source has one discovery worker thread that owns that source's
 //! [`Detector`]. The engine thread decides when to ask (at most
-//! `discovery.rate_hz` per source, never while a request is in flight) and
-//! hands the worker the newest frame through a single-slot mailbox, so the
-//! detector always works on the newest frame and requests never queue. The
+//! `discovery.rate_hz` per source, never while a request is in flight; for
+//! a detector shared by every source, such as the sidecar, never while any
+//! source's request is, the sources taking turns) and hands the worker the
+//! newest frame through a single-slot mailbox, so the detector always works
+//! on the newest frame and requests never queue. The
 //! worker answers on a channel with a [`DiscoveryResult`] carrying the frame
 //! it looked at, so results are tagged with that frame's source, sequence
 //! number and PTS, and the ids of the queries it looked for (a query added
@@ -26,13 +28,15 @@
 //! fails `Engine::start`), and returns a [`DetectorLoader`] that the worker
 //! runs first. A sidecar detector is shared by every source, so
 //! [`crate::detectors`] starts its process once at engine start, and each
-//! source's loader waits for the sidecar's hello instead. Loading a real model can take minutes (CoreML compiles OWLv2
-//! on first use); done on the engine thread it would hold the window and the
-//! first picture back that long while the sources ran unread. Until the
-//! detector is ready, requests wait in the slot (each replaced by the newest)
-//! and the engine counts them as timed out after `discovery.timeout_s`; a
-//! loader that fails turns every later request into an error result carrying
-//! its message. Stopping a worker that is still loading does not wait for
+//! source's loader waits for the sidecar's hello instead (a first start
+//! that fails does not fail that loader: its detector's passes fail with
+//! the reason while the process is restarted). Loading a real model can
+//! take minutes (CoreML compiles OWLv2 on first use); done on the engine
+//! thread it would hold the window and the first picture back that long
+//! while the sources ran unread. Until the detector is ready, requests wait
+//! in the slot (each replaced by the newest) and the engine counts them as
+//! timed out after `discovery.timeout_s`; a loader that fails turns every
+//! later request into an error result carrying its message. Stopping a worker that is still loading does not wait for
 //! the load: the thread is detached and exits by itself when the load ends
 //! (its slot is closed by then), so quitting is never held up by a compile.
 //! A worker that has loaded is joined, after any pass in progress.

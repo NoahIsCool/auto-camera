@@ -2,7 +2,7 @@
 //! misbehaves on demand.
 //!
 //! ```text
-//! ac-fake-sidecar <mode> [--delay-ms N] [--marker PATH] [--grandchild]
+//! ac-fake-sidecar <mode> [--delay-ms N] [--hello-delay-ms N] [--marker PATH] [--grandchild]
 //! ```
 //!
 //! | Mode | Behaviour |
@@ -13,15 +13,22 @@
 //! | `crash-after-hello` | hello, then exits with status 3 on the first request |
 //! | `crash-before-hello` | exits with status 2 before saying hello |
 //! | `crash-once` | like `crash-after-hello` if `--marker` does not exist (and creates it), else like `ok` |
+//! | `fail-load-once` | like `crash-before-hello` if `--marker` does not exist (and creates it), else like `ok`: a load that fails once |
 //! | `garbage` | hello, then answers a request with bytes that are not a frame |
 //! | `wrong-seq` | hello, then four replies that do not match (wrong id, source, seq, PTS), then the right one |
 //! | `never-ready` | never says hello and ignores its input |
 //! | `error-reply` | hello, then an `error` reply with the request's id for every request |
 //! | `fatal-error` | hello, then a fatal `error` (id null) on the first request, and exits with status 4 |
 //!
-//! `--grandchild` first starts `sleep 3600` sharing the fake's pipes and
-//! logs its pid, so tests can check that killing the sidecar's process
-//! group reaches helpers too.
+//! `--hello-delay-ms` waits that long before saying hello, like a model
+//! loading. `--grandchild` first starts `sleep 3600` sharing the fake's
+//! pipes and logs its pid, so tests can check that killing the sidecar's
+//! process group reaches helpers too.
+//!
+//! The fake exits with status 5 as soon as its parent is gone (checked
+//! every 50 ms), as the real sidecar does, so a host killed without
+//! running its shutdown (SIGKILL, a crash) leaves no fake behind, not even
+//! one hanging on purpose.
 //!
 //! Like the real sidecar, it writes only protocol frames to stdout, logs
 //! to stderr (`fake: ...` lines; each request logs its image size), and
@@ -54,6 +61,8 @@ enum Mode {
     CrashBeforeHello,
     /// Crashes the first time, answers afterwards.
     CrashOnce,
+    /// Fails before hello the first time, answers afterwards.
+    FailLoadOnce,
     /// Answers with bytes that are not a frame.
     Garbage,
     /// Sends mismatched replies before the right one.
@@ -76,6 +85,7 @@ impl Mode {
             "crash-after-hello" => Mode::CrashAfterHello,
             "crash-before-hello" => Mode::CrashBeforeHello,
             "crash-once" => Mode::CrashOnce,
+            "fail-load-once" => Mode::FailLoadOnce,
             "garbage" => Mode::Garbage,
             "wrong-seq" => Mode::WrongSeq,
             "never-ready" => Mode::NeverReady,
@@ -93,6 +103,8 @@ struct Args {
     mode: Mode,
     /// Delay of `slow` answers.
     delay: Duration,
+    /// Wait before hello.
+    hello_delay: Duration,
     /// Marker file of `crash-once`.
     marker: Option<PathBuf>,
     /// Start a `sleep` helper first.
@@ -106,6 +118,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut parsed = Args {
         mode,
         delay: Duration::from_millis(1500),
+        hello_delay: Duration::ZERO,
         marker: None,
         grandchild: false,
     };
@@ -115,6 +128,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 let v = args.next().ok_or("--delay-ms needs a value")?;
                 let ms: u64 = v.parse().map_err(|_| format!("bad --delay-ms {v:?}"))?;
                 parsed.delay = Duration::from_millis(ms);
+            }
+            "--hello-delay-ms" => {
+                let v = args.next().ok_or("--hello-delay-ms needs a value")?;
+                let ms: u64 = v
+                    .parse()
+                    .map_err(|_| format!("bad --hello-delay-ms {v:?}"))?;
+                parsed.hello_delay = Duration::from_millis(ms);
             }
             "--marker" => parsed.marker = Some(args.next().ok_or("--marker needs a path")?.into()),
             "--grandchild" => parsed.grandchild = true,
@@ -178,10 +198,14 @@ fn run(args: Args) -> io::Result<ExitCode> {
         eprintln!("fake: grandchild {}", helper.id());
     }
     let mode = match (args.mode, &args.marker) {
-        (Mode::CrashOnce, Some(marker)) if marker.exists() => Mode::Ok,
+        (Mode::CrashOnce | Mode::FailLoadOnce, Some(marker)) if marker.exists() => Mode::Ok,
         (Mode::CrashOnce, Some(marker)) => {
             std::fs::write(marker, b"crashed once\n")?;
             Mode::CrashAfterHello
+        }
+        (Mode::FailLoadOnce, Some(marker)) => {
+            std::fs::write(marker, b"failed to load once\n")?;
+            Mode::CrashBeforeHello
         }
         (mode, _) => mode,
     };
@@ -195,6 +219,10 @@ fn run(args: Args) -> io::Result<ExitCode> {
             hang()
         }
         _ => {}
+    }
+    if !args.hello_delay.is_zero() {
+        eprintln!("fake: loading for {:?}", args.hello_delay);
+        thread::sleep(args.hello_delay);
     }
     let mut input = BufReader::new(io::stdin().lock());
     let mut out = BufWriter::new(io::stdout().lock());
@@ -234,7 +262,9 @@ fn run(args: Args) -> io::Result<ExitCode> {
             d.phrases.len()
         );
         match mode {
-            Mode::Ok | Mode::CrashOnce => send(&mut out, Message::Result(answer(&d, started)))?,
+            Mode::Ok | Mode::CrashOnce | Mode::FailLoadOnce => {
+                send(&mut out, Message::Result(answer(&d, started)))?
+            }
             Mode::Slow => {
                 thread::sleep(args.delay);
                 send(&mut out, Message::Result(answer(&d, started)))?;
@@ -296,8 +326,43 @@ fn run(args: Args) -> io::Result<ExitCode> {
     }
 }
 
+/// Exit status when the parent is gone.
+const PARENT_GONE: i32 = 5;
+
+/// How often the watchdog checks for the parent.
+const PARENT_POLL: Duration = Duration::from_millis(50);
+
+/// Exits the process with [`PARENT_GONE`] once the parent is gone: a
+/// child whose parent dies is re-parented (to init or a subreaper), so
+/// its parent id changes. `std::os::unix::process::parent_id` is safe.
+#[cfg(unix)]
+fn watch_parent() {
+    let parent = std::os::unix::process::parent_id();
+    let spawned = thread::Builder::new()
+        .name("fake-watchdog".into())
+        .spawn(move || {
+            loop {
+                thread::sleep(PARENT_POLL);
+                if std::os::unix::process::parent_id() != parent {
+                    // Not eprintln!: stderr is a pipe to the dead parent,
+                    // and a failed write must not stop the exit.
+                    let _ = writeln!(io::stderr(), "fake: parent {parent} is gone, exiting");
+                    std::process::exit(PARENT_GONE);
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        eprintln!("fake: no parent watchdog: {e}");
+    }
+}
+
+/// Nothing to watch where parents are not tracked this way.
+#[cfg(not(unix))]
+fn watch_parent() {}
+
 /// Parses the arguments and runs the fake.
 fn main() -> ExitCode {
+    watch_parent();
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(e) => {

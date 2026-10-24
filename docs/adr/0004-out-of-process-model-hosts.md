@@ -42,19 +42,38 @@ knows where a model runs.
   child has it, 2 s to exit after stdin closes. A missed deadline, an exit,
   a protocol error or a fatal error kills and reaps the process; requests
   are refused while a backoff of 1 s, doubling up to 30 s, runs, and the
-  next request starts a new process.
+  next request starts a new process. That includes the first start: a
+  load that misses its deadline or crashes does not turn detection off for
+  the session; the passes fail with the reason until a restart says hello.
 - **No orphan processes.** The child is spawned in its own process group
   (safely, without `unsafe`), and the whole group is killed and reaped. The
   engine owns the host and drops it at shutdown before it joins the
-  discovery workers, which interrupts a pass or a load in progress. Tests
-  assert that no child process and no `ac-*` thread is left, on every Unix
-  (`crates/ac-engine/tests/shutdown.rs`, `crates/ac-sidecar/tests/leftovers.rs`).
+  discovery workers, which interrupts a pass or a load in progress, so
+  quitting does not wait out a request deadline. The app handles Ctrl-C,
+  `SIGTERM` and `SIGHUP` by running that shutdown (a second signal exits
+  at once). Because the group no longer gets the terminal's Ctrl-C, the
+  sidecar also watches its parent: once the host is gone (killed, crashed)
+  it exits with status 5 within a fraction of a second, which covers macOS,
+  where there is no parent-death signal. Tests assert that no child process
+  is left on every Unix, and that no `ac-*` thread is left on Linux, where
+  threads can be listed from `/proc` (`crates/ac-engine/tests/shutdown.rs`,
+  `crates/ac-sidecar/tests/leftovers.rs`); the engine test also checks that
+  shutdown with a pass hung in the sidecar takes under 4 s.
 - **One process per studio.** SAM 3.1 needs about 3.3 GiB and saturates the
-  GPU, so every source's detector is a client of one shared process, served
-  oldest first; the queue is bounded by the number of sources. This amends
-  ADR 0002's "one detector instance per source": each source still has its
-  own detector instance on its own discovery thread, but the model behind
-  them runs once.
+  GPU, so every source's detector is a client of one shared process. This
+  amends ADR 0002's "one detector instance per source": each source still
+  has its own detector instance on its own discovery thread, but the model
+  behind them runs once. A queue in front of that process would break the
+  latest-frame rule (with N sources each frame would wait about N − 1
+  passes, and two sources at 1.05 s a pass already exceed the 2 s result
+  age limit, so every answer would be thrown away), so the engine keeps
+  **one request in flight for the whole studio** when its detector is
+  shared, and gives the turn to the source that has waited longest, with
+  its newest frame. Answers are then about one pass old whatever the
+  number of sources, and each source gets a pass about every N × the pass
+  time. A frame that still waited longer than `max_result_age_s` for the
+  process (behind a restart, or behind a request the engine gave up on) is
+  skipped without a pass.
 - **Studio level first** (design §5, Phase 2): `[detector] kind =
   "sidecar"` makes the sidecar the one detector of the studio, and every
   query goes to it (`config/sam3-sidecar.example.toml`). Per-query models,
@@ -97,8 +116,12 @@ B8 fails, the sidecar stays. CLAUDE.md's decision line is Noah's to update.
 - **Operation.** A sidecar whose program or paths are missing, or that
   cannot be spawned, stops the studio from starting, with the reason. One
   that dies before its hello (a wrong `--model` sends a fatal error in
-  milliseconds) turns every discovery request into an error carrying that
-  reason, as a model that fails to load in-process does. Sources, tracking,
+  milliseconds) or misses its startup deadline makes every discovery pass
+  fail with that reason while the host retries under its backoff, so a
+  transient failure heals itself and a permanent one costs one short
+  attempt every 30 s. The window marks a source whose newest pass failed,
+  went stale or timed out in amber, with the reason on hover, and counts
+  errors, stale results and timeouts in the status bar. Sources, tracking,
   switching and output keep running whatever the sidecar does.
 - **Scores.** SAM and OWLv2 score on different scales, so the sidecar has
   its own `score_threshold` (0.5 by default), and the subject store's floor

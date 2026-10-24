@@ -16,6 +16,11 @@
 //! 5. **Stop** the output and wait for the recording to be finalized, then
 //!    shut the engine down, which joins every thread and reaps ffmpeg.
 //!
+//! A termination signal (Ctrl-C, `SIGTERM`, `SIGHUP`) ends whichever phase
+//! is running; the engine is then shut down as after a normal run (which
+//! also finishes a running recording and ends the detector sidecar), and
+//! the summary says [`INTERRUPTED`].
+//!
 //! The summary is always produced; `ok` is false and `error` says why when a
 //! phase failed. It reports how each query's prompt was read (what the
 //! detector was asked for, the shot words' sizes, the basis and any
@@ -29,13 +34,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ac_core::{Basis, ShotId, ShotSize};
+use crate::signals::QuitSignal;
+use ac_core::ShotId;
 use ac_director::{CandidateKind, ContentProfile, DirectorMode};
 use ac_engine::{
     Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot, MonitorSettings,
-    OutputState, ShotStatus, StudioConfig,
+    OutputState, StudioConfig,
 };
-use serde::Serialize;
+
+mod summary;
+
+pub use summary::{
+    DirectorSummary, MatchSummary, OutputSummary, ProgramSummary, QuerySummary, ShotSummary,
+    SourceSummary, Summary, TimingSummary,
+};
 
 /// Interval between snapshot samples.
 const SAMPLE: Duration = Duration::from_millis(20);
@@ -56,201 +68,14 @@ pub struct HeadlessOptions {
     pub record: Option<PathBuf>,
 }
 
-/// The JSON summary of a run.
-#[derive(Debug, Clone, Serialize)]
-pub struct Summary {
-    /// Every phase succeeded.
-    pub ok: bool,
-    /// Why the run failed.
-    pub error: Option<String>,
-    /// Config file used.
-    pub config: PathBuf,
-    /// Requested run length.
-    pub seconds: f64,
-    /// Wall-clock length of the whole run, setup and shutdown included.
-    pub wall_seconds: f64,
-    /// Ticks run.
-    pub ticks: u64,
-    /// Master-clock time at the end.
-    pub media_seconds: f64,
-    /// Threads joined at shutdown (discovery workers, output helpers).
-    pub threads_joined: usize,
-    /// Per-source counters.
-    pub sources: Vec<SourceSummary>,
-    /// The queries and how their prompts were read.
-    pub queries: Vec<QuerySummary>,
-    /// Largest number of live subjects seen.
-    pub max_subjects: usize,
-    /// Shots at the end of the run.
-    pub shots: Vec<ShotSummary>,
-    /// Program shot changes.
-    pub program: ProgramSummary,
-    /// Auto-director state at the end.
-    pub director: DirectorSummary,
-    /// Master-clock timing.
-    pub timing: TimingSummary,
-    /// The output session, when one was started.
-    pub output: Option<OutputSummary>,
-    /// Shots that should have been on program but were drawn black.
-    pub render_issues: Vec<String>,
-}
-
-/// One source in the summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct SourceSummary {
-    /// Source id.
-    pub id: String,
-    /// Picture size.
-    pub size: [u32; 2],
-    /// Frame rate measured over the last second.
-    pub fps: f64,
-    /// New frames seen.
-    pub frames: u64,
-    /// Frames replaced in the mailbox before the engine saw them.
-    pub missed: u64,
-    /// Discovery requests sent.
-    pub discovery_requests: u64,
-    /// Discovery results applied.
-    pub discovery_applied: u64,
-    /// Discovery results dropped as stale.
-    pub discovery_stale: u64,
-    /// Detector errors.
-    pub discovery_errors: u64,
-    /// Requests abandoned after the timeout.
-    pub discovery_timeouts: u64,
-    /// Latency of the newest discovery result, in milliseconds.
-    pub discovery_last_ms: Option<f64>,
-    /// Newest detector error.
-    pub discovery_last_error: Option<String>,
-    /// Subjects admitted over the run.
-    pub subjects_created: u64,
-    /// Subjects retired over the run.
-    pub subjects_retired: u64,
-}
-
-/// One query in the summary: its prompt as read when it was created.
-#[derive(Debug, Clone, Serialize)]
-pub struct QuerySummary {
-    /// Query id.
-    pub id: String,
-    /// Operator-facing name.
-    pub name: String,
-    /// The prompt as the operator typed it.
-    pub prompt: String,
-    /// What the detector is asked for.
-    pub detector_phrase: String,
-    /// The prompt was sent as typed, without reading shot or role words.
-    pub literal: bool,
-    /// Shot sizes the prompt's shot words name, in typed order.
-    pub shot_words: Vec<ShotSize>,
-    /// Ids of the presets its subjects are framed with.
-    pub presets: Vec<String>,
-    /// Person or object.
-    pub basis: Basis,
-    /// The operator window's parse line.
-    pub parse: String,
-    /// The parse's notices, one sentence each.
-    pub notes: Vec<String>,
-    /// What the newest applied detector pass of each source found for it,
-    /// in source order; sources without such a pass are left out.
-    pub matches: Vec<MatchSummary>,
-}
-
-/// Prompt feedback in the summary: one source's newest applied pass.
-#[derive(Debug, Clone, Serialize)]
-pub struct MatchSummary {
-    /// Source id.
-    pub source: String,
-    /// Detections returned for the query.
-    pub count: usize,
-    /// Their best score, to two decimals; `null` when there were none.
-    pub best: Option<f64>,
-    /// Sequence number of the frame the pass looked at.
-    pub seq: u64,
-    /// That frame's PTS, in seconds.
-    pub pts_seconds: f64,
-}
-
-/// One shot in the summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct ShotSummary {
-    /// Shot id.
-    pub id: String,
-    /// Operator-facing name.
-    pub name: String,
-    /// Health.
-    pub status: ShotStatus,
-    /// Director quality in `0..=1`.
-    pub quality: f32,
-    /// The preset's zoom ceiling keeps the shot looser than its size.
-    pub limited_by_zoom: bool,
-}
-
-/// Program changes in the summary.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct ProgramSummary {
-    /// The shot on program at the end.
-    pub last: Option<String>,
-    /// Program changes counted by the engine.
-    pub changes: u64,
-    /// Sampled changes: master-clock seconds and the new shot.
-    pub log: Vec<(f64, String)>,
-}
-
-/// Director state in the summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct DirectorSummary {
-    /// Autonomy mode.
-    pub mode: DirectorMode,
-    /// Content profile.
-    pub profile: ContentProfile,
-    /// Takes requested.
-    pub takes: u64,
-    /// The latest reason, as text.
-    pub reason: String,
-}
-
-/// Timing in the summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct TimingSummary {
-    /// Tick interval.
-    pub budget_ms: f64,
-    /// Moving average of the tick processing time.
-    pub avg_ms: f64,
-    /// Longest tick.
-    pub max_ms: f64,
-    /// Ticks that started late.
-    pub late_ticks: u64,
-    /// Ticks skipped after falling behind.
-    pub skipped_ticks: u64,
-}
-
-/// The output session in the summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct OutputSummary {
-    /// Final lifecycle state.
-    pub state: String,
-    /// Recording path.
-    pub record_path: Option<PathBuf>,
-    /// RTMP URL, stream key redacted.
-    pub rtmp_url: Option<String>,
-    /// Program frames handed to the encoder.
-    pub frames_pushed: u64,
-    /// Frames written to ffmpeg.
-    pub frames_written: u64,
-    /// Frames dropped because the encoder queue was full.
-    pub frames_dropped: u64,
-    /// ffmpeg's encoder.
-    pub encoder: Option<String>,
-    /// ffmpeg's exit code.
-    pub exit_code: Option<i32>,
-    /// Newest ffmpeg error line.
-    pub last_error: Option<String>,
-}
-
 /// Runs `config` headless on the wall clock; see the module docs.
-pub fn run(config: StudioConfig, path: &Path, options: &HeadlessOptions) -> Summary {
-    run_with(config, path, options, EngineOptions::default())
+pub fn run(
+    config: StudioConfig,
+    path: &Path,
+    options: &HeadlessOptions,
+    quit: &QuitSignal,
+) -> Summary {
+    run_with(config, path, options, EngineOptions::default(), quit)
 }
 
 /// [`run`] with explicit engine options (tests use a faster clock).
@@ -259,6 +84,7 @@ pub fn run_with(
     path: &Path,
     options: &HeadlessOptions,
     engine_options: EngineOptions,
+    quit: &QuitSignal,
 ) -> Summary {
     let started = Instant::now();
     config.monitors = MonitorSettings::disabled();
@@ -267,7 +93,7 @@ pub fn run_with(
         Err(e) => return failed_to_start(path, options, started, e.to_string()),
     };
     let mut sampler = Sampler::default();
-    let error = drive(&engine, options, &mut sampler).err();
+    let error = drive(&engine, options, &mut sampler, quit).err();
     let (ticks, threads_joined, final_snapshot, error) = match engine.shutdown() {
         Ok(r) => (r.ticks, r.threads_joined, Some(r.final_snapshot), error),
         Err(e) => (0, 0, None, error.or(Some(e.to_string()))),
@@ -297,12 +123,27 @@ fn failure(h: &EngineHandle, why: &str) -> String {
     }
 }
 
-/// Phases 2 to 5; returns why the run failed.
-fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> Result<(), String> {
+/// Why a run that a termination signal cut short failed.
+pub const INTERRUPTED: &str = "interrupted by a termination signal";
+
+/// Phases 2 to 5; returns why the run failed. A termination signal
+/// (`quit`) ends any phase early, and the caller shuts the engine down as
+/// after a normal run.
+fn drive(
+    engine: &Engine,
+    options: &HeadlessOptions,
+    sampler: &mut Sampler,
+    quit: &QuitSignal,
+) -> Result<(), String> {
     let h = engine.handle();
     let snap = h
-        .wait_until(SIGNAL_TIMEOUT, |s| first_wide(s).is_some())
+        .wait_until(SIGNAL_TIMEOUT, |s| {
+            quit.requested() || first_wide(s).is_some()
+        })
         .ok_or_else(|| failure(&h, "no source delivered a picture in time"))?;
+    if quit.requested() {
+        return Err(INTERRUPTED.into());
+    }
     sampler.record(&snap);
     if snap.director.mode != DirectorMode::Auto && snap.switcher.program.is_none() {
         let wide = first_wide(&snap).expect("checked above");
@@ -320,9 +161,13 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
         // Idle, so wait for a state the start leads to.
         let snap = h
             .wait_until(OUTPUT_START_TIMEOUT, |s| {
-                !matches!(s.output.state, OutputState::Idle | OutputState::Starting)
+                quit.requested()
+                    || !matches!(s.output.state, OutputState::Idle | OutputState::Starting)
             })
             .ok_or_else(|| failure(&h, "the output did not start in time"))?;
+        if quit.requested() {
+            return Err(INTERRUPTED.into());
+        }
         if snap.output.state != OutputState::Running {
             return Err(format!("the output did not start: {:?}", snap.output.state));
         }
@@ -334,6 +179,9 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
         sampler.record(&snap);
         if !snap.running {
             return Err(failure(&h, "the engine stopped early"));
+        }
+        if quit.requested() {
+            return Err(INTERRUPTED.into());
         }
         if matches!(snap.output.state, OutputState::Failed(_)) {
             return Err(format!("the output failed: {:?}", snap.output.state));
@@ -501,6 +349,8 @@ fn summarize(
                         .map(|m| MatchSummary {
                             source: m.source.0.clone(),
                             count: m.count,
+                            kept: m.kept,
+                            floor: round(f64::from(m.floor), 2),
                             best: m.best.map(|b| round(f64::from(b), 2)),
                             seq: m.seq,
                             pts_seconds: round(m.pts.as_secs_f64(), 3),

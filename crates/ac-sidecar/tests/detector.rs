@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ac_core::{Extent, QueryId, Rect};
+use ac_sidecar::service::UNNAMED;
 use ac_sidecar::{DetectorConfig, HostConfig, HostError, HostState, SidecarService};
 use ac_vision::{Detector, PromptQuery, VisionError};
 
@@ -187,22 +188,111 @@ fn error_replies_are_model_errors() {
 }
 
 #[test]
-fn a_first_start_that_fails_fails_the_load() {
-    let service = SidecarService::start(fake("crash-before-hello", &[])).unwrap();
-    let err = service.detector(DetectorConfig::default()).unwrap_err();
+fn a_first_start_that_fails_is_retried_by_the_detector() {
+    let marker = common::temp_path("fail-load-once");
+    let _ = std::fs::remove_file(&marker);
+    let service = SidecarService::start(fake(
+        "fail-load-once",
+        &["--marker", marker.to_str().unwrap()],
+    ))
+    .unwrap();
+    // The start fails, but a detector is made: its passes go through the
+    // host, which restarts the process after the backoff.
+    let mut detector = service.detector(DetectorConfig::default()).unwrap();
+    assert_eq!(detector.name(), UNNAMED);
+    let queries = [PromptQuery::new("a", "a person")];
+    let err = detector.detect(&frame(8, 8, 0), &queries).unwrap_err();
     assert!(
-        matches!(&err, VisionError::Unavailable(m) if m.contains("exited before hello")),
+        matches!(&err, VisionError::Unavailable(m) if m.contains("exited before hello") && m.contains("retrying")),
         "{err}"
     );
+    thread::sleep(Duration::from_millis(80));
+    assert_eq!(detector.detect(&frame(8, 8, 1), &queries).unwrap().len(), 1);
+    let status = service.status();
+    assert_eq!((status.stats.spawns, status.stats.results), (2, 1));
+    let pid = pid_of(&service);
+    drop(service);
+    assert_reaped(pid);
+    let _ = std::fs::remove_file(&marker);
+
+    // A start that misses its deadline is no load failure either.
     let config = HostConfig {
         startup_timeout: Duration::from_millis(300),
         ..fake("never-ready", &[])
     };
     let service = SidecarService::start(config).unwrap();
     let pid = pid_of(&service);
-    let err = service.detector(DetectorConfig::default()).unwrap_err();
-    assert!(matches!(err, VisionError::Timeout { .. }), "{err}");
+    let detector = service.detector(DetectorConfig::default()).unwrap();
+    assert_eq!(detector.name(), UNNAMED);
     assert_reaped(pid);
+    assert!(matches!(
+        service.status().state,
+        HostState::Unavailable { .. }
+    ));
+}
+
+#[test]
+fn a_frame_that_waited_too_long_is_skipped_without_a_pass() {
+    // Behind another source's 400 ms pass, a frame allowed 150 ms is
+    // skipped; on its own it is sent.
+    let service = SidecarService::start(fake("slow", &["--delay-ms", "400"])).unwrap();
+    let config = DetectorConfig {
+        max_age: Some(Duration::from_millis(150)),
+        ..DetectorConfig::default()
+    };
+    let mut first = service.detector(config.clone()).unwrap();
+    let mut second = service.detector(config).unwrap();
+    let queries = [PromptQuery::new("a", "a person")];
+    let busy = thread::spawn(move || first.detect(&frame(8, 8, 0), &queries).map(|d| d.len()));
+    thread::sleep(Duration::from_millis(100));
+    let queries = [PromptQuery::new("a", "a person")];
+    let err = second.detect(&frame(8, 8, 0), &queries).unwrap_err();
+    assert!(
+        matches!(&err, VisionError::Unavailable(m) if m.contains("skipped") && m.contains("0.1 s a result may be old")),
+        "{err}"
+    );
+    assert_eq!(busy.join().unwrap().unwrap(), 1);
+    assert_eq!(second.detect(&frame(8, 8, 1), &queries).unwrap().len(), 1);
+    let stats = service.status().stats;
+    assert_eq!((stats.requests, stats.results, stats.expired), (2, 2, 1));
+}
+
+#[test]
+fn a_frame_held_up_by_a_restart_is_not_sent() {
+    // The second start takes 300 ms to say hello: the frame that started
+    // it is older than its 100 ms by then, so it is skipped, and the next
+    // one is answered.
+    let marker = common::temp_path("restart-hello-delay");
+    let _ = std::fs::remove_file(&marker);
+    let service = SidecarService::start(fake(
+        "crash-once",
+        &[
+            "--marker",
+            marker.to_str().unwrap(),
+            "--hello-delay-ms",
+            "300",
+        ],
+    ))
+    .unwrap();
+    let mut detector = service
+        .detector(DetectorConfig {
+            max_age: Some(Duration::from_millis(100)),
+            ..DetectorConfig::default()
+        })
+        .unwrap();
+    let queries = [PromptQuery::new("a", "a person")];
+    let crashed = detector.detect(&frame(8, 8, 0), &queries).unwrap_err();
+    assert!(matches!(crashed, VisionError::Unavailable(_)), "{crashed}");
+    thread::sleep(Duration::from_millis(80));
+    let skipped = detector.detect(&frame(8, 8, 1), &queries).unwrap_err();
+    assert!(skipped.to_string().contains("skipped"), "{skipped}");
+    assert_eq!(detector.detect(&frame(8, 8, 2), &queries).unwrap().len(), 1);
+    let stats = service.status().stats;
+    assert_eq!(
+        (stats.spawns, stats.requests, stats.results, stats.expired),
+        (2, 2, 1, 1)
+    );
+    let _ = std::fs::remove_file(&marker);
 }
 
 #[test]

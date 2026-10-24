@@ -19,7 +19,7 @@ use eframe::egui::{self, Color32, RichText, Ui};
 use super::query_form::{self, QueryForm};
 use super::text::{
     Tone, destinations, dropped_line, encoder_lines, match_lines, output_state, percent,
-    query_hover, query_line, shot_name, source_line, timing_line,
+    query_hover, query_line, shot_name, source_hover, source_line, source_tone, timing_line,
 };
 
 /// Amber, for warnings such as a prompt with no matches.
@@ -265,7 +265,15 @@ pub fn output(ui: &mut Ui, snap: &EngineSnapshot, form: &mut OutputForm) -> Vec<
 pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, notice: Option<(&str, bool)>) {
     ui.horizontal_wrapped(|ui| {
         for s in &snap.sources {
-            ui.label(source_line(s));
+            let text = match source_tone(s) {
+                Tone::Warning => RichText::new(source_line(s)).color(AMBER),
+                Tone::Plain | Tone::Weak => RichText::new(source_line(s)),
+            };
+            let label = ui.label(text);
+            let hover = source_hover(s);
+            if !hover.is_empty() {
+                label.on_hover_text(hover);
+            }
             ui.separator();
         }
         ui.label(timing_line(&snap.timing));
@@ -334,6 +342,8 @@ mod tests {
                 pts: std::time::Duration::from_secs(1),
                 count,
                 best: (count > 0).then_some(0.8),
+                kept: count,
+                floor: 0.35,
             });
         }
         snap.queries.push(second);

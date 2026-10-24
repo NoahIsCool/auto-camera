@@ -66,7 +66,12 @@ fn temp_path(name: &str) -> PathBuf {
 
 #[test]
 fn a_run_without_a_director_puts_the_wide_on_program() {
-    let s = run(studio(), Path::new("studio.toml"), &options(0.6, None));
+    let s = run(
+        studio(),
+        Path::new("studio.toml"),
+        &options(0.6, None),
+        &QuitSignal::new(),
+    );
     assert!(s.ok, "{:?}", s.error);
     assert!(s.ticks > 10);
     assert_eq!(s.program.last.as_deref(), Some("stage/wide"));
@@ -96,7 +101,12 @@ fn a_run_with_the_auto_director_switches_by_itself() {
     let mut c = studio();
     c.director.mode = DirectorMode::Auto;
     // The establishing take mixes up from black over 0.8 s.
-    let s = run(c, Path::new("studio.toml"), &options(1.5, None));
+    let s = run(
+        c,
+        Path::new("studio.toml"),
+        &options(1.5, None),
+        &QuitSignal::new(),
+    );
     assert!(s.ok, "{:?}", s.error);
     assert!(s.program.changes >= 1);
     assert!(!s.program.log.is_empty());
@@ -114,7 +124,12 @@ fn unusable_setups_fail_with_a_summary() {
             audio: false,
         },
     );
-    let s = run(missing, Path::new("x.toml"), &options(1.0, None));
+    let s = run(
+        missing,
+        Path::new("x.toml"),
+        &options(1.0, None),
+        &QuitSignal::new(),
+    );
     assert!(!s.ok);
     assert!(s.error.unwrap().contains("did not start"));
     assert!(s.sources.is_empty());
@@ -125,6 +140,7 @@ fn unusable_setups_fail_with_a_summary() {
         studio(),
         Path::new("x.toml"),
         &options(1.0, Some(existing.clone())),
+        &QuitSignal::new(),
     );
     assert!(!s.ok);
     assert!(
@@ -179,6 +195,7 @@ fn a_run_whose_engine_dies_fails_at_once_with_the_reason() {
             clock,
             ..EngineOptions::default()
         },
+        &QuitSignal::new(),
     );
     assert!(!s.ok);
     let error = s.error.as_deref().unwrap_or_default();
@@ -201,6 +218,7 @@ fn a_recording_run_finalizes_the_file() {
         studio(),
         Path::new("x.toml"),
         &options(1.0, Some(path.clone())),
+        &QuitSignal::new(),
     );
     assert!(s.ok, "{:?}", s.error);
     let out = s.output.as_ref().expect("output summary");
@@ -219,7 +237,12 @@ fn the_summary_is_json() {
     config
         .queries
         .push(QuerySettings::new("Speaker", "speaker upper body"));
-    let s = run(config, Path::new("studio.toml"), &options(0.2, None));
+    let s = run(
+        config,
+        Path::new("studio.toml"),
+        &options(0.2, None),
+        &QuitSignal::new(),
+    );
     let v: serde_json::Value = serde_json::to_value(&s).unwrap();
     for key in [
         "ok", "ticks", "sources", "queries", "shots", "program", "director", "timing", "output",
@@ -329,4 +352,25 @@ fn the_sample_configs_load() {
             "a person playing drums"
         ]
     );
+}
+
+#[test]
+fn a_termination_signal_ends_the_run_early_and_still_shuts_down() {
+    let quit = QuitSignal::new();
+    let signaller = quit.clone();
+    let started = Instant::now();
+    let waker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        signaller.signal()
+    });
+    let s = run(studio(), Path::new("x.toml"), &options(30.0, None), &quit);
+    assert_eq!(waker.join().unwrap(), crate::signals::Signal::First);
+    assert!(!s.ok);
+    assert_eq!(s.error.as_deref(), Some(INTERRUPTED));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the run waited out its time: {:?}",
+        started.elapsed()
+    );
+    assert!(s.threads_joined > 0, "the engine was shut down: {s:?}");
 }

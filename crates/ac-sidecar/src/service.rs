@@ -14,21 +14,39 @@
 //!
 //! Each detector blocks in [`Detector::detect`](ac_vision::Detector) until
 //! its reply comes, so it has at most one job queued: the queue is bounded
-//! by the number of sources, and the oldest dispatch is served first. The
-//! engine's own mailbox already keeps only the newest frame per source.
+//! by the number of sources, and the oldest dispatch is served first.
 //! Deadlines count from when a job reaches the sidecar, not from when it
-//! was queued; the engine's staleness rules drop answers that came too
-//! late.
+//! was queued.
+//!
+//! A queue alone would break the latest-frame rule: a frame is fixed when
+//! its job is queued, so with N sources each answer would come back about
+//! N passes old (two sources at 1.05 s a pass: 2.1 s, past the engine's
+//! 2 s age limit, so every answer would be thrown away while the sidecar
+//! ran flat out). Two things keep frames fresh instead:
+//!
+//! * the engine keeps one request in flight for the whole studio when its
+//!   detector is shared, taking the sources in turn, each with its newest
+//!   frame (`ac-engine`'s core), so the queue normally holds one job;
+//! * a job whose frame has waited longer than its
+//!   [`Freshness`](crate::host::Freshness) allows when it reaches the head
+//!   (behind a restart, or behind a request the engine gave up on) is
+//!   answered with [`HostError::Expired`] without a pass.
 //!
 //! # Lifecycle
 //!
 //! [`SidecarService::start`] spawns the process on the caller's thread (a
 //! wrong command fails here, at engine start), so the model loads while the
-//! rest of the engine starts. [`SidecarClient::detector`] waits for its
-//! hello: a detector exists only once the model has loaded, and is named
-//! after it. A first start that fails is reported there, with its own
-//! error, as a load failure. Later failures are the host's: kill, reap,
-//! refuse while backing off, restart on a later request.
+//! rest of the engine starts. [`SidecarClient::detector`] waits for the
+//! first hello, so a detector made after a good start is named after its
+//! model. A first start that fails (a missed startup deadline, an exit
+//! before hello, a refused restart) does not fail it: the host restarts
+//! the process under its backoff, so a cold first load or one crash during
+//! load does not turn detection off for the session. The detector is
+//! returned anyway, named [`UNNAMED`], and its passes fail with the reason
+//! (the host's backoff refusal names the failed start) until a restart
+//! says hello. Only an invalid configuration, or a service that is gone,
+//! fails it. Later failures are the host's: kill, reap, refuse while
+//! backing off, restart on a later request.
 //!
 //! Dropping the service stops it whatever clients remain: it interrupts
 //! the wait in progress, the thread shuts the process down (stdin closed,
@@ -56,6 +74,10 @@ use crate::host::{
 };
 use crate::logs::{LogRing, lock};
 use crate::protocol::Hello;
+
+/// The name of a detector made while the sidecar had not said hello (its
+/// first start failed; see the module docs).
+pub const UNNAMED: &str = "sidecar";
 
 /// Work for the service thread.
 enum Job {
@@ -194,19 +216,30 @@ impl SidecarClient {
         answer.recv().unwrap_or(Err(HostError::Stopped))
     }
 
-    /// A detector on the shared process, once its model has loaded; see
-    /// the module docs.
+    /// A detector on the shared process, made once the first start has
+    /// said hello or failed; see the module docs for why a failed start
+    /// still yields one.
     pub fn detector(&self, config: DetectorConfig) -> Result<SidecarDetector, VisionError> {
         config.validate()?;
-        let hello = self.ready()?;
-        Ok(SidecarDetector::new(hello.model, self.clone(), config))
+        let name = match self.ready() {
+            Ok(hello) => hello.model,
+            Err(e @ (HostError::Config(_) | HostError::Invalid(_) | HostError::Stopped)) => {
+                return Err(e.into());
+            }
+            Err(HostError::Spawn(_))
+            | Err(HostError::Timeout { .. })
+            | Err(HostError::Unavailable { .. })
+            | Err(HostError::Rejected(_))
+            | Err(HostError::Expired { .. }) => UNNAMED.to_owned(),
+        };
+        Ok(SidecarDetector::new(name, self.clone(), config))
     }
 }
 
 /// The service thread: serves jobs in order until stopped, publishing the
 /// status after each. The first `Ready` job waits for the hello of the
-/// process [`SidecarService::start`] spawned, so its caller gets the
-/// startup's own error if it fails.
+/// process [`SidecarService::start`] spawned, so its caller learns how the
+/// startup went.
 fn serve(mut host: SamHost, inbox: Receiver<Job>, board: Arc<Mutex<HostStatus>>) {
     let publish = |host: &SamHost| *lock(&board) = host.status();
     for job in inbox.iter() {

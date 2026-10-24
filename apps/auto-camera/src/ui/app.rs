@@ -9,7 +9,9 @@
 //! The window repaints at about the monitor rate while the engine runs.
 //!
 //! Closing the window shuts the engine down, which finishes a running
-//! recording before the process exits.
+//! recording before the process exits. A termination signal (Ctrl-C in
+//! the terminal, `SIGTERM`, `SIGHUP`; [`crate::signals`]) closes the window
+//! the same way.
 
 use std::time::{Duration, Instant};
 
@@ -25,6 +27,7 @@ use super::panels::{self, OutputForm};
 use super::query_form::QueryForm;
 use super::switching::{self, SwitchState};
 use super::textures::Textures;
+use crate::signals::QuitSignal;
 
 /// How long a notice stays in the status bar.
 const NOTICE_FOR: Duration = Duration::from_secs(8);
@@ -95,6 +98,8 @@ pub struct OperatorApp {
     notice: Option<Notice>,
     /// Program aspect ratio.
     aspect: f32,
+    /// Termination signals; when one has come the window closes.
+    quit: QuitSignal,
 }
 
 impl std::fmt::Debug for OperatorApp {
@@ -123,7 +128,14 @@ impl OperatorApp {
             pending: Vec::new(),
             notice: None,
             aspect: config.output.width as f32 / config.output.height.max(1) as f32,
+            quit: QuitSignal::new(),
         }
+    }
+
+    /// The same app, closing its window once `quit` is requested.
+    pub fn with_quit(mut self, quit: QuitSignal) -> Self {
+        self.quit = quit;
+        self
     }
 
     /// Posts `command`; its reply is collected by [`Self::poll`].
@@ -167,9 +179,13 @@ impl OperatorApp {
         }
     }
 
-    /// Draws one frame into `ui`.
+    /// Draws one frame into `ui`; asks the window to close once a
+    /// termination signal came (closing shuts the engine down).
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if self.quit.requested() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let snap = self.handle.snapshot();
         self.poll();
         let ids: Vec<ShotId> = snap.shots.iter().map(|s| s.id.clone()).collect();

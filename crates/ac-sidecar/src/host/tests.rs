@@ -91,6 +91,7 @@ fn invalid_requests_are_refused_without_starting_anything() {
             data: vec![0; 3],
         },
         phrases: Vec::new(),
+        freshness: None,
     };
     let err = host.detect(request.clone(), Duration::from_secs(1));
     assert!(matches!(err, Err(HostError::Invalid(m)) if m.contains("phrases")));

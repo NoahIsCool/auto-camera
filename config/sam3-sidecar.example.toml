@@ -84,24 +84,28 @@ startup_timeout_s = 60
 request_timeout_s = 5
 
 [discovery]
-# Passes per second on each source. Here 3 prompts take about 0.64 s, so
-# SAM is busy about 65% of the time; passes never queue up beyond one per
-# source, so a slower pass only lowers the rate. Every source shares the one
-# sidecar process: with N sources, about 0.6 / (N x pass time) keeps it
-# from running flat out.
+# Passes per second on each source, at most. Here 3 prompts take about
+# 0.64 s, so SAM is busy about 65% of the time. Every source shares the one
+# sidecar process, so the engine sends it one frame at a time and gives the
+# turn to the source that waited longest, with its newest frame: with N
+# sources, each gets a pass about every N x the pass time once that is
+# longer than 1 / rate_hz.
 rate_hz = 1.0
 # A result is applied only if its frame is at most this much older than the
-# source's newest frame. One pass here takes 0.5 to 1.1 s, plus the pipe
-# transfer; 3 s also leaves room for waiting behind another source's pass.
-# With N sources, allow about (N + 1) x the pass time. The 2 s default
-# would drop results whenever a pass waited.
+# source's newest frame. Because sources take turns, an answer is about one
+# pass old however many sources there are: 0.5 to 1.1 s here, plus the pipe
+# transfer. The 2 s default fits; 3 s leaves room for slower passes (many
+# prompts, a GPU shared with OBS). A frame that waited longer than this for
+# the sidecar (behind a restart) is skipped without a pass.
 max_result_age_s = 3.0
 # The engine gives up on a request after this long, counted from when the
 # source's worker got it; it must exceed request_timeout_s (checked).
 timeout_s = 10.0
 # Track observations keep a subject alive only while SAM saw it within this
-# long: three passes at 1 Hz. Raise it if a speaker SAM misses now and then
-# keeps going lost.
+# long, counted between the source's own passes: three passes at 1 Hz. With
+# N sources taking turns, keep it at about three of their intervals (about
+# 3 x N x the pass time), or one missed pass loses the subject. Raise it if
+# a speaker SAM misses now and then keeps going lost.
 max_undetected_s = 3.0
 
 [director]
