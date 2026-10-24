@@ -34,7 +34,8 @@ pub struct Cli {
     /// Run without a window for `--seconds` and print a JSON summary.
     #[arg(long)]
     pub headless: bool,
-    /// Length of a headless run in seconds (after recording has started).
+    /// Length of a headless run in seconds (after the detector has loaded
+    /// and recording has started).
     #[arg(
         long,
         value_name = "N",

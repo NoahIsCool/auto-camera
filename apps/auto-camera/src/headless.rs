@@ -9,36 +9,56 @@
 //! 2. **Signal**: wait for a wide shot to become available. A headless run
 //!    has no operator, so unless the director is in Auto mode (which
 //!    establishes a shot by itself) the first wide is cut to program.
-//! 3. **Output**: with `--record`, start the program output and wait until
+//! 3. **Detector**: when a source has discovery, wait until no source's
+//!    detector is preparing, for at most [`DETECTOR_TIMEOUT`] (a cold
+//!    CoreML compile of OWLv2 takes two to three minutes, and every new
+//!    build pays CoreML's own part of it again). Timing the run from the
+//!    first wide would spend a short run on the load, and ending the
+//!    process mid-compile would throw the compile away, since CoreML keeps
+//!    only a compile that finished; so the run waits, and fails with
+//!    "still loading" rather than reporting a detector that never ran.
+//! 4. **Output**: with `--record`, start the program output and wait until
 //!    ffmpeg runs. The output also streams when the config sets an RTMP URL.
-//! 4. **Run** for the requested time, sampling snapshots to log program
-//!    changes and the largest subject count.
-//! 5. **Stop** the output and wait for the recording to be finalized, then
+//! 5. **Run** for the requested time, sampling snapshots to log program
+//!    changes, the largest subject count and each shot's crop size range.
+//! 6. **Stop** the output and wait for the recording to be finalized, then
 //!    shut the engine down, which joins every thread and reaps ffmpeg.
 //!
-//! The summary is always produced; `ok` is false and `error` says why when a
-//! phase failed. It reports how each query's prompt was read (what the
-//! detector was asked for, the shot words' sizes, the basis and any
-//! notices), so a prompt that does not mean what the operator thought shows
-//! up in a headless run too. Program changes are logged from samples taken every
-//! [`SAMPLE`], so two changes closer together than that show as one.
+//! The summary ([`summary`]) is always produced; `ok` is false and `error`
+//! says why when a phase failed. It reports how each query's prompt was
+//! read (what the detector was asked for, the shot words' sizes, the basis
+//! and any notices), so a prompt that does not mean what the operator
+//! thought shows up in a headless run too. Snapshots are sampled every
+//! [`SAMPLE`] from the detector phase on, so two program changes closer
+//! together than that show as one, and a crop range can miss a single
+//! tick's extreme.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ac_core::{Basis, ShotId, ShotSize};
+use ac_core::{Rect, ShotId};
 use ac_director::{CandidateKind, ContentProfile, DirectorMode};
 use ac_engine::{
     Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot, MonitorSettings,
-    OutputState, ShotStatus, StudioConfig,
+    OutputState, StudioConfig,
 };
-use serde::Serialize;
+
+mod summary;
+
+pub use summary::{
+    DirectorSummary, OutputSummary, ProgramSummary, QuerySummary, ShotSummary, SourceSummary,
+    SubjectSummary, Summary, TimingSummary,
+};
 
 /// Interval between snapshot samples.
 const SAMPLE: Duration = Duration::from_millis(20);
 /// Longest wait for a source to deliver its first frames.
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Longest wait for the detectors to load: a cold CoreML compile of OWLv2
+/// took 140 to 176 s on an M3 Max, so this leaves room for a slower Mac.
+const DETECTOR_TIMEOUT: Duration = Duration::from_secs(300);
 /// Longest wait for ffmpeg to start.
 const OUTPUT_START_TIMEOUT: Duration = Duration::from_secs(15);
 /// Longest wait for the recording to be finalized.
@@ -47,185 +67,13 @@ const OUTPUT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// What a headless run does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadlessOptions {
-    /// Length of the run, counted from when recording started (or from when
-    /// the first shot was available, without a recording).
+    /// Length of the run, counted from when recording started (or, without
+    /// a recording, from when the first shot was available and every
+    /// detector had loaded); the wait for a loading detector is not part
+    /// of it.
     pub seconds: f64,
     /// Program recording path; must not exist.
     pub record: Option<PathBuf>,
-}
-
-/// The JSON summary of a run.
-#[derive(Debug, Clone, Serialize)]
-pub struct Summary {
-    /// Every phase succeeded.
-    pub ok: bool,
-    /// Why the run failed.
-    pub error: Option<String>,
-    /// Config file used.
-    pub config: PathBuf,
-    /// Requested run length.
-    pub seconds: f64,
-    /// Wall-clock length of the whole run, setup and shutdown included.
-    pub wall_seconds: f64,
-    /// Ticks run.
-    pub ticks: u64,
-    /// Master-clock time at the end.
-    pub media_seconds: f64,
-    /// Threads joined at shutdown (discovery workers, output helpers).
-    pub threads_joined: usize,
-    /// Per-source counters.
-    pub sources: Vec<SourceSummary>,
-    /// The queries and how their prompts were read.
-    pub queries: Vec<QuerySummary>,
-    /// Largest number of live subjects seen.
-    pub max_subjects: usize,
-    /// Shots at the end of the run.
-    pub shots: Vec<ShotSummary>,
-    /// Program shot changes.
-    pub program: ProgramSummary,
-    /// Auto-director state at the end.
-    pub director: DirectorSummary,
-    /// Master-clock timing.
-    pub timing: TimingSummary,
-    /// The output session, when one was started.
-    pub output: Option<OutputSummary>,
-    /// Shots that should have been on program but were drawn black.
-    pub render_issues: Vec<String>,
-}
-
-/// One source in the summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct SourceSummary {
-    /// Source id.
-    pub id: String,
-    /// Picture size.
-    pub size: [u32; 2],
-    /// Frame rate measured over the last second.
-    pub fps: f64,
-    /// New frames seen.
-    pub frames: u64,
-    /// Frames replaced in the mailbox before the engine saw them.
-    pub missed: u64,
-    /// Discovery requests sent.
-    pub discovery_requests: u64,
-    /// Discovery results applied.
-    pub discovery_applied: u64,
-    /// Discovery results dropped as stale.
-    pub discovery_stale: u64,
-    /// Detector errors.
-    pub discovery_errors: u64,
-    /// Requests abandoned after the timeout.
-    pub discovery_timeouts: u64,
-    /// Latency of the newest discovery result, in milliseconds.
-    pub discovery_last_ms: Option<f64>,
-    /// Newest detector error.
-    pub discovery_last_error: Option<String>,
-    /// Subjects admitted over the run.
-    pub subjects_created: u64,
-    /// Subjects retired over the run.
-    pub subjects_retired: u64,
-}
-
-/// One query in the summary: its prompt as read when it was created.
-#[derive(Debug, Clone, Serialize)]
-pub struct QuerySummary {
-    /// Query id.
-    pub id: String,
-    /// Operator-facing name.
-    pub name: String,
-    /// The prompt as the operator typed it.
-    pub prompt: String,
-    /// What the detector is asked for.
-    pub detector_phrase: String,
-    /// The prompt was sent as typed, without reading shot or role words.
-    pub literal: bool,
-    /// Shot sizes the prompt's shot words name, in typed order.
-    pub shot_words: Vec<ShotSize>,
-    /// Ids of the presets its subjects are framed with.
-    pub presets: Vec<String>,
-    /// Person or object.
-    pub basis: Basis,
-    /// The operator window's parse line.
-    pub parse: String,
-    /// The parse's notices, one sentence each.
-    pub notes: Vec<String>,
-}
-
-/// One shot in the summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct ShotSummary {
-    /// Shot id.
-    pub id: String,
-    /// Operator-facing name.
-    pub name: String,
-    /// Health.
-    pub status: ShotStatus,
-    /// Director quality in `0..=1`.
-    pub quality: f32,
-    /// The preset's zoom ceiling keeps the shot looser than its size.
-    pub limited_by_zoom: bool,
-}
-
-/// Program changes in the summary.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct ProgramSummary {
-    /// The shot on program at the end.
-    pub last: Option<String>,
-    /// Program changes counted by the engine.
-    pub changes: u64,
-    /// Sampled changes: master-clock seconds and the new shot.
-    pub log: Vec<(f64, String)>,
-}
-
-/// Director state in the summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct DirectorSummary {
-    /// Autonomy mode.
-    pub mode: DirectorMode,
-    /// Content profile.
-    pub profile: ContentProfile,
-    /// Takes requested.
-    pub takes: u64,
-    /// The latest reason, as text.
-    pub reason: String,
-}
-
-/// Timing in the summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct TimingSummary {
-    /// Tick interval.
-    pub budget_ms: f64,
-    /// Moving average of the tick processing time.
-    pub avg_ms: f64,
-    /// Longest tick.
-    pub max_ms: f64,
-    /// Ticks that started late.
-    pub late_ticks: u64,
-    /// Ticks skipped after falling behind.
-    pub skipped_ticks: u64,
-}
-
-/// The output session in the summary.
-#[derive(Debug, Clone, Serialize)]
-pub struct OutputSummary {
-    /// Final lifecycle state.
-    pub state: String,
-    /// Recording path.
-    pub record_path: Option<PathBuf>,
-    /// RTMP URL, stream key redacted.
-    pub rtmp_url: Option<String>,
-    /// Program frames handed to the encoder.
-    pub frames_pushed: u64,
-    /// Frames written to ffmpeg.
-    pub frames_written: u64,
-    /// Frames dropped because the encoder queue was full.
-    pub frames_dropped: u64,
-    /// ffmpeg's encoder.
-    pub encoder: Option<String>,
-    /// ffmpeg's exit code.
-    pub exit_code: Option<i32>,
-    /// Newest ffmpeg error line.
-    pub last_error: Option<String>,
 }
 
 /// Runs `config` headless on the wall clock; see the module docs.
@@ -271,13 +119,18 @@ pub fn run_with(
 /// `why`, or why the engine died when it did (a dead engine also makes
 /// every wait end early).
 fn failure(h: &EngineHandle, why: &str) -> String {
-    match &h.snapshot().fatal {
+    failure_in(&h.snapshot(), why)
+}
+
+/// `why`, or why the engine of `snap` died when it did.
+fn failure_in(snap: &EngineSnapshot, why: &str) -> String {
+    match &snap.fatal {
         Some(fatal) => format!("{why}: {fatal}"),
         None => why.to_owned(),
     }
 }
 
-/// Phases 2 to 5; returns why the run failed.
+/// Phases 2 to 6; returns why the run failed.
 fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> Result<(), String> {
     let h = engine.handle();
     let snap = h
@@ -290,6 +143,7 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
             .and_then(|_| h.send(EngineCommand::Cut))
             .map_err(|e| format!("cannot put a wide on program: {e}"))?;
     }
+    await_detectors(|| h.snapshot(), sampler, DETECTOR_TIMEOUT)?;
     if let Some(record) = &options.record {
         h.send(EngineCommand::StartOutput {
             rtmp_url: None,
@@ -335,6 +189,33 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
     Ok(())
 }
 
+/// Phase 3: samples `snapshot` until no source's detector is preparing,
+/// for at most `limit` (real time); see the module docs.
+fn await_detectors(
+    mut snapshot: impl FnMut() -> Arc<EngineSnapshot>,
+    sampler: &mut Sampler,
+    limit: Duration,
+) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        let snap = snapshot();
+        sampler.record(&snap);
+        if !snap.running {
+            return Err(failure_in(&snap, "the engine stopped early"));
+        }
+        if !snap.sources.iter().any(|s| s.discovery.preparing) {
+            return Ok(());
+        }
+        if started.elapsed() >= limit {
+            return Err(format!(
+                "the detector was still loading after {} s",
+                limit.as_secs_f64()
+            ));
+        }
+        std::thread::sleep(SAMPLE);
+    }
+}
+
 /// The first available wide shot.
 fn first_wide(snap: &EngineSnapshot) -> Option<ShotId> {
     snap.shots
@@ -352,6 +233,8 @@ struct Sampler {
     max_subjects: usize,
     /// Program changes seen.
     log: Vec<(f64, String)>,
+    /// Crop size range of every shot seen, by shot id.
+    crops: HashMap<String, CropRange>,
 }
 
 impl Sampler {
@@ -366,7 +249,38 @@ impl Sampler {
         {
             self.log.push((snap.media_time.as_secs_f64(), p.0.clone()));
         }
+        for shot in &snap.shots {
+            self.crops
+                .entry(shot.id.0.clone())
+                .and_modify(|r| r.widen(shot.crop))
+                .or_insert_with(|| CropRange::new(shot.crop));
+        }
         self.last = Some(snap.clone());
+    }
+}
+
+/// The smallest and largest crop width and height a shot was seen with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CropRange {
+    /// Narrowest and widest, as fractions of source width.
+    width: [f64; 2],
+    /// Shortest and tallest, as fractions of source height.
+    height: [f64; 2],
+}
+
+impl CropRange {
+    /// The range of a shot seen once, with `crop`.
+    fn new(crop: Rect) -> Self {
+        Self {
+            width: [crop.w, crop.w],
+            height: [crop.h, crop.h],
+        }
+    }
+
+    /// Takes in another sighting, with `crop`.
+    fn widen(&mut self, crop: Rect) {
+        self.width = [self.width[0].min(crop.w), self.width[1].max(crop.w)];
+        self.height = [self.height[0].min(crop.h), self.height[1].max(crop.h)];
     }
 }
 
@@ -401,7 +315,9 @@ fn failed_to_start(
 }
 
 /// Builds the summary from the last running snapshot (shots, subjects and
-/// director) and the final one (output and counters).
+/// director), the final one (output and counters, including whether a
+/// detector was still preparing when the run ended) and the samples (crop
+/// ranges).
 #[allow(clippy::too_many_arguments)]
 fn summarize(
     path: &Path,
@@ -424,6 +340,8 @@ fn summarize(
                     fps: round(v.fps, 2),
                     frames: v.frames,
                     missed: v.missed,
+                    discovery_preparing: v.discovery.preparing,
+                    detector_ready_s: v.discovery.ready_after.map(|d| round(d.as_secs_f64(), 2)),
                     discovery_requests: v.discovery.requests,
                     discovery_applied: v.discovery.applied,
                     discovery_stale: v.discovery.stale,
@@ -444,12 +362,24 @@ fn summarize(
         .map(|s| {
             s.shots
                 .iter()
-                .map(|v| ShotSummary {
-                    id: v.id.0.clone(),
-                    name: v.name.clone(),
-                    status: v.status,
-                    quality: (v.quality * 100.0).round() / 100.0,
-                    limited_by_zoom: v.limited_by_zoom,
+                .map(|v| {
+                    // A shot only in the final snapshot was never sampled.
+                    let crop = sampler
+                        .crops
+                        .get(&v.id.0)
+                        .copied()
+                        .unwrap_or_else(|| CropRange::new(v.crop));
+                    ShotSummary {
+                        id: v.id.0.clone(),
+                        name: v.name.clone(),
+                        status: v.status,
+                        quality: (v.quality * 100.0).round() / 100.0,
+                        limited_by_zoom: v.limited_by_zoom,
+                        crop_width_min: round(crop.width[0], 4),
+                        crop_width_max: round(crop.width[1], 4),
+                        crop_height_min: round(crop.height[0], 4),
+                        crop_height_max: round(crop.height[1], 4),
+                    }
                 })
                 .collect()
         })
@@ -475,6 +405,21 @@ fn summarize(
                         .filter(|w| !w.is_error())
                         .map(ToString::to_string)
                         .collect(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let subjects = last
+        .map(|s| {
+            s.subjects
+                .iter()
+                .map(|v| SubjectSummary {
+                    id: v.id.0,
+                    source: v.source.0.clone(),
+                    query: v.query.0.clone(),
+                    aliases: v.aliases.iter().map(|q| q.0.clone()).collect(),
+                    state: v.state,
+                    bbox: [v.bbox.x, v.bbox.y, v.bbox.w, v.bbox.h].map(|c| round(c, 4)),
                 })
                 .collect()
         })
@@ -524,6 +469,7 @@ fn summarize(
         queries,
         max_subjects: sampler.max_subjects,
         shots,
+        subjects,
         program: ProgramSummary {
             last: last.and_then(|s| s.switcher.program.as_ref().map(|p| p.0.clone())),
             changes: end.map_or(0, |s| s.program_changes),

@@ -1,8 +1,8 @@
 //! Deterministic tests of the engine core: no threads, no clocks.
 //!
-//! A [`Rig`] plays a synthetic pattern into the core one tick at a time and
-//! runs discovery inline, answering each request on the next tick, which is
-//! what the runtime does with a fast detector.
+//! A [`Rig`] plays a synthetic pattern (or a still of it) into the core one
+//! tick at a time and runs discovery inline, answering each request on the
+//! next tick, which is what the runtime does with a fast detector.
 
 use std::time::Duration;
 
@@ -76,6 +76,11 @@ struct Rig {
     advancing: bool,
     /// Overrides the picture (for example a blank frame).
     picture: Option<SyntheticPattern>,
+    /// Freezes the picture: every frame repeats these pixels under its own
+    /// sequence number and PTS, so the subjects in it stand still.
+    still: Option<VideoFrame>,
+    /// Reports the detector as still loading.
+    loading: bool,
 }
 
 impl Rig {
@@ -107,6 +112,8 @@ impl Rig {
             seq: 0,
             advancing: true,
             picture: None,
+            still: None,
+            loading: false,
         }
     }
 
@@ -118,10 +125,15 @@ impl Rig {
 
     /// The frame the source delivers now.
     fn frame(&self) -> VideoFrame {
-        self.picture
-            .as_ref()
-            .unwrap_or(&self.pattern)
-            .frame(&cam(), self.seq)
+        let pattern = self.picture.as_ref().unwrap_or(&self.pattern);
+        match &self.still {
+            Some(still) => VideoFrame {
+                seq: self.seq,
+                pts: pattern.frame_rate().pts(self.seq),
+                ..still.clone()
+            },
+            None => pattern.frame(&cam(), self.seq),
+        }
     }
 
     /// One tick: feed the frame, apply last tick's results, answer requests.
@@ -131,6 +143,7 @@ impl Rig {
         let feed = SourceFeed {
             state: SourceState::Running,
             frame: Some(frame),
+            detector_loading: self.loading,
         };
         let results = std::mem::take(&mut self.pending);
         let out = self.core.tick(now, &[feed], results);

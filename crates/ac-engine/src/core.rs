@@ -26,6 +26,16 @@
 //!    for each query's parsed detector phrase ([`Query::detector_phrase`]),
 //!    not its prompt.
 //!
+//! A source whose detector is still loading (the runtime says so in its
+//! [`SourceFeed`]) is *preparing*: it gets no requests and counts no
+//! timeouts, since a detector that has not loaded cannot answer. The tick
+//! on which loading is reported over makes it due at once, so the newest
+//! frame goes out on that same tick, and records that tick's master-clock
+//! time as [`DiscoveryStats::ready_after`]. A source starts preparing when
+//! it has a detector, so the snapshot taken before the first tick already
+//! says so. The loading state is tick input like the frames, so the core
+//! stays a deterministic function of its inputs.
+//!
 //! Given the same configuration, frames, results and commands, the core
 //! produces the same program, which is what the deterministic tests rely on.
 //! Commands are applied between ticks by [`EngineCore::apply`].
@@ -66,6 +76,9 @@ pub struct SourceFeed {
     pub state: SourceState,
     /// The source's newest frame (possibly the same as last tick).
     pub frame: Option<VideoFrame>,
+    /// The source's detector is still loading (false without a detector);
+    /// see the module docs.
+    pub detector_loading: bool,
 }
 
 /// What a tick produced for the runtime.
@@ -90,8 +103,38 @@ struct DiscoveryState {
     last_requested: Option<u64>,
     /// Sequence number of the newest frame whose results were applied.
     last_applied: Option<u64>,
-    /// Counters.
+    /// Counters, and whether the detector is still preparing.
     stats: DiscoveryStats,
+}
+
+impl DiscoveryState {
+    /// The state of a source that runs discovery when `enabled`: it
+    /// prepares until a tick says its detector has loaded.
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            stats: DiscoveryStats {
+                preparing: enabled,
+                ..DiscoveryStats::default()
+            },
+            ..Self::default()
+        }
+    }
+
+    /// Takes in whether the detector is still `loading` at `now`; when it
+    /// stops, the source is ready and due at once (see the module docs).
+    fn note_loading(&mut self, loading: bool, now: Duration) {
+        if !self.enabled {
+            return;
+        }
+        if loading {
+            self.stats.preparing = true;
+        } else if self.stats.preparing {
+            self.stats.preparing = false;
+            self.stats.ready_after = Some(now);
+            self.next_due = now;
+        }
+    }
 }
 
 /// One source as the core sees it.
@@ -226,10 +269,7 @@ impl EngineCore {
                 frames: 0,
                 missed: 0,
                 rate: RateMeter::new(Duration::from_secs(1)),
-                discovery: DiscoveryState {
-                    enabled: detectors.get(i).copied().unwrap_or(false),
-                    ..DiscoveryState::default()
-                },
+                discovery: DiscoveryState::new(detectors.get(i).copied().unwrap_or(false)),
             });
         }
         let queries = config.build_queries().map_err(|e| e.to_string())?;
@@ -390,6 +430,7 @@ impl EngineCore {
         let now = self.now;
         let s = &mut self.sources[i];
         s.state = feed.state;
+        s.discovery.note_loading(feed.detector_loading, now);
         let Some(frame) = &feed.frame else {
             return;
         };
@@ -405,7 +446,8 @@ impl EngineCore {
         s.vision.on_frame(frame);
     }
 
-    /// Issues discovery requests for sources that are due.
+    /// Issues discovery requests for sources that are due and not
+    /// preparing.
     fn schedule_discovery(&mut self) -> Vec<(usize, DiscoveryRequest)> {
         let now = self.now;
         let timeout = self.discovery.timeout();
@@ -423,7 +465,7 @@ impl EngineCore {
         let mut out = Vec::new();
         for (i, s) in self.sources.iter_mut().enumerate() {
             let d = &mut s.discovery;
-            if !d.enabled {
+            if !d.enabled || d.stats.preparing {
                 continue;
             }
             if let Some(since) = d.in_flight_since {

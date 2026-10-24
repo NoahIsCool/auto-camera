@@ -24,19 +24,31 @@
 //! fails `Engine::start`), and returns a [`DetectorLoader`] that the worker
 //! runs first. Loading a real model can take minutes (CoreML compiles OWLv2
 //! on first use); done on the engine thread it would hold the window and the
-//! first picture back that long while the sources ran unread. Until the
-//! detector is ready, requests wait in the slot (each replaced by the newest)
-//! and the engine counts them as timed out after `discovery.timeout_s`; a
-//! loader that fails turns every later request into an error result carrying
-//! its message. Stopping a worker that is still loading does not wait for
-//! the load: the thread is detached and exits by itself when the load ends
-//! (its slot is closed by then), so quitting is never held up by a compile.
-//! A worker that has loaded is joined, after any pass in progress.
+//! first picture back that long while the sources ran unread.
+//!
+//! While the loader runs, the source is **preparing**: the worker could not
+//! take a request yet, so the engine sends none and counts no timeouts (a
+//! compile is not a hung detector), and the window and the headless summary
+//! say "preparing detector" instead. When the loader returns, the worker sends
+//! one *loaded* message on a channel of its own;
+//! [`DiscoveryWorker::is_loading`] reads it on the engine thread, and the
+//! runtime hands the answer to the core with each tick's
+//! [`crate::core::SourceFeed`]. The core then makes the source due at once,
+//! so the first request carries the newest frame (not one queued during the
+//! load, which would arrive too old to apply), and notes the master-clock
+//! time it became ready. A message rather than a flag both threads touch:
+//! the engine-side handle is the one owner of the loading state, the worker
+//! only reports, and the results channel stays a channel of passes. A loader
+//! that fails also ends preparing, and turns every later request into an
+//! error result carrying its message, so the failure shows as the newest
+//! detector error. Stopping a worker that is still loading does not wait
+//! for the load: the thread is detached and exits by itself when the load
+//! ends (its slot is closed by then), so quitting is never held up by a
+//! compile. A worker that has loaded is joined, after any pass in progress.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -225,8 +237,10 @@ pub struct DiscoveryWorker {
     /// The thread, joined (or detached while loading) by
     /// [`DiscoveryWorker::stop`].
     thread: Option<JoinHandle<()>>,
-    /// True while the thread is still running its loader.
-    loading: Arc<AtomicBool>,
+    /// The thread's one message that its loader returned.
+    loaded: Receiver<()>,
+    /// True until that message arrives (or the thread is gone).
+    loading: bool,
 }
 
 impl DiscoveryWorker {
@@ -240,15 +254,15 @@ impl DiscoveryWorker {
     ) -> std::io::Result<Self> {
         let slot: Arc<Slot<DiscoveryRequest>> = Arc::new(Slot::new());
         let inbox = slot.clone();
-        let loading = Arc::new(AtomicBool::new(true));
-        let loaded = loading.clone();
+        let (loaded_tx, loaded) = channel();
         let thread = std::thread::Builder::new()
             .name(format!("ac-discovery-{name}"))
             .spawn(move || {
                 let mut detector = catch_unwind(AssertUnwindSafe(loader))
                     .unwrap_or_else(|_| Err("loading the detector panicked".into()))
                     .map_err(|e| format!("the detector failed to load: {e}"));
-                loaded.store(false, Ordering::Release);
+                // The handle may be gone already (stopped while loading).
+                let _ = loaded_tx.send(());
                 loop {
                     let request = match inbox.take(WORKER_POLL) {
                         Ok(r) => r,
@@ -280,8 +294,21 @@ impl DiscoveryWorker {
         Ok(Self {
             slot,
             thread: Some(thread),
-            loading,
+            loaded,
+            loading: true,
         })
+    }
+
+    /// True while the worker is still running its loader; reads the loaded
+    /// message without waiting (see the module docs).
+    pub fn is_loading(&mut self) -> bool {
+        if self.loading {
+            match self.loaded.try_recv() {
+                Ok(()) | Err(TryRecvError::Disconnected) => self.loading = false,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        self.loading
     }
 
     /// Hands the worker a request, replacing one it has not started yet.
@@ -297,7 +324,7 @@ impl DiscoveryWorker {
         let Some(t) = self.thread.take() else {
             return false;
         };
-        if self.loading.load(Ordering::Acquire) {
+        if self.is_loading() {
             return false;
         }
         t.join().is_ok()
@@ -319,6 +346,15 @@ mod tests {
     /// `v` milliseconds.
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v)
+    }
+
+    /// Polls `w` until its loader has returned (at most ten seconds).
+    fn wait_loaded(w: &mut DiscoveryWorker) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while w.is_loading() {
+            assert!(Instant::now() < deadline, "the loader never returned");
+            std::thread::sleep(ms(1));
+        }
     }
 
     #[test]
@@ -465,11 +501,48 @@ mod tests {
         let (tx, _rx) = channel();
         let loader: DetectorLoader = Box::new(|| Err("none".into()));
         let mut w = DiscoveryWorker::spawn(0, "t", loader, tx).unwrap();
-        while w.loading.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_loaded(&mut w);
         assert!(w.stop());
         assert!(!w.stop(), "already stopped");
+    }
+
+    #[test]
+    fn a_worker_is_loading_until_its_loader_returns() {
+        let (tx, rx) = channel();
+        let (release, gate) = channel::<()>();
+        let detector = synthetic_detector(SyntheticPattern::new(16, 9, 30.0, 1).unwrap(), 0.5);
+        let loader: DetectorLoader = Box::new(move || {
+            gate.recv_timeout(Duration::from_secs(30))
+                .map_err(|e| e.to_string())?;
+            Ok(Box::new(detector) as Box<dyn Detector>)
+        });
+        let mut w = DiscoveryWorker::spawn(0, "t", loader, tx).unwrap();
+        let p = SyntheticPattern::new(16, 9, 30.0, 1).unwrap();
+        w.submit(DiscoveryRequest {
+            frame: p.frame(&SourceId("s".into()), 1),
+            queries: vec![PromptQuery::new("q", "thing")],
+        });
+        for _ in 0..20 {
+            assert!(w.is_loading(), "the gate is still shut");
+            std::thread::sleep(ms(5));
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "no pass runs before the detector is ready"
+        );
+        release.send(()).unwrap();
+        wait_loaded(&mut w);
+        assert!(!w.is_loading(), "ready stays ready");
+        let r = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!((r.frame.seq, r.outcome.unwrap().len()), (1, 1));
+        assert!(w.stop(), "a loaded worker is joined");
+
+        // A ready-made detector is ready as soon as its thread runs.
+        let (tx, _rx) = channel();
+        let detector = synthetic_detector(SyntheticPattern::new(16, 9, 30.0, 0).unwrap(), 0.5);
+        let mut w = DiscoveryWorker::spawn(0, "t", ready(Box::new(detector)), tx).unwrap();
+        wait_loaded(&mut w);
+        assert!(w.stop());
     }
 
     #[test]
