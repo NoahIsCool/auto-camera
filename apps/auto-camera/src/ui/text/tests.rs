@@ -338,6 +338,57 @@ fn the_status_bar_counts_detector_failures_and_warns() {
 }
 
 #[test]
+fn a_preparing_detector_reads_as_preparing_not_as_not_answering() {
+    use ac_engine::PassOutcome;
+    let mut snap = preparing_snapshot();
+    let q = snap.queries[0].clone();
+    assert!(snap.sources[0].discovery_enabled && snap.sources[0].discovery.preparing);
+    let preparing = (
+        PREPARING.to_string(),
+        Tone::Weak,
+        "loading the model; the window and program keep running".to_string(),
+    );
+    assert_eq!(match_lines(&snap, &q), std::slice::from_ref(&preparing));
+    assert_eq!(source_tone(&snap.sources[0]), Tone::Plain, "not amber");
+    // Preparing wins over a timeout on record, which is what a load used
+    // to look like.
+    let mut timed_out = snap.clone();
+    let d = &mut timed_out.sources[0].discovery;
+    d.timeouts = 3;
+    d.last_outcome = Some(PassOutcome::TimedOut);
+    assert_eq!(
+        match_lines(&timed_out, &q),
+        std::slice::from_ref(&preparing)
+    );
+    // A shared detector starting: every source prepares, and one line
+    // says so.
+    let mut second = snap.sources[0].clone();
+    second.id = ac_core::SourceId("pulpit".into());
+    second.name = "Pulpit".into();
+    snap.sources.push(second);
+    assert_eq!(match_lines(&snap, &q), [preparing]);
+    // Detectors of their own load apart: each source says where it is.
+    snap.sources[0].discovery.preparing = false;
+    let lines = match_lines(&snap, &q);
+    let texts: Vec<(&str, Tone)> = lines.iter().map(|l| (l.0.as_str(), l.1)).collect();
+    assert_eq!(
+        texts,
+        [
+            ("stage: no detector pass yet", Tone::Weak),
+            ("Pulpit: preparing the detector", Tone::Weak),
+        ]
+    );
+    // Once it is ready, a request that gets no answer is amber again.
+    let d = &mut snap.sources[1].discovery;
+    d.preparing = false;
+    d.timeouts = 1;
+    d.last_outcome = Some(PassOutcome::TimedOut);
+    let lines = match_lines(&snap, &q);
+    assert_eq!(lines[1].0, "Pulpit: detector not answering (1 timed out)");
+    assert_eq!(lines[1].1, Tone::Warning);
+}
+
+#[test]
 fn prompt_feedback_lines_name_sources_only_when_there_are_several() {
     let mut snap = snapshot();
     let mut q = snap.queries[0].clone();

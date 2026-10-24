@@ -162,6 +162,12 @@ pub const TOO_OLD: &str = "detector answers too old";
 /// Prompt feedback for a source whose newest request got no answer.
 pub const NOT_ANSWERING: &str = "detector not answering";
 
+/// Prompt feedback for a source whose detector is still loading.
+pub const PREPARING: &str = "preparing the detector";
+
+/// The hover text of [`PREPARING`].
+pub const PREPARING_HOVER: &str = "loading the model; the window and program keep running";
+
 /// How a prompt feedback line is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
@@ -169,7 +175,8 @@ pub enum Tone {
     Plain,
     /// Nothing usable was found, or the detector is failing (amber).
     Warning,
-    /// No pass has looked for the query yet.
+    /// No pass has looked for the query yet, or the detector is still
+    /// preparing.
     Weak,
 }
 
@@ -221,12 +228,17 @@ fn last_pass(m: Option<&MatchView>) -> String {
     }
 }
 
-/// One source's feedback for a query, with its tone and hover text. When
-/// the source's newest request failed, came back too late or got no
-/// answer, that is what the line says (amber, with the reason on hover),
-/// since the last applied pass's numbers would look current.
+/// One source's feedback for a query, with its tone and hover text. While
+/// the source's detector is still loading, the line says [`PREPARING`]
+/// (dimmed: a load is not a failure, and no request goes out until it
+/// ends). When the source's newest request failed, came back too late or
+/// got no answer, that is what the line says (amber, with the reason on
+/// hover), since the last applied pass's numbers would look current.
 fn source_feedback(source: &SourceView, m: Option<&MatchView>) -> (String, Tone, String) {
     let d = &source.discovery;
+    if d.preparing {
+        return (PREPARING.into(), Tone::Weak, PREPARING_HOVER.into());
+    }
     let failing = match d.last_outcome {
         Some(PassOutcome::Failed) => Some((
             DETECTOR_ERROR.to_owned(),
@@ -240,7 +252,9 @@ fn source_feedback(source: &SourceView, m: Option<&MatchView>) -> (String, Tone,
         )),
         Some(PassOutcome::TimedOut) => Some((
             format!("{NOT_ANSWERING} ({} timed out)", d.timeouts),
-            "no answer within discovery.timeout_s (a model may still be loading)".to_owned(),
+            "no answer within discovery.timeout_s (a restarted sidecar may still be loading \
+             its model)"
+                .to_owned(),
         )),
         Some(PassOutcome::Applied) | None => None,
     };
@@ -265,17 +279,31 @@ fn source_feedback(source: &SourceView, m: Option<&MatchView>) -> (String, Tone,
 /// A query row's prompt feedback: one line per source that runs discovery,
 /// named after the source when the studio has several, with how to draw
 /// it and its hover text (the frame the pass looked at, or why the
-/// detector is failing there). When no source has anything to say yet, a
-/// single [`NO_PASS_YET`] line; when discovery is off everywhere, nothing.
+/// detector is failing there). When every source has the same nothing to
+/// say yet ([`NO_PASS_YET`], or [`PREPARING`] while a shared detector
+/// starts), a single line; when discovery is off everywhere, nothing.
 pub fn match_lines(snap: &EngineSnapshot, q: &QueryView) -> Vec<(String, Tone, String)> {
     let several = snap.sources.len() > 1;
-    let lines: Vec<(String, Tone, String)> = snap
+    let lines: Vec<(&SourceView, (String, Tone, String))> = snap
         .sources
         .iter()
         .filter(|s| s.discovery_enabled)
         .map(|s| {
             let m = q.matches.iter().find(|m| m.source == s.id);
-            let (text, tone, hover) = source_feedback(s, m);
+            (s, source_feedback(s, m))
+        })
+        .collect();
+    if let Some((_, first)) = lines.first()
+        && lines.len() > 1
+        && lines
+            .iter()
+            .all(|(_, line)| line.1 == Tone::Weak && line.0 == first.0)
+    {
+        return vec![first.clone()];
+    }
+    lines
+        .into_iter()
+        .map(|(s, (text, tone, hover))| {
             let text = if several {
                 format!("{}: {text}", s.name)
             } else {
@@ -283,11 +311,7 @@ pub fn match_lines(snap: &EngineSnapshot, q: &QueryView) -> Vec<(String, Tone, S
             };
             (text, tone, hover)
         })
-        .collect();
-    if lines.len() > 1 && lines.iter().all(|(_, tone, _)| *tone == Tone::Weak) {
-        return vec![(NO_PASS_YET.into(), Tone::Weak, String::new())];
-    }
-    lines
+        .collect()
 }
 
 /// One source's health for the status bar at master-clock `media_time`:

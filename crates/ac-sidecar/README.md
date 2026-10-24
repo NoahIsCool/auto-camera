@@ -220,9 +220,11 @@ every job:
 `logs()` returns the recent stderr lines, with the host's own `[host]` notes
 on starts, `hello`s and exits. Phase 2's exit criterion of "0 sidecar
 restarts" in a 30-minute run reads as `failures == 0` (equivalently
-`spawns == 1`). The engine does not publish this status yet: in the window
-and the headless summary, a restart shows only as a discovery error or
-timeout on the source whose request failed.
+`spawns == 1`). The engine does not publish this status yet. Only the wait
+for the first `hello` shows, as every source's preparing state (the
+window's "preparing the detector", the headless summary's
+`discovery_preparing` and `detector_ready_s`); a restart shows only as a
+discovery error or timeout on the source whose request failed.
 
 ## Tests
 

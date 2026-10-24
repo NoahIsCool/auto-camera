@@ -1,7 +1,7 @@
 //! Sources taking turns on a shared detector (the sidecar): one request in
 //! flight for the whole studio, the source that waited longest goes next,
 //! each with its newest frame, so answers are one pass old however many
-//! sources share the process.
+//! sources share the process; and none of them until the process is ready.
 
 use super::*;
 use crate::config::{SidecarSettings, SourceEntry};
@@ -21,6 +21,8 @@ struct Studio {
     most_in_flight: usize,
     /// Every request sent: (time, source).
     sent: Vec<(Duration, usize)>,
+    /// What each source's feed says about its detector loading.
+    loading: Vec<bool>,
 }
 
 impl Studio {
@@ -55,6 +57,7 @@ impl Studio {
             passes: Vec::new(),
             most_in_flight: 0,
             sent: Vec::new(),
+            loading: vec![false; n],
         }
     }
 
@@ -67,10 +70,11 @@ impl Studio {
             let feeds: Vec<SourceFeed> = self
                 .ids
                 .iter()
-                .map(|id| SourceFeed {
+                .zip(&self.loading)
+                .map(|(id, &loading)| SourceFeed {
                     state: SourceState::Running,
                     frame: Some(self.pattern.frame(id, tick)),
-                    detector_loading: false,
+                    detector_loading: loading,
                 })
                 .collect();
             let (done, running): (Vec<_>, Vec<_>) = std::mem::take(&mut self.passes)
@@ -131,6 +135,43 @@ fn sources_take_turns_and_every_answer_is_fresh_enough() {
         assert_eq!(d.stale, 0, "source {i}: {d:?}");
         assert_eq!(d.timeouts + d.errors, 0, "source {i}: {d:?}");
         assert!(d.applied >= 5, "source {i}: {d:?}");
+    }
+}
+
+#[test]
+fn sources_take_turns_only_once_the_shared_detector_is_ready() {
+    // The sidecar is still starting: every source's loader waits for its
+    // hello. Well past discovery.timeout_s, nothing is sent or timed out.
+    let mut studio = Studio::new(2, sidecar());
+    studio.loading = vec![true, true];
+    studio.run_secs(30.0);
+    assert!(studio.sent.is_empty(), "{:?}", studio.sent);
+    for i in 0..2 {
+        let d = studio.stats(i);
+        assert!(d.preparing, "source {i}: {d:?}");
+        assert_eq!((d.requests, d.timeouts, d.ready_after), (0, 0, None));
+    }
+    // One loader has seen the hello a tick before the other: the shared
+    // detector is still starting for both.
+    studio.loading = vec![false, true];
+    studio.run_secs(1.0 / FPS);
+    assert!(studio.sent.is_empty(), "{:?}", studio.sent);
+    assert!(studio.stats(0).preparing && studio.stats(1).preparing);
+    // Ready: both on the same tick, and the turns start at once.
+    studio.loading = vec![false, false];
+    let ready = Duration::from_secs_f64(studio.core.ticks() as f64 / FPS);
+    studio.run_secs(6.0);
+    assert_eq!(studio.sent.first(), Some(&(ready, 0)), "{:?}", studio.sent);
+    assert_eq!(studio.most_in_flight, 1, "one pass at a time");
+    let order: Vec<usize> = studio.sent.iter().map(|(_, s)| *s).collect();
+    assert!(order.len() >= 4, "{order:?}");
+    assert!(order.windows(2).all(|w| w[0] != w[1]), "{order:?}");
+    for i in 0..2 {
+        let d = studio.stats(i);
+        assert!(!d.preparing, "source {i}: {d:?}");
+        assert_eq!(d.ready_after, Some(ready), "source {i}");
+        assert_eq!((d.stale, d.timeouts, d.errors), (0, 0, 0), "{d:?}");
+        assert!(d.applied >= 2, "source {i}: {d:?}");
     }
 }
 

@@ -52,8 +52,12 @@
 //! frame goes out on that same tick, and records that tick's master-clock
 //! time as [`DiscoveryStats::ready_after`]. A source starts preparing when
 //! it has a detector, so the snapshot taken before the first tick already
-//! says so. The loading state is tick input like the frames, so the core
-//! stays a deterministic function of its inputs.
+//! says so. A shared detector is one detector for the whole studio: while
+//! the sidecar is still starting (any source's loader still waits for its
+//! hello), every source is preparing, and they all become ready on the
+//! same tick, so the sources start taking turns only once the process is
+//! ready, the first source first. The loading state is tick input like the
+//! frames, so the core stays a deterministic function of its inputs.
 //!
 //! Given the same configuration, frames, results and commands, the core
 //! produces the same program, which is what the deterministic tests rely on.
@@ -68,17 +72,17 @@ use ac_director::{Director, DirectorDecision};
 use ac_framing::FramerConfig;
 use ac_media::{SourceInfo, SourceState, VideoFrame};
 use ac_switcher::Switcher;
-use ac_vision::PromptQuery;
 
 use crate::catalog::Catalog;
 use crate::config::{DiscoverySettings, MonitorSettings, StudioConfig};
-use crate::discovery::{DiscoveryRequest, DiscoveryResult, staleness};
+use crate::discovery::{DiscoveryRequest, DiscoveryResult};
 use crate::schedule::RateMeter;
-use crate::snapshot::{DiscoveryStats, MatchView, PassOutcome};
+use crate::snapshot::{DiscoveryStats, MatchView};
 use crate::vision::SourceVision;
 
 mod commands;
 mod directing;
+mod passes;
 mod render;
 mod shots;
 mod snapshot;
@@ -404,8 +408,14 @@ impl EngineCore {
         for r in results {
             self.apply_result(r);
         }
+        // A shared detector is ready for every source or for none.
+        let studio_loading = self.shared_detector
+            && feeds
+                .iter()
+                .zip(&self.sources)
+                .any(|(f, s)| s.discovery.enabled && f.detector_loading);
         for (i, feed) in feeds.iter().enumerate().take(self.sources.len()) {
-            self.ingest_feed(i, feed);
+            self.ingest_feed(i, feed, studio_loading);
         }
         self.sync_catalog();
         self.step_framing(dt);
@@ -420,74 +430,15 @@ impl EngineCore {
         }
     }
 
-    /// Applies one discovery result unless it is stale.
-    fn apply_result(&mut self, r: DiscoveryResult) {
-        let live: Vec<QueryId> = self.queries.iter().map(|q| q.id.clone()).collect();
-        let max_age = self.discovery.max_result_age();
-        let Some(s) = self.sources.get_mut(r.source) else {
-            return;
-        };
-        let d = &mut s.discovery;
-        // A late answer to a request that timed out does not free the slot
-        // of the newer request now in flight.
-        if d.last_requested == Some(r.frame.seq) {
-            d.in_flight_since = None;
-        }
-        let detections = match r.outcome {
-            Ok(dets) if r.frame.source == s.id => {
-                d.stats.last_latency = Some(r.latency);
-                dets
-            }
-            Ok(_) => {
-                d.stats.errors += 1;
-                d.stats.last_error = Some("result for another source".into());
-                d.stats.last_outcome = Some(PassOutcome::Failed);
-                return;
-            }
-            Err(e) => {
-                d.stats.errors += 1;
-                d.stats.last_error = Some(e);
-                d.stats.last_outcome = Some(PassOutcome::Failed);
-                return;
-            }
-        };
-        let newest = s.frame.as_ref().map(|f| f.pts);
-        if staleness(r.frame.seq, r.frame.pts, d.last_applied, newest, max_age).is_some() {
-            d.stats.stale += 1;
-            d.stats.last_outcome = Some(PassOutcome::Stale);
-            return;
-        }
-        d.last_applied = Some(r.frame.seq);
-        d.stats.applied += 1;
-        d.stats.last_outcome = Some(PassOutcome::Applied);
-        let floor = s.vision.store().config().min_score;
-        for id in r.queries.iter().filter(|id| live.contains(id)) {
-            let mut feedback = MatchView {
-                source: s.id.clone(),
-                seq: r.frame.seq,
-                pts: r.frame.pts,
-                count: 0,
-                best: None,
-                kept: 0,
-                floor,
-            };
-            for det in detections.iter().filter(|det| &det.query == id) {
-                feedback.count += 1;
-                feedback.kept += usize::from(det.score >= floor);
-                feedback.best = Some(feedback.best.map_or(det.score, |b| b.max(det.score)));
-            }
-            d.matches.insert(id.clone(), feedback);
-        }
-        s.vision
-            .on_detections(&r.frame, s.frame.as_ref(), &detections, &live);
-    }
-
-    /// Takes a source's newest frame and advances its vision when it is new.
-    fn ingest_feed(&mut self, i: usize, feed: &SourceFeed) {
+    /// Takes a source's newest frame and advances its vision when it is new,
+    /// and whether its detector is still loading: its own loader, or, when
+    /// `studio_loading`, the shared detector's (see the module docs).
+    fn ingest_feed(&mut self, i: usize, feed: &SourceFeed, studio_loading: bool) {
         let now = self.now;
         let s = &mut self.sources[i];
         s.state = feed.state;
-        s.discovery.note_loading(feed.detector_loading, now);
+        s.discovery
+            .note_loading(feed.detector_loading || studio_loading, now);
         let Some(frame) = &feed.frame else {
             return;
         };
@@ -501,84 +452,6 @@ impl EngineCore {
         s.frames += 1;
         s.rate.record(now);
         s.vision.on_frame(frame);
-    }
-
-    /// Issues discovery requests for sources that are due and not
-    /// preparing; see the module docs for how sources take turns on a
-    /// shared detector.
-    fn schedule_discovery(&mut self) -> Vec<(usize, DiscoveryRequest)> {
-        let now = self.now;
-        let timeout = self.discovery.timeout();
-        let interval = self.discovery.interval();
-        // The detector gets each query's parsed phrase, never the operator's
-        // prompt: "speaker upper body" asks for "a person speaking".
-        let queries: Vec<PromptQuery> = self
-            .queries
-            .iter()
-            .map(|q| PromptQuery {
-                id: q.id.clone(),
-                prompt: q.detector_phrase().to_string(),
-            })
-            .collect();
-        for s in &mut self.sources {
-            let d = &mut s.discovery;
-            if !d.enabled || d.stats.preparing {
-                continue;
-            }
-            if let Some(since) = d.in_flight_since
-                && now.saturating_sub(since) >= timeout
-            {
-                d.in_flight_since = None;
-                d.stats.timeouts += 1;
-                d.stats.last_outcome = Some(PassOutcome::TimedOut);
-            }
-        }
-        let due = self.sources.iter().enumerate().filter(|(_, s)| {
-            let d = &s.discovery;
-            d.enabled
-                && !d.stats.preparing
-                && d.in_flight_since.is_none()
-                && now >= d.next_due
-                && !queries.is_empty()
-                && s.frame
-                    .as_ref()
-                    .is_some_and(|f| d.last_requested != Some(f.seq))
-        });
-        let chosen: Vec<usize> = if !self.shared_detector {
-            due.map(|(i, _)| i).collect()
-        } else if self
-            .sources
-            .iter()
-            .any(|s| s.discovery.in_flight_since.is_some())
-        {
-            Vec::new()
-        } else {
-            // The source that waited longest since its last turn (never
-            // first), so every source gets a turn.
-            due.min_by_key(|(i, s)| (s.discovery.last_sent, *i))
-                .map(|(i, _)| i)
-                .into_iter()
-                .collect()
-        };
-        let mut out = Vec::new();
-        for i in chosen {
-            let s = &mut self.sources[i];
-            let Some(frame) = &s.frame else { continue };
-            let d = &mut s.discovery;
-            d.in_flight_since = Some(now);
-            d.last_sent = Some(now);
-            d.next_due = now + interval;
-            d.last_requested = Some(frame.seq);
-            d.stats.requests += 1;
-            out.push((
-                i,
-                DiscoveryRequest {
-                    frame: frame.clone(),
-                    queries: queries.clone(),
-                },
-            ));
-        }
-        out
     }
 
     /// Index of the source with `id`.

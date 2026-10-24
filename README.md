@@ -272,15 +272,17 @@ cargo run -p auto-camera -- --config config/sam3-sidecar.example.toml
   and every such path must exist, and the process must start, or the
   studio does not start and says why.
 - The model loads while the sources play (4.6 s on Noah's M3 Max, then a
-  warm-up pass). A sidecar that fails to start (a wrong `--model` is
+  warm-up pass). Until the sidecar's hello every source is preparing: no
+  frame is sent and no timeout counted, the window says "preparing the
+  detector", and a headless run waits for it. A sidecar that fails to start (a wrong `--model` is
   reported in milliseconds, a cold load can miss `startup_timeout_s`), or
   that crashes or misses a deadline later, is restarted after a backoff of
   1 s, doubling up to 30 s; meanwhile its passes fail with the reason,
   shown in amber in the window. Quitting, by closing the window or with
   Ctrl-C, closes its stdin, waits up to 2 s, then kills and reaps it, and
   the sidecar exits by itself if the app dies: no process is left behind.
-- Sources take turns: one frame is with the sidecar at a time, and the
-  source that waited longest goes next with its newest frame. Answers are
+- Sources take turns once the sidecar is ready: one frame is with it at a
+  time, and the source that waited longest goes next with its newest frame. Answers are
   then about one pass old whatever the number of sources, so the 2 s
   `max_result_age_s` default fits; each source gets a pass about every
   N × the pass time, and `max_undetected_s` should cover about three of

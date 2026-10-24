@@ -69,7 +69,9 @@ knows where a model runs.
   age limit, so every answer would be thrown away), so the engine keeps
   **one request in flight for the whole studio** when its detector is
   shared, and gives the turn to the source that has waited longest, with
-  its newest frame. Answers are then about one pass old whatever the
+  its newest frame. The turns start once the process has said its first
+  hello: until then the shared detector is preparing for every source, so
+  nothing is sent and no timeout is counted. Answers are then about one pass old whatever the
   number of sources, and each source gets a pass about every N × the pass
   time. A frame that still waited longer than `max_result_age_s` for the
   process (behind a restart, or behind a request the engine gave up on) is
@@ -119,16 +121,23 @@ B8 fails, the sidecar stays. CLAUDE.md's decision line is Noah's to update.
   milliseconds) or misses its startup deadline makes every discovery pass
   fail with that reason while the host retries under its backoff, so a
   transient failure heals itself and a permanent one costs one short
-  attempt every 30 s. The window marks a source whose newest pass failed,
-  went stale or timed out in amber, with the reason on hover, and counts
-  errors, stale results and timeouts in the status bar. Sources, tracking,
+  attempt every 30 s. While the first start loads the model, the window
+  says "preparing the detector" (dimmed, not amber) and the status bar
+  how long it has been preparing; a headless run waits for it, and its
+  summary says whether each source's detector was ready and when. The
+  window marks a source whose newest pass failed, went stale or timed out
+  in amber, with the reason on hover, and counts errors, stale results and
+  timeouts in the status bar. Sources, tracking,
   switching and output keep running whatever the sidecar does.
 - **Scores.** SAM and OWLv2 score on different scales, so the sidecar has
   its own `score_threshold` (0.5 by default), and the subject store's floor
   follows it when it is lower than the store's 0.35.
 - **Not yet built** (design §4.6 and §5): checking the weights' SHA-256
   against an expected value, the bundled-image self-check in `hello`, a uv
-  lock file, the sidecar's state and restart count in the engine snapshot
-  and the headless summary (`ac_sidecar::HostStatus` has them, but Phase
-  2's "0 sidecar restarts" can only be inferred from discovery errors and
-  timeouts today), per-query thresholds, and TCP.
+  lock file, most of the sidecar's state in the engine snapshot and the
+  headless summary: only its first start is there, as each source's
+  `preparing` and ready time (`discovery_preparing`, `detector_ready_s`);
+  its restarts, its process and what its hello named are not
+  (`ac_sidecar::HostStatus` has them, but Phase 2's "0 sidecar restarts"
+  can only be inferred from discovery errors and timeouts today),
+  per-query thresholds, and TCP.
