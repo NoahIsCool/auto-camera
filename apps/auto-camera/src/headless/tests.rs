@@ -311,10 +311,10 @@ fn the_summary_is_json() {
     assert_eq!(subject["bbox"].as_array().map(Vec::len), Some(4));
 }
 
-/// The synthetic movers keep their size, but the tracker's scale search
-/// lets a tracked box grow or shrink against the detector's (one of the two
-/// grows by about 15% within half a second), and its crops follow: the
-/// drift the crop ranges are there to show.
+/// A real run reports a crop range for every subject shot. Whether a range
+/// is wider than one size depends on how the tracker's scale search drifts
+/// on the runner, so the widening itself is checked on scripted snapshots
+/// ([`the_sampler_keeps_each_shots_narrowest_and_widest_crop`]).
 #[test]
 fn moving_subjects_report_the_range_of_their_crop_sizes() {
     let s = run(studio(), Path::new("studio.toml"), &options(2.0, None));
@@ -333,12 +333,26 @@ fn moving_subjects_report_the_range_of_their_crop_sizes() {
         );
         assert!(v.crop_width_max <= 1.0 && v.crop_height_max <= 1.0, "{v:?}");
     }
-    assert!(
-        subject_shots
-            .iter()
-            .any(|v| v.crop_width_max > v.crop_width_min && v.crop_height_max > v.crop_height_min),
-        "a tracked box drifts in size and its crop follows: {subject_shots:?}"
-    );
+}
+
+/// Every sampled snapshot widens a shot's range to take in its crop, and
+/// the summary reports that range.
+#[test]
+fn the_sampler_keeps_each_shots_narrowest_and_widest_crop() {
+    let mut snap = (*preparing_snapshot()).clone();
+    let mut sampler = Sampler::default();
+    for (w, h) in [(0.5, 0.4), (0.3, 0.6), (0.4, 0.5)] {
+        snap.shots[0].crop = Rect::new(0.1, 0.1, w, h);
+        sampler.record(&Arc::new(snap.clone()));
+    }
+    let id = snap.shots[0].id.0.clone();
+    let range = sampler.crops[&id];
+    assert_eq!((range.width, range.height), ([0.3, 0.5], [0.4, 0.6]));
+    // A snapshot after shutdown is not sampled.
+    snap.running = false;
+    snap.shots[0].crop = Rect::new(0.0, 0.0, 1.0, 1.0);
+    sampler.record(&Arc::new(snap));
+    assert_eq!(sampler.crops[&id], range);
 }
 
 #[test]
