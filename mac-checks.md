@@ -9,7 +9,7 @@ do not push to any branch. Leave no app, ffmpeg or Python process running when d
 
 `git fetch origin`, then check `git log origin/<branch>..<branch>` is empty for every local
 branch (stop and report if not). Branches: `prompt-matching` (PR #3, 96d9d57), `shot-words`
-(PR #4, e0f8766, on top of #3), `sam-sidecar` (1ed3564, on top of #4, still being wired up).
+(PR #4, e0f8766, on top of #3), `sam-sidecar` (PR #5, 7350311 or later, on top of #4).
 
 ## 1. SAM 3.1 sidecar smoke test (branch sam-sidecar, Python only)
 
@@ -25,6 +25,14 @@ guitar", "a person" at threshold 0.3, and prints time to hello, per-request late
 boxes. Compare with your earlier `scratch/sam3/` results on the same frames (box IoU, counts,
 timings: 0.48 / 0.64 / 1.05 s for 1 / 3 / 9 prompts at 672 px). Report any exception verbatim.
 If something in server.py is wrong, describe the fix; do not commit it.
+
+Then the whole studio on SAM (PR #5): copy `config/sam3-sidecar.example.toml` to
+`config/sam3-local.toml` (not committed), point its source at the sermon clip, set the
+queries to "speaker upper body", "guitarist close-up" and "a person", and run
+`cargo run --release -p auto-camera -- --config config/sam3-local.toml --headless --seconds 60`.
+Report discovery applied / stale / errors, per-query `matches`, pass latency, and whether
+`pgrep -f server.py` is empty afterwards. Then open the window once (no `--headless`),
+check the match lines under each query, quit with Ctrl-C, and check `pgrep` again.
 
 ## 2. PR #3 re-check (branch prompt-matching, Rust, OWLv2 on CoreML)
 
