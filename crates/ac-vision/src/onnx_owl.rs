@@ -27,8 +27,16 @@
 //! takes minutes, so each graph's compiled model is cached in
 //! `coreml-cache/` next to it, under a name that includes the graph file's
 //! size and modification time: a re-exported graph gets a fresh compile
-//! instead of a stale one (CoreML keys its cache on graph structure, not
-//! weights).
+//! instead of a stale one (ONNX Runtime keys its CoreML cache on the model's
+//! path and the provider options, not on the graph's structure or weights,
+//! so a re-export at the same path would otherwise reuse the old compile).
+//! That cache survives rebuilding the app; CoreML's own per-executable
+//! specialization, which every new build pays again, is outside it (see the
+//! crate README). ONNX Runtime takes an existing cache folder for a
+//! finished compile, so one left half-written by an interrupted first load
+//! can fail every later load with "Error compiling model"; that error names
+//! the folder to delete. It is never deleted here, since another loader
+//! (another source, or another process) may be writing it.
 //!
 //! Status: exercised in tests against synthetic graphs with the documented
 //! names and shapes; not yet validated against a real OWLv2 export on a Mac.
@@ -262,6 +270,31 @@ fn coreml_cache_dir(path: &Path) -> Option<PathBuf> {
     Some(dir.join(format!("{stem}-{}-{modified}", meta.len())))
 }
 
+/// The folder CoreML's compiled copy of the graph at `path` is cached in,
+/// when `provider` is CoreML and the folder can be named.
+fn cache_in_use(provider: &str, path: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if provider == "CoreML" {
+        return coreml_cache_dir(path);
+    }
+    let _ = (provider, path);
+    None
+}
+
+/// `message`, from creating a session whose CoreML cache is `cache`, with
+/// the folder to delete when CoreML could not compile the graph; see the
+/// module docs.
+fn with_cache_hint(message: String, cache: Option<&Path>) -> String {
+    match cache {
+        Some(dir) if message.contains("Error compiling model") => format!(
+            "{message} (an interrupted compile can leave a broken cache: \
+             delete {} and restart)",
+            dir.display()
+        ),
+        _ => message,
+    }
+}
+
 /// Loads one graph and checks that it has the expected inputs.
 fn load_session(
     path: &Path,
@@ -286,7 +319,10 @@ fn load_session(
     if !eps.is_empty() {
         builder = builder.with_execution_providers(eps).map_err(model_err)?;
     }
-    let session = builder.commit_from_file(path).map_err(model_err)?;
+    let session = builder.commit_from_file(path).map_err(|e| {
+        let cache = cache_in_use(provider, path);
+        VisionError::Model(with_cache_hint(e.to_string(), cache.as_deref()))
+    })?;
     let present: Vec<&str> = session.inputs().iter().map(|o| o.name()).collect();
     if let Some(missing) = inputs.iter().find(|n| !present.contains(n)) {
         return Err(VisionError::Model(format!(

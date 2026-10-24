@@ -1,7 +1,8 @@
 //! Discovery and tracking through the core: result staleness, the
-//! discovery rate, tracking quality on the synthetic pattern, identities of
-//! crossing subjects, the rule that detections vouch for existence and one
-//! subject for several prompts when results arrive late.
+//! discovery rate, a detector that is still loading (or failed to),
+//! tracking quality on the synthetic pattern, identities of crossing
+//! subjects, the rule that detections vouch for existence and one subject
+//! for several prompts when results arrive late.
 
 use std::collections::VecDeque;
 
@@ -74,6 +75,91 @@ fn discovery_runs_at_the_configured_rate_and_only_with_queries() {
     let mut rig = Rig::new(c);
     rig.run_secs(2.0);
     assert_eq!(rig.snapshot().sources[0].discovery.requests, 0);
+}
+
+#[test]
+fn no_requests_or_timeouts_while_the_detector_prepares() {
+    let mut c = config(1);
+    c.discovery.timeout_s = 10.0;
+    let mut rig = Rig::new(c);
+    assert!(
+        rig.snapshot().sources[0].discovery.preparing,
+        "a source with a detector prepares from the start"
+    );
+    // A cold CoreML compile: two minutes of ticks with the detector loading.
+    rig.loading = true;
+    for _ in 0..(120.0 * FPS) as usize {
+        assert!(rig.step().requests.is_empty());
+    }
+    let d = &rig.snapshot().sources[0].discovery;
+    assert!(d.preparing);
+    assert_eq!((d.requests, d.timeouts, d.ready_after), (0, 0, None));
+    rig.loading = false;
+    let newest = rig.frame();
+    let out = rig.step();
+    assert_eq!(out.requests.len(), 1, "due at once on the ready tick");
+    assert_eq!(out.requests[0].1.frame.seq, newest.seq, "the newest frame");
+    let d = &rig.snapshot().sources[0].discovery;
+    assert!(!d.preparing);
+    assert_eq!(d.ready_after, Some(Duration::from_secs(120)));
+    assert_eq!((d.requests, d.timeouts), (1, 0));
+    rig.run_secs(2.0);
+    let d = &rig.snapshot().sources[0].discovery;
+    assert_eq!((d.applied, d.stale, d.timeouts), (2, 0, 0), "none stale");
+    assert_eq!(rig.core.store(0).unwrap().len(), 1);
+    assert_eq!(d.ready_after, Some(Duration::from_secs(120)), "kept");
+}
+
+#[test]
+fn a_failed_load_ends_preparing_and_shows_the_error() {
+    let mut c = config(1);
+    c.discovery.timeout_s = 1.0;
+    let unloadable = ScriptedDetector::from_fn("unloadable", |_, _| {
+        Err(ac_vision::VisionError::Model(
+            "the detector failed to load: no such model".into(),
+        ))
+    });
+    let mut rig = Rig::new(c).with_detector(unloadable);
+    rig.loading = true;
+    rig.run_secs(5.0);
+    let d = &rig.snapshot().sources[0].discovery;
+    assert!(d.preparing);
+    assert_eq!((d.requests, d.timeouts, d.errors), (0, 0, 0));
+    rig.loading = false;
+    rig.run(2);
+    let d = &rig.snapshot().sources[0].discovery;
+    assert!(!d.preparing);
+    assert_eq!(d.ready_after, Some(Duration::from_secs(5)));
+    assert_eq!((d.requests, d.errors, d.timeouts), (1, 1, 0));
+    let error = d.last_error.as_deref().unwrap_or_default();
+    assert!(error.contains("failed to load: no such model"), "{error}");
+}
+
+#[test]
+fn a_source_without_a_detector_never_prepares() {
+    let info = SourceInfo {
+        id: cam(),
+        width: W,
+        height: H,
+        fps: FPS,
+        audio: None,
+    };
+    let mut core = EngineCore::new(&config(1), vec![info], &[false]).unwrap();
+    let pattern = SyntheticPattern::new(W, H, FPS, 1).unwrap();
+    for seq in 0..3 {
+        // Loading reported for a source without a detector is ignored.
+        let feed = SourceFeed {
+            state: SourceState::Running,
+            frame: Some(pattern.frame(&cam(), seq)),
+            detector_loading: true,
+        };
+        let now = Duration::from_secs_f64(seq as f64 / FPS);
+        assert!(core.tick(now, &[feed], Vec::new()).requests.is_empty());
+    }
+    let snap = core.snapshot(OutputView::default(), TimingView::default(), true);
+    let d = &snap.sources[0].discovery;
+    assert!(!snap.sources[0].discovery_enabled && !d.preparing);
+    assert_eq!((d.requests, d.ready_after), (0, None));
 }
 
 #[test]

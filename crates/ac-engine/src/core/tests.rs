@@ -77,6 +77,8 @@ struct Rig {
     /// Freezes the picture: every frame repeats these pixels under its own
     /// sequence number and PTS, so the subjects in it stand still.
     still: Option<VideoFrame>,
+    /// Reports the detector as still loading.
+    loading: bool,
 }
 
 impl Rig {
@@ -109,6 +111,7 @@ impl Rig {
             advancing: true,
             picture: None,
             still: None,
+            loading: false,
         }
     }
 
@@ -138,6 +141,7 @@ impl Rig {
         let feed = SourceFeed {
             state: SourceState::Running,
             frame: Some(frame),
+            detector_loading: self.loading,
         };
         let results = std::mem::take(&mut self.pending);
         let out = self.core.tick(now, &[feed], results);

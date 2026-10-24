@@ -320,7 +320,7 @@ pub fn output(ui: &mut Ui, snap: &EngineSnapshot, form: &mut OutputForm) -> Vec<
 pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, notice: Option<(&str, bool)>) {
     ui.horizontal_wrapped(|ui| {
         for s in &snap.sources {
-            ui.label(source_line(s));
+            ui.label(source_line(s, snap.media_time));
             ui.separator();
         }
         ui.label(timing_line(&snap.timing));
