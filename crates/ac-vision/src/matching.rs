@@ -1,0 +1,422 @@
+//! People-first prompt matching: every subject is a whole person, and a
+//! prompt only chooses which people.
+//!
+//! OWLv2 boxes whatever a prompt names. Asked for "a person playing guitar"
+//! it boxes guitars (and guitars on stands, and guitars in photos on the
+//! projection screen); asked for "a person speaking at a lectern" it boxes
+//! lecterns and microphone stands. Framing those boxes frames objects, not
+//! people. Scoring the prompt on the person boxes themselves does not help
+//! either: on whole-person boxes "a person playing guitar" scores the
+//! singer, the drummer and the keyboard player as high as the guitarists.
+//! What the model does well is find the people ("a person") and find the
+//! prompt's object ("a guitar", 0.6–0.75 on real guitars against at most 0.26
+//! for anything else). So a detector pass asks for both, and a prompt picks a
+//! person when one of its object boxes lies mostly inside that person's box.
+//!
+//! On 40 hand-checked frames of a band and a sermon, that rule found all 60
+//! guitarist-frames with 2 false subjects, against 45 found with 22 false
+//! when the guitar had to lie 60% inside, and 58 found with 65 false for
+//! same-box scoring (see crates/ac-vision/README.md).
+//!
+//! # Plans
+//!
+//! [`MatchPlan::new`] turns the operator's queries into the model's queries:
+//!
+//! * the person query ([`PERSON_PROMPT`] unless configured), always first;
+//! * per user prompt, what [`selector`] makes of it:
+//!   * an *object*: [`object_phrase`] parses "a person playing guitar" into
+//!     "a guitar" and "a person speaking at a lectern" into "a lectern". A
+//!     prompt with no person word ("a guitarist", "the drummer") is its own
+//!     object.
+//!   * a *described person*: a person word with no object after it ("a
+//!     woman", "a person speaking", "a tall person"), or whose "object" is
+//!     another person ("a man next to a woman"). The prompt itself is asked
+//!     for and its boxes are attached like an object's; asking for "a woman"
+//!     must not pick the woman next to the man.
+//!   * *everyone*: a prompt that only says "person" ("a person", "people").
+//!
+//! Identical model queries are asked for once. [`MatchPlan::assign`] maps
+//! the decoded model detections back to the operator's queries: the output
+//! box is always a person box, and its score is the object's score (the
+//! person's, for an everyone prompt).
+//!
+//! Scores are thresholded on two scales. OWLv2 scores a named object high
+//! (0.6–0.75 for real guitars) but anything describing a person low (about
+//! 0.15–0.3, however well it fits), so objects use the object threshold
+//! (0.3) and described-person and everyone prompts use the person threshold
+//! (0.15), unless the query sets its own.
+//!
+//! An object belongs to the person holding most of it, measured against the
+//! smaller of the two boxes: a guitar must lie mostly inside its player, and
+//! a player must lie mostly inside a drum kit or a piano larger than they
+//! are. Fractions that differ only by floating-point rounding are equal, and
+//! an object two people hold equally goes to the higher-scored one. That
+//! case is common: a box that contains a person also contains any smaller
+//! "person" box nested in them (their head and shoulders), and both
+//! fractions are then 1, so rounding alone must not decide between them.
+//!
+//! A "person" box that contains two or more other people is a group (OWLv2
+//! sometimes boxes a whole projection screen of photos, or a whole band, as
+//! "a person"); it is dropped before objects are attached, so objects under
+//! it do not make a false subject.
+//!
+//! # Limits
+//!
+//! The model sees objects, not actions: a speaker who is not at a lectern is
+//! not "a person speaking at a lectern", and "holding a microphone" cannot be
+//! told from standing at a microphone stand. Someone standing right in front
+//! of an instrument on a stand holds it, as far as boxes can tell. Prompts
+//! work best when they
+//! name something visible on the person: an instrument, a garment, a prop.
+//! A described person whose description is an action ("a person speaking",
+//! "a person singing") scores every person alike on OWLv2, so the
+//! [`Selector::Described`] route at the person threshold picks everyone
+//! (measured on 40 labelled frames: the speaker in 20 of 20, with 300 false
+//! boxes).
+
+use std::collections::HashMap;
+
+use ac_core::{QueryId, Rect};
+
+use crate::api::{Detection, PromptQuery};
+use crate::owl::normalize_prompt;
+
+/// The default person query, asked on every pass.
+pub const PERSON_PROMPT: &str = "a person";
+
+/// Words that name a person; text after the first one describes them.
+const PERSON_WORDS: &[&str] = &[
+    "person",
+    "persons",
+    "people",
+    "man",
+    "men",
+    "woman",
+    "women",
+    "someone",
+    "somebody",
+    "guy",
+    "guys",
+    "girl",
+    "girls",
+    "boy",
+    "boys",
+    "kid",
+    "kids",
+    "child",
+    "children",
+    "human",
+    "humans",
+    "lady",
+    "individual",
+];
+
+/// Words that only say "person" when a prompt is nothing else.
+const EVERYONE: &[&str] = &[
+    "person", "persons", "people", "someone", "somebody", "human",
+];
+
+/// Articles and possessives: after one, an "-ing" word is a noun
+/// ("a painting"), not a verb.
+const ARTICLES: &[&str] = &["a", "an", "the", "his", "her", "their", "its", "some"];
+
+/// Words skipped between the person and the object besides articles:
+/// relative pronouns, auxiliaries and prepositions.
+const LINK_WORDS: &[&str] = &[
+    "who", "that", "which", "is", "are", "at", "on", "in", "front", "with", "behind", "near", "by",
+    "beside", "next", "to", "from", "into", "onto", "over", "under", "of", "and",
+];
+
+/// What a user prompt asks the model for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Selector {
+    /// Every person ("a person", "people").
+    Everyone,
+    /// People holding this object; thresholded on the object scale.
+    Object(String),
+    /// People this text describes, without an object ("a woman", "a person
+    /// speaking"); the text's own boxes are attached, thresholded on the
+    /// person scale.
+    Described(String),
+}
+
+/// The selector for one prompt; see the module docs.
+pub fn selector(prompt: &str) -> Selector {
+    // Typographic apostrophes would otherwise split "person’s" into two words.
+    let text = normalize_prompt(&prompt.replace(['\u{2018}', '\u{2019}'], "'"));
+    let words: Vec<&str> = text
+        .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '-'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let Some(k) = words.iter().position(|w| PERSON_WORDS.contains(w)) else {
+        return Selector::Object(text);
+    };
+    let before = &words[..k];
+    let after = &words[k + 1..];
+    let only_articles = before
+        .iter()
+        .all(|w| matches!(*w, "a" | "an" | "the" | "any"));
+    if after.is_empty() {
+        return if only_articles && EVERYONE.contains(&words[k]) {
+            Selector::Everyone
+        } else {
+            Selector::Described(text)
+        };
+    }
+    match object_phrase(after) {
+        Some(object) if !object.split(' ').any(|w| PERSON_WORDS.contains(&w)) => {
+            Selector::Object(object)
+        }
+        _ => Selector::Described(text),
+    }
+}
+
+/// The object named by the words after the person word: articles, link
+/// words and "-ing" verbs are dropped from the front, and the rest is
+/// prefixed with "a" ("playing guitar" → "a guitar", "holding a painting" →
+/// "a painting"). An "-ing" word counts as a verb only before the first
+/// article. `None` when nothing is left.
+pub fn object_phrase(after: &[&str]) -> Option<String> {
+    let mut article_seen = false;
+    for (i, w) in after.iter().enumerate() {
+        if ARTICLES.contains(w) {
+            article_seen = true;
+            continue;
+        }
+        if LINK_WORDS.contains(w) || (!article_seen && is_verb_ing(w)) {
+            continue;
+        }
+        return Some(format!("a {}", after[i..].join(" ")));
+    }
+    None
+}
+
+/// A word that looks like an "-ing" verb ("playing", not "ring").
+fn is_verb_ing(word: &str) -> bool {
+    word.len() > 4 && word.ends_with("ing")
+}
+
+/// Matching tuning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchParams {
+    /// The prompt that finds people.
+    pub person_prompt: String,
+    /// Lowest person score kept, and the threshold of everyone and
+    /// described-person prompts without their own.
+    pub person_threshold: f32,
+    /// Threshold of object prompts without their own.
+    pub object_threshold: f32,
+    /// Fraction of the smaller of an object's and a person's box that must
+    /// lie inside the other for the object to be the person's.
+    pub min_overlap: f64,
+    /// Largest number of people returned per query.
+    pub max_per_query: usize,
+}
+
+impl Default for MatchParams {
+    fn default() -> Self {
+        Self {
+            person_prompt: PERSON_PROMPT.into(),
+            person_threshold: 0.15,
+            object_threshold: 0.3,
+            min_overlap: 0.45,
+            max_per_query: 16,
+        }
+    }
+}
+
+/// The model queries for a set of user queries, and how to map the model's
+/// detections back; see the module docs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchPlan {
+    /// Model queries, the person query first.
+    internal: Vec<PromptQuery>,
+    /// Score threshold per model query, in the same order.
+    thresholds: Vec<f32>,
+    /// Per user query: its id, threshold and model query index (`None` for
+    /// everyone).
+    routes: Vec<(QueryId, f32, Option<usize>)>,
+    /// Tuning.
+    params: MatchParams,
+}
+
+impl MatchPlan {
+    /// Plans a pass for `queries`; `explicit` gives a user query's own score
+    /// threshold, if it has one. Without one, object prompts use
+    /// `params.object_threshold` and the others `params.person_threshold`.
+    /// No person below `params.person_threshold` is ever picked.
+    pub fn new(
+        queries: &[PromptQuery],
+        explicit: impl Fn(&QueryId) -> Option<f32>,
+        params: MatchParams,
+    ) -> Self {
+        let person = normalize_prompt(&params.person_prompt);
+        let mut internal = vec![PromptQuery::new("#person", &person)];
+        let mut thresholds = vec![params.person_threshold];
+        let mut by_text: HashMap<String, usize> = HashMap::new();
+        let mut routes = Vec::with_capacity(queries.len());
+        for q in queries {
+            let own = explicit(&q.id);
+            let (t, text) = match selector(&q.prompt) {
+                Selector::Everyone => (own.unwrap_or(params.person_threshold), None),
+                Selector::Object(text) | Selector::Described(text) if text == person => {
+                    (own.unwrap_or(params.person_threshold), None)
+                }
+                Selector::Object(text) => (own.unwrap_or(params.object_threshold), Some(text)),
+                Selector::Described(text) => (own.unwrap_or(params.person_threshold), Some(text)),
+            };
+            let route = match text {
+                None => None,
+                Some(object) => {
+                    let i = *by_text.entry(object.clone()).or_insert_with(|| {
+                        internal.push(PromptQuery::new(
+                            &format!("#object{}", internal.len()),
+                            &object,
+                        ));
+                        thresholds.push(t);
+                        internal.len() - 1
+                    });
+                    // Shared objects decode at the lowest threshold asking.
+                    thresholds[i] = thresholds[i].min(t);
+                    Some(i)
+                }
+            };
+            routes.push((q.id.clone(), t, route));
+        }
+        Self {
+            internal,
+            thresholds,
+            routes,
+            params,
+        }
+    }
+
+    /// The model queries, the person query first.
+    pub fn queries(&self) -> &[PromptQuery] {
+        &self.internal
+    }
+
+    /// The decode threshold of each model query.
+    pub fn thresholds(&self) -> &[f32] {
+        &self.thresholds
+    }
+
+    /// Maps decoded model detections (already per-query NMS'd) to person
+    /// detections for the user queries.
+    pub fn assign(&self, detections: &[Detection]) -> Vec<Detection> {
+        let mut people: Vec<(Rect, f32)> = detections
+            .iter()
+            .filter(|d| d.query == self.internal[0].id && d.score >= self.params.person_threshold)
+            .map(|d| (d.bbox, d.score))
+            .collect();
+        people.sort_by(|a, b| b.1.total_cmp(&a.1));
+        drop_groups(&mut people);
+        let mut out = Vec::new();
+        for (id, threshold, route) in &self.routes {
+            let mut best: Vec<Option<f32>> = vec![None; people.len()];
+            match route {
+                None => {
+                    for (slot, (_, score)) in best.iter_mut().zip(&people) {
+                        if *score >= *threshold {
+                            *slot = Some(*score);
+                        }
+                    }
+                }
+                Some(i) => {
+                    let object = &self.internal[*i].id;
+                    for d in detections
+                        .iter()
+                        .filter(|d| &d.query == object && d.score >= *threshold)
+                    {
+                        if let Some(p) = holder(&people, &d.bbox, self.params.min_overlap) {
+                            best[p] = Some(best[p].map_or(d.score, |s: f32| s.max(d.score)));
+                        }
+                    }
+                }
+            }
+            let mut picked: Vec<Detection> = best
+                .iter()
+                .zip(&people)
+                .filter_map(|(s, (bbox, _))| {
+                    s.map(|score| Detection {
+                        query: id.clone(),
+                        bbox: *bbox,
+                        score,
+                    })
+                })
+                .collect();
+            picked.sort_by(|a, b| b.score.total_cmp(&a.score));
+            picked.truncate(self.params.max_per_query);
+            out.extend(picked);
+        }
+        out
+    }
+}
+
+/// Fraction of another person's box that must lie inside a box for that box
+/// to count it.
+const GROUP_CONTAINS: f64 = 0.8;
+
+/// Removes boxes that contain two or more other people; see the module docs.
+fn drop_groups(people: &mut Vec<(Rect, f32)>) {
+    let groups: Vec<bool> = people
+        .iter()
+        .map(|(outer, _)| {
+            people
+                .iter()
+                .filter(|(inner, _)| {
+                    inner != outer && overlap_fraction(inner, outer) >= GROUP_CONTAINS
+                })
+                .count()
+                >= 2
+        })
+        .collect();
+    let mut flags = groups.into_iter();
+    people.retain(|_| !flags.next().unwrap_or(false));
+}
+
+/// Fraction of `inner`'s area that lies inside `outer`.
+pub fn overlap_fraction(inner: &Rect, outer: &Rect) -> f64 {
+    let area = inner.area();
+    if area <= 0.0 {
+        return 0.0;
+    }
+    inner.intersection(outer).map_or(0.0, |i| i.area() / area)
+}
+
+/// Fraction of the smaller of `a` and `b` that lies inside the other: 1 (up
+/// to floating-point rounding, so possibly a hair above) when either
+/// contains the other, 0 when they are disjoint or one has no area.
+pub fn contained_fraction(a: &Rect, b: &Rect) -> f64 {
+    let area = a.area().min(b.area());
+    if area <= 0.0 {
+        return 0.0;
+    }
+    a.intersection(b).map_or(0.0, |i| i.area() / area)
+}
+
+/// How much two [`contained_fraction`]s may differ and still be a tie in
+/// [`holder`]. The fraction goes through [`Rect::intersection`], which
+/// recomputes widths as `right - left`, so exact containment can come out
+/// as 1.0000000000000002 for one box and 1.0 for another; real differences
+/// in where a box lies are many orders of magnitude larger.
+const FRACTION_TIE: f64 = 1e-9;
+
+/// The person (index into `people`, which is sorted by score, highest
+/// first) holding `object`: the one sharing the largest
+/// [`contained_fraction`] with it, if that is at least `min_overlap`.
+/// Fractions within [`FRACTION_TIE`] of each other are ties, and ties go to
+/// the higher-scored person, which comes first.
+fn holder(people: &[(Rect, f32)], object: &Rect, min_overlap: f64) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, (person, _)) in people.iter().enumerate() {
+        let f = contained_fraction(object, person);
+        if f >= min_overlap && best.is_none_or(|(_, b)| f > b + FRACTION_TIE) {
+            best = Some((i, f));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+#[cfg(test)]
+mod tests;

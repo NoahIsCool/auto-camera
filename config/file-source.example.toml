@@ -35,7 +35,13 @@ kind = "owl"
 model = "../models/owlv2-split-onnx/detector.onnx"
 text_encoder = "../models/owlv2-split-onnx/text_encoder.onnx"
 tokenizer = "../models/owlv2-split-onnx/tokenizer.json"
-score_threshold = 0.2
+# Detections are whole people: each pass also looks for "a person" and for
+# the object each prompt names ("a guitar", "a lectern"), and a prompt picks
+# the people holding its object (crates/ac-vision/README.md, "Prompts").
+# Objects need this score. Prompts that only describe people ("a person",
+# "a woman", "a person speaking") use person_threshold (0.15) instead, and
+# the subject store's floor follows it unless [subjects] min_score is set.
+score_threshold = 0.3
 # CoreML on Apple Silicon (the default): about 0.2 s per pass after a
 # compile of a few minutes on first use, cached next to the model.
 use_coreml = true

@@ -149,7 +149,9 @@ The `ort` crate downloads ONNX Runtime at build time, or links a local one
 library). Exporting the model, the expected files and CoreML on
 Apple Silicon are described in [`crates/ac-vision/README.md`](crates/ac-vision/README.md).
 Without the feature, a config with `kind = "owl"` fails at start with a
-message saying so.
+message saying so. Detections are whole people: a prompt picks the people
+holding the object it names, so "a person playing guitar" frames guitarists,
+not guitars (see "Prompts" in the crate README).
 
 ## Crates
 

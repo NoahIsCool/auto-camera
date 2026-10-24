@@ -60,6 +60,8 @@ presets = ["medium", { id = "tight", name = "Tight", size = "close", headroom = 
 kind = "owl"
 model = "models/owlv2.onnx"
 tokenizer = "models/tokenizer.json"
+people_first = true
+person_threshold = 0.2
 
 [discovery]
 rate_hz = 2.0
@@ -112,6 +114,54 @@ thumb_rate_hz = 5.0
         ac_switcher::TransitionKind::Dip
     );
     assert_eq!(c.monitors.thumb_rate_hz, 5.0);
+    assert!(matches!(
+        c.detector,
+        DetectorSettings::Owl {
+            people_first: Some(true),
+            person_threshold: Some(t),
+            ..
+        } if t == 0.2
+    ));
+    assert_eq!(
+        c.store_config().unwrap().min_score,
+        0.2,
+        "the store floor follows the person threshold"
+    );
+}
+
+/// An OWL detector section, with `extra` lines appended.
+fn owl_config(extra: &str) -> StudioConfig {
+    let text = format!(
+        "{MINIMAL}\n[detector]\nkind = \"owl\"\nmodel = \"m.onnx\"\ntokenizer = \"t.json\"\n{extra}"
+    );
+    StudioConfig::parse(&text, false).unwrap()
+}
+
+#[test]
+fn the_store_floor_admits_person_scored_detections() {
+    let store_default = ac_subjects::StoreConfig::default().min_score;
+    assert_eq!(minimal().store_config().unwrap().min_score, store_default);
+    assert_eq!(owl_config("").store_config().unwrap().min_score, 0.15);
+    assert_eq!(
+        owl_config("person_threshold = 0.5")
+            .store_config()
+            .unwrap()
+            .min_score,
+        store_default,
+        "a floor above the store default changes nothing"
+    );
+    assert_eq!(
+        owl_config("people_first = false")
+            .store_config()
+            .unwrap()
+            .min_score,
+        store_default
+    );
+    let mut explicit = owl_config("");
+    explicit.subjects.min_score = Some(0.4);
+    assert_eq!(explicit.store_config().unwrap().min_score, 0.4, "set wins");
+    explicit.subjects.min_score = Some(f32::NAN);
+    assert!(explicit.store_config().is_err());
 }
 
 #[test]
@@ -173,6 +223,21 @@ fn invalid_values_are_rejected_with_a_message() {
         (
             "score",
             Box::new(|c| c.detector = DetectorSettings::Synthetic { score: 1.5 }),
+        ),
+        (
+            "person threshold",
+            Box::new(|c| {
+                c.detector = DetectorSettings::Owl {
+                    model: "m.onnx".into(),
+                    text_encoder: None,
+                    tokenizer: "t.json".into(),
+                    input_size: None,
+                    score_threshold: None,
+                    use_coreml: None,
+                    people_first: None,
+                    person_threshold: Some(1.5),
+                }
+            }),
         ),
         (
             "empty prompt",

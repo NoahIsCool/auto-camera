@@ -19,7 +19,8 @@
 //!
 //! Each detection prints as `frame <n> <query> <score> x=… y=… w=… h=…` in
 //! normalized source coordinates. Set `AC_OWL_CPU=1` to skip CoreML and
-//! `AC_OWL_THRESHOLD` to change the score threshold (default 0.1).
+//! `AC_OWL_THRESHOLD` to change the object score threshold (default 0.3;
+//! prompts that only describe people use the person threshold, 0.15).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

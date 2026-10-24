@@ -11,6 +11,7 @@ depend on a model runtime.
 | `ScriptedDetector` | Detections from a closure or keyframe table, for tests and demos |
 | `OnnxOwlDetector` | OWLv2 / OWL-ViT on ONNX Runtime, feature `onnx` (off by default) |
 | `owl::*` | Pure OWL pre/post-processing: letterbox, CLIP normalization, sigmoid, box decoding, token packing |
+| `matching::*` | People-first prompt matching: parse a prompt's object, pick the people holding it |
 | `boxes::*` | `clamp_box`, `cxcywh_to_rect`, `nms_indices`, class-aware `nms` |
 
 All boxes are normalized source coordinates (`ac_core::Rect`), clipped to the
@@ -152,20 +153,62 @@ cargo run --release -p ac-vision --features onnx --example owl_detect -- \
 
 `AC_OWL_CPU=1` skips CoreML; `AC_OWL_THRESHOLD` sets the score threshold.
 
-### Prompts
+### Prompts: people first
 
-OWLv2 boxes the thing a prompt names. On wide stage shots (the speaker about
-a third of the frame high), "a person speaking at a lectern" boxed lecterns,
-tables and microphone stands rather than the speaker, "a man holding a
-microphone" boxed the microphone, and "a person playing guitar" or "a
-guitarist" boxed each guitarist's guitar and torso (scores 0.25 to 0.67)
-while also firing on amplifiers and on photos on the projection screen.
-"a person", "a person speaking" and "a preacher" boxed whole people (scores
-around 0.2 to 0.27). Prompts that name the person, not an object they hold,
-give boxes that frame the person. In the engine with `config/file-source.example.toml`'s
-prompts on the sermon rehearsal (no guitarist on stage), the Speaker query
-admitted no one in five minutes and the Guitarist query admitted five
-"subjects", all instruments on stands or photos on the screen.
+OWLv2 boxes the thing a prompt names: "a person playing guitar" boxes guitars
+(also guitars on stands and in photos on a projection screen), "a person
+speaking at a lectern" boxes lecterns, tables and microphone stands. So the
+detector does not return a prompt's own boxes. By default
+(`OwlConfig::people_first`, `people_first` in a studio's `[detector]`) every
+pass also asks for "a person" and for the object each prompt names, and a
+prompt picks the people whose box holds its object; the detections are whole
+people. "a person playing guitar" asks for "a guitar", "a man in a red shirt"
+for "a red shirt". A prompt with no person word ("a guitarist") attaches its
+own boxes like an object. A prompt that only describes a person ("a woman", "a
+person speaking", "a tall person"), or whose object is another person ("a man
+next to a woman"), also attaches its own boxes, so it never picks the other
+person. "a person" or "people" picks everyone. See the `matching` module for
+the rules and their tests.
+
+Thresholds come on two scales. OWLv2 scores a named object high and any
+description of a person low, however well it fits. So objects need
+`score_threshold` (0.3 by default: real guitars score 0.6 to 0.75, nothing
+else above 0.26), while everyone and described-person prompts need
+`person_threshold` (0.15), unless a query sets its own threshold; people
+themselves always need an "a person" score of `person_threshold`. A studio's
+subject store would otherwise drop those low person scores, so when
+`[subjects] min_score` is not set, its floor follows `person_threshold`.
+
+An object is a person's when at least 45% of the smaller of the two boxes
+lies inside the other: a guitar mostly inside its player, or a drummer mostly
+inside a drum kit larger than they are. For objects smaller than the person,
+as guitars are, that is the object's own box, so the numbers below are
+unchanged by it. A "person" box holding two or more other people is a group
+and is dropped. The extra queries cost nothing measurable: 183–185 ms per pass on
+CoreML for 2, 3, 5 or 9 queries.
+
+How the strategies compared, on 20 frames each of a band (three guitarists,
+a singer, a drummer, a keyboard player) and a sermon rehearsal (one speaker
+walking the stage, guitars on stands), with the speaker and every guitarist
+hand-checked; a chosen person is a hit when its box has IoU ≥ 0.5 with a
+labelled one (Python reference on CPU, best thresholds for each):
+
+| Strategy | Guitarists found (of 60) | False subjects | Speaker found (of 20) |
+|---|---|---|---|
+| The prompt's own boxes (before) | boxes on guitars, not people | many | 0 |
+| Prompt score on each person's own box | 58 | 65 | 0 |
+| Prompt's own boxes attached to people | 58 | 9 | 0 |
+| Object ("a guitar") attached to people | 60 | 2 | 1 |
+| Object attached, with 60% of it inside instead of 45% | 45 | 22 | not measured |
+| Both attached | 60 | 2 | 1 |
+| Object attached, in Rust on CoreML, with the group rule | 59 | 2 | 1 |
+
+The two remaining false subjects are the speaker walking right in front of a
+guitar on a stand. The speaker is found once: OWLv2 sees objects, not
+actions, and this speaker never stands at the lectern. "Speaking", "singing" and
+"holding a microphone" (the band's guitarists sing into stand microphones)
+cannot be told apart from boxes; that would take an action- or audio-aware
+model. Prompts work best when they name something visible on the person.
 
 ### Expected tensors
 
@@ -186,8 +229,8 @@ Preprocessing follows the OWLv2 processor: the frame is placed at the top-left
 of a square and padded with grey (0.5) at the bottom/right, resized to S
 (anti-aliased), and normalized with the CLIP mean and standard deviation.
 Postprocessing applies a sigmoid per (patch, query), keeps scores at or above
-the query's threshold (`OwlConfig::score_threshold`, default 0.1, or
-`query_thresholds`), maps boxes back to the source by undoing the padding,
+the query's threshold (`OwlConfig::score_threshold`, default 0.3, or
+`query_thresholds`; with `people_first`, see the thresholds above), maps boxes back to the source by undoing the padding,
 clips them, and runs class-aware NMS (IoU 0.3, at most 16 per query). OWL-ViT
 v1 exports (`google/owlvit-base-patch32`, S = 768, P = 576) use the same
 graph interface; v1 was trained on stretched rather than padded images, so

@@ -17,26 +17,14 @@
 //!   `logits`, `pred_boxes`). Text embeddings are cached per normalized prompt,
 //!   so steady-state detection runs only the image side.
 //!
+//! By default (`OwlConfig::people_first`) the detector returns whole people:
+//! each pass asks the model for people and for the objects the prompts name,
+//! and [`crate::matching`] picks, per prompt, the people holding its object.
+//! With `people_first` off it returns each prompt's own boxes.
+//!
 //! The execution provider is CoreML on macOS when the loaded ONNX Runtime has
-//! it (unsupported nodes fall back to the CPU), and the CPU elsewhere. CoreML
-//! is given only nodes with static input shapes: the query axis of both
-//! graphs is dynamic, and handing such nodes to an MLProgram makes MPSGraph
-//! abort the whole process while compiling (a failed assertion, not an
-//! error ONNX Runtime could return). With static shapes the image tower,
-//! where the time goes, still runs on CoreML. Compiling OWLv2 base for CoreML
-//! takes minutes, so each graph's compiled model is cached in
-//! `coreml-cache/` next to it, under a name that includes the graph file's
-//! size and modification time: a re-exported graph gets a fresh compile
-//! instead of a stale one (ONNX Runtime keys its CoreML cache on the model's
-//! path and the provider options, not on the graph's structure or weights,
-//! so a re-export at the same path would otherwise reuse the old compile).
-//! That cache survives rebuilding the app; CoreML's own per-executable
-//! specialization, which every new build pays again, is outside it (see the
-//! crate README). ONNX Runtime takes an existing cache folder for a
-//! finished compile, so one left half-written by an interrupted first load
-//! can fail every later load with "Error compiling model"; that error names
-//! the folder to delete. It is never deleted here, since another loader
-//! (another source, or another process) may be writing it.
+//! it, and the CPU elsewhere; the `coreml` submodule says how CoreML is set
+//! up and where its compiled model is cached.
 //!
 //! Status: exercised in tests against synthetic graphs with the documented
 //! names and shapes; not yet validated against a real OWLv2 export on a Mac.
@@ -46,18 +34,21 @@ use std::path::{Path, PathBuf};
 
 use ac_core::QueryId;
 use ac_media::VideoFrame;
-use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::{Session, SessionOutputs};
 use ort::value::{Tensor, TensorRef};
 use tokenizers::Tokenizer;
 
+mod coreml;
+
 use crate::api::{Detection, Detector, PromptQuery};
 use crate::error::VisionError;
+use crate::matching::{MatchParams, MatchPlan};
 use crate::owl::{
     DecodeParams, OWL_MAX_TOKENS, OwlOutputs, decode, normalize_prompt, pack_tokens,
     preprocess_into,
 };
+use coreml::{cache_in_use, execution_providers, provider_name, with_cache_hint};
 
 /// Where the exported graphs are.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,7 +109,10 @@ pub struct OwlConfig {
     pub max_tokens: usize,
     /// Padding token id; `None` uses the tokenizer's `!` (OWL's pad token), else 0.
     pub pad_token_id: Option<u32>,
-    /// Score threshold for queries without their own.
+    /// Score threshold for queries without their own (default 0.3). With
+    /// `people_first` it applies to the object a prompt names; everyone and
+    /// described-person prompts use `person_threshold` (see
+    /// [`crate::matching`]).
     pub score_threshold: f32,
     /// Per-query score thresholds.
     pub query_thresholds: HashMap<QueryId, f32>,
@@ -134,15 +128,28 @@ pub struct OwlConfig {
     pub max_cached_prompts: usize,
     /// Tensor names in the graphs.
     pub names: OwlTensorNames,
+    /// Return whole people chosen by each prompt instead of the prompt's
+    /// own boxes ([`crate::matching`]).
+    pub people_first: bool,
+    /// The prompt that finds people when `people_first` is set.
+    pub person_prompt: String,
+    /// Lowest person score kept when `people_first` is set, and the
+    /// threshold of everyone and described-person prompts without their own.
+    pub person_threshold: f32,
+    /// Fraction of the smaller of an object's and a person's box that must
+    /// lie inside the other for the person to be chosen, when `people_first`
+    /// is set.
+    pub min_overlap: f64,
 }
 
 impl Default for OwlConfig {
     fn default() -> Self {
+        let matching = MatchParams::default();
         Self {
             input_size: 960,
             max_tokens: OWL_MAX_TOKENS,
             pad_token_id: None,
-            score_threshold: 0.1,
+            score_threshold: matching.object_threshold,
             query_thresholds: HashMap::new(),
             nms_iou: 0.3,
             max_per_query: 16,
@@ -150,6 +157,10 @@ impl Default for OwlConfig {
             intra_threads: None,
             max_cached_prompts: 256,
             names: OwlTensorNames::default(),
+            people_first: true,
+            person_prompt: matching.person_prompt,
+            person_threshold: matching.person_threshold,
+            min_overlap: matching.min_overlap,
         }
     }
 }
@@ -164,7 +175,11 @@ impl OwlConfig {
             && self.query_thresholds.values().all(|&t| unit(t))
             && (0.0..=1.0).contains(&self.nms_iou)
             && self.max_per_query >= 1
-            && self.max_cached_prompts >= 1;
+            && self.max_cached_prompts >= 1
+            && unit(self.person_threshold)
+            && self.min_overlap > 0.0
+            && self.min_overlap <= 1.0
+            && !self.person_prompt.trim().is_empty();
         if ok {
             Ok(())
         } else {
@@ -220,79 +235,6 @@ impl std::fmt::Debug for OnnxOwlDetector {
 /// Wraps a runtime error.
 fn model_err(e: impl std::fmt::Display) -> VisionError {
     VisionError::Model(e.to_string())
-}
-
-/// The execution provider expected to run: `"CoreML"` when it was asked for
-/// and the loaded ONNX Runtime has it, else `"CPU"`.
-fn provider_name(use_coreml: bool) -> &'static str {
-    #[cfg(target_os = "macos")]
-    if use_coreml {
-        use ort::ep::ExecutionProvider;
-        if ort::ep::CoreML::default().is_available().unwrap_or(false) {
-            return "CoreML";
-        }
-    }
-    let _ = use_coreml;
-    "CPU"
-}
-
-/// Execution providers to register for the graph at `path` when `provider`
-/// is in use; see the module docs for the CoreML options.
-fn execution_providers(provider: &str, path: &Path) -> Vec<ExecutionProviderDispatch> {
-    #[cfg(target_os = "macos")]
-    if provider == "CoreML" {
-        let mut coreml = ort::ep::CoreML::default()
-            .with_model_format(ort::ep::coreml::ModelFormat::MLProgram)
-            .with_static_input_shapes(true);
-        if let Some(dir) = coreml_cache_dir(path) {
-            coreml = coreml.with_model_cache_dir(dir.display());
-        }
-        return vec![coreml.build()];
-    }
-    let _ = (provider, path);
-    Vec::new()
-}
-
-/// Where CoreML caches its compiled copy of the graph at `path`:
-/// `coreml-cache/<stem>-<size>-<mtime>` next to it, or `None` when the file's
-/// metadata cannot be read.
-#[cfg(target_os = "macos")]
-fn coreml_cache_dir(path: &Path) -> Option<PathBuf> {
-    let meta = std::fs::metadata(path).ok()?;
-    let modified = meta
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    let stem = path.file_stem()?.to_string_lossy();
-    let dir = path.parent()?.join("coreml-cache");
-    Some(dir.join(format!("{stem}-{}-{modified}", meta.len())))
-}
-
-/// The folder CoreML's compiled copy of the graph at `path` is cached in,
-/// when `provider` is CoreML and the folder can be named.
-fn cache_in_use(provider: &str, path: &Path) -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    if provider == "CoreML" {
-        return coreml_cache_dir(path);
-    }
-    let _ = (provider, path);
-    None
-}
-
-/// `message`, from creating a session whose CoreML cache is `cache`, with
-/// the folder to delete when CoreML could not compile the graph; see the
-/// module docs.
-fn with_cache_hint(message: String, cache: Option<&Path>) -> String {
-    match cache {
-        Some(dir) if message.contains("Error compiling model") => format!(
-            "{message} (an interrupted compile can leave a broken cache: \
-             delete {} and restart)",
-            dir.display()
-        ),
-        _ => message,
-    }
 }
 
 /// Loads one graph and checks that it has the expected inputs.
@@ -565,14 +507,8 @@ impl Detector for OnnxOwlDetector {
         if queries.is_empty() {
             return Ok(Vec::new());
         }
-        let letterbox = preprocess_into(frame, self.config.input_size, &mut self.pixels)?;
-        let keys: Vec<String> = queries
-            .iter()
-            .map(|q| normalize_prompt(&q.prompt))
-            .collect();
-        let (logits, boxes, patches) = self.run_image(&keys)?;
-        let params = DecodeParams {
-            thresholds: queries
+        if !self.config.people_first {
+            let thresholds = queries
                 .iter()
                 .map(|q| {
                     *self
@@ -581,9 +517,51 @@ impl Detector for OnnxOwlDetector {
                         .get(&q.id)
                         .unwrap_or(&self.config.score_threshold)
                 })
-                .collect(),
+                .collect();
+            let max = self.config.max_per_query;
+            return self.detect_queries(frame, queries, thresholds, max);
+        }
+        let plan = MatchPlan::new(
+            queries,
+            |id| self.config.query_thresholds.get(id).copied(),
+            MatchParams {
+                person_prompt: self.config.person_prompt.clone(),
+                person_threshold: self.config.person_threshold,
+                object_threshold: self.config.score_threshold,
+                min_overlap: self.config.min_overlap,
+                max_per_query: self.config.max_per_query,
+            },
+        );
+        // Keep enough people for a crowd; the plan caps each query again.
+        let max = self.config.max_per_query.max(MAX_PEOPLE);
+        let found = self.detect_queries(frame, plan.queries(), plan.thresholds().to_vec(), max)?;
+        Ok(plan.assign(&found))
+    }
+}
+
+/// Most people kept per pass when `people_first` is set.
+const MAX_PEOPLE: usize = 64;
+
+impl OnnxOwlDetector {
+    /// Runs the model for `queries` and decodes each query's boxes at its
+    /// threshold, keeping at most `max_per_query` per query.
+    fn detect_queries(
+        &mut self,
+        frame: &VideoFrame,
+        queries: &[PromptQuery],
+        thresholds: Vec<f32>,
+        max_per_query: usize,
+    ) -> Result<Vec<Detection>, VisionError> {
+        let letterbox = preprocess_into(frame, self.config.input_size, &mut self.pixels)?;
+        let keys: Vec<String> = queries
+            .iter()
+            .map(|q| normalize_prompt(&q.prompt))
+            .collect();
+        let (logits, boxes, patches) = self.run_image(&keys)?;
+        let params = DecodeParams {
+            thresholds,
             nms_iou: self.config.nms_iou,
-            max_per_query: self.config.max_per_query,
+            max_per_query,
         };
         let outputs = OwlOutputs {
             logits: &logits,

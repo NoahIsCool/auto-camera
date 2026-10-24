@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ac_core::{Rect, SourceId};
+use ac_core::{QueryId, Rect, SourceId};
 
 use super::*;
 
@@ -21,11 +21,21 @@ fn fixtures() -> Option<PathBuf> {
     }
 }
 
+/// The fixtures' configuration, returning each prompt's own boxes.
 fn config() -> OwlConfig {
     OwlConfig {
         input_size: 32,
         use_coreml: false,
+        people_first: false,
         ..OwlConfig::default()
+    }
+}
+
+/// The fixtures' configuration with people-first matching (the default).
+fn people_config() -> OwlConfig {
+    OwlConfig {
+        people_first: true,
+        ..config()
     }
 }
 
@@ -216,6 +226,84 @@ fn shape_check_rejects_mismatches() {
     assert!(check_shapes(&[1, 4, 3], &[1, 5, 4], 3).is_err());
     assert!(check_shapes(&[2, 4, 3], &[2, 4, 4], 3).is_err());
     assert!(check_shapes(&[4, 3], &[4, 4], 3).is_err());
+}
+
+#[test]
+fn people_first_returns_people_chosen_by_their_objects() {
+    let Some(dir) = fixtures() else { return };
+    let mut det =
+        OnnxOwlDetector::load(split(&dir), &dir.join("tokenizer.json"), people_config()).unwrap();
+    let q = vec![
+        PromptQuery::new("all", "person"),
+        PromptQuery::new("gtr", "a person playing guitar"),
+        PromptQuery::new("drm", "the drum"),
+        // An unknown word scores 0.5 everywhere, so its box on the person
+        // patch lies inside the person: the person is picked.
+        PromptQuery::new("any", "a woman"),
+    ];
+    let dets = det.detect(&frame(255), &q).unwrap();
+    let person = Rect::new(0.15, 0.1, 0.2, 0.4);
+    let by = |id: &str| dets.iter().filter(|d| d.query.0 == id).collect::<Vec<_>>();
+    assert_eq!(by("all").len(), 1, "{dets:?}");
+    assert!(near(by("all")[0].bbox, person));
+    assert!(by("gtr").is_empty(), "the guitar is on no one: {dets:?}");
+    assert!(by("drm").is_empty(), "the drum is on no one: {dets:?}");
+    assert_eq!(by("any").len(), 1, "{dets:?}");
+    assert!(near(by("any")[0].bbox, person));
+    assert!(
+        (by("any")[0].score - 0.5).abs() < 1e-5,
+        "the object's score"
+    );
+    // Model queries: the person, "a guitar", "the drum" and "a woman".
+    assert_eq!(det.cached_embeddings(), 4);
+}
+
+#[test]
+fn people_first_thresholds_apply_to_people_and_objects() {
+    let Some(dir) = fixtures() else { return };
+    let mut strict = people_config();
+    strict.person_threshold = 0.99;
+    let mut det =
+        OnnxOwlDetector::load(combined(&dir), &dir.join("tokenizer.json"), strict).unwrap();
+    let q = vec![
+        PromptQuery::new("all", "person"),
+        PromptQuery::new("any", "a woman"),
+    ];
+    assert!(
+        det.detect(&frame(255), &q).unwrap().is_empty(),
+        "no one passes 0.99"
+    );
+    let mut picky = people_config();
+    picky.query_thresholds.insert(QueryId("any".into()), 0.6);
+    let mut det =
+        OnnxOwlDetector::load(combined(&dir), &dir.join("tokenizer.json"), picky).unwrap();
+    let dets = det.detect(&frame(255), &q).unwrap();
+    assert!(
+        dets.iter().all(|d| d.query.0 == "all"),
+        "0.5 objects fail 0.6: {dets:?}"
+    );
+}
+
+#[test]
+fn people_first_settings_are_validated() {
+    let bad = [
+        OwlConfig {
+            person_threshold: 1.5,
+            ..people_config()
+        },
+        OwlConfig {
+            min_overlap: 0.0,
+            ..people_config()
+        },
+        OwlConfig {
+            person_prompt: "  ".into(),
+            ..people_config()
+        },
+    ];
+    for c in bad {
+        assert!(c.validate().is_err(), "{c:?}");
+    }
+    assert!(people_config().validate().is_ok());
 }
 
 /// A failed CoreML compile names the cache folder to delete; other errors,
