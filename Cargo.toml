@@ -14,6 +14,14 @@ ac-core = { path = "crates/ac-core" }
 ac-framing = { path = "crates/ac-framing" }
 ac-switcher = { path = "crates/ac-switcher" }
 ac-eval = { path = "crates/ac-eval" }
+ac-media = { path = "crates/ac-media" }
+ac-vision = { path = "crates/ac-vision" }
+ac-subjects = { path = "crates/ac-subjects" }
+ac-director = { path = "crates/ac-director" }
+ac-compositor = { path = "crates/ac-compositor" }
+ac-output = { path = "crates/ac-output" }
+ac-engine = { path = "crates/ac-engine" }
+ac-sources = { path = "crates/ac-sources" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
@@ -23,3 +31,14 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+# CLAUDE.md: private items are documented too (`missing_docs` covers only
+# public ones); `-D warnings` makes this fatal in CI.
+missing_docs_in_private_items = "warn"
+
+# The tracker and compositor do per-pixel work; optimize them in dev and test
+# builds so debug runs of the engine and its tests stay real-time.
+[profile.dev.package.ac-vision]
+opt-level = 3
+
+[profile.dev.package.ac-compositor]
+opt-level = 3

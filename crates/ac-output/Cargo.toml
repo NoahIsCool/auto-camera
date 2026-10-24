@@ -1,0 +1,18 @@
+[package]
+name = "ac-output"
+description = "Program encoder: one ffmpeg encode feeding an RTMP stream and a fragmented MP4 recording"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ac-media.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ac-core.workspace = true
+
+[lints]
+workspace = true

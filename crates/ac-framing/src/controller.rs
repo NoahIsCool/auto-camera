@@ -60,12 +60,16 @@ const RELEASE_RATIO: f64 = 0.25;
 /// One axis with dead-zone hysteresis.
 #[derive(Debug, Clone, Copy)]
 struct Axis {
+    /// The critically damped spring that moves the value.
     spring: Spring,
+    /// Where the spring is heading; it follows the target only while moving.
     goal: f64,
+    /// The target left the dead band and the axis is travelling to it.
     moving: bool,
 }
 
 impl Axis {
+    /// An axis at rest at `value`.
     fn new(value: f64, half_life: f64, max_speed: f64) -> Self {
         Self {
             spring: Spring::new(value, half_life, max_speed),
@@ -96,11 +100,17 @@ impl Axis {
 /// Smooth framing state of one shot.
 #[derive(Debug, Clone)]
 pub struct ShotFramer {
+    /// Tuning.
     config: FramerConfig,
+    /// Width divided by height of the source picture.
     source_aspect: f64,
+    /// Width divided by height of the output picture.
     output_aspect: f64,
+    /// Horizontal centre of the crop.
     x: Axis,
+    /// Vertical centre of the crop.
     y: Axis,
+    /// Natural log of the crop width, so zoom moves evenly in scale.
     log_w: Axis,
 }
 

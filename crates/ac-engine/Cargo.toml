@@ -1,0 +1,36 @@
+[package]
+name = "ac-engine"
+description = "Runtime that wires sources, vision, subjects, framing, switching, compositing and output with message passing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Enables the OWLv2 ONNX detector (see crates/ac-vision/README.md).
+onnx = ["ac-vision/onnx"]
+
+[dependencies]
+ac-core.workspace = true
+ac-media.workspace = true
+ac-sources.workspace = true
+ac-vision.workspace = true
+ac-subjects.workspace = true
+ac-director.workspace = true
+ac-framing.workspace = true
+ac-switcher.workspace = true
+ac-compositor.workspace = true
+ac-output.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+serde_json = "1.0"
+toml = "1.1"
+
+[dev-dependencies]
+# Only to name the global pool's threads in the shutdown test.
+rayon = "1.12"
+
+[lints]
+workspace = true

@@ -1,0 +1,49 @@
+[package]
+name = "ac-vision"
+description = "Detector and tracker traits, a pure-Rust template tracker and an optional ONNX open-vocabulary detector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# OWLv2 / OWL-ViT through ONNX Runtime. Off by default: building it downloads
+# ONNX Runtime binaries unless ORT_LIB_LOCATION points at a local build.
+onnx = ["dep:ort", "dep:tokenizers"]
+
+[dependencies]
+ac-core.workspace = true
+ac-media.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+rayon = "1.12"
+# Only what the detector uses: no ndarray or tracing integration. The
+# download (with its TLS stack) is what fetches ONNX Runtime at build time
+# when ORT_LIB_LOCATION does not name a local one.
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = [
+    "std",
+    "api-27",
+    "download-binaries",
+    "tls-native",
+    "copy-dylibs",
+] }
+tokenizers = { version = "0.23", optional = true, default-features = false, features = ["fancy-regex"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = [
+    "std",
+    "api-27",
+    "download-binaries",
+    "tls-native",
+    "copy-dylibs",
+    "coreml",
+] }
+
+[lints]
+workspace = true
+
+[[example]]
+name = "owl_detect"
+required-features = ["onnx"]

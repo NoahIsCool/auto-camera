@@ -1,0 +1,60 @@
+# A studio fed by a local video file, with the OWLv2 detector.
+#
+# Requires ffmpeg on PATH, and a build with the `onnx` feature:
+#
+#   cargo run -p auto-camera --features onnx -- --config config/file-source.example.toml
+#
+# Copy this file, then point `path`, `model` and `tokenizer` at real files
+# (see crates/ac-vision/README.md for exporting OWLv2 to ONNX). Relative paths
+# are resolved against this file's directory.
+
+[[sources]]
+id = "cam-1"
+name = "Rehearsal"
+kind = "file"
+path = "../media/rehearsal.mp4"
+loop_playback = true
+# Decode at most 1280 pixels wide; the tracker and compositor work on this.
+max_width = 1280
+audio = true
+
+[[queries]]
+name = "Speaker"
+prompt = "a person speaking at a lectern"
+presets = ["medium", "close"]
+
+[[queries]]
+name = "Guitarist"
+prompt = "a person playing guitar"
+presets = ["full", { id = "tight", name = "Tight", size = "close", headroom = 0.03, max_zoom = 6.0 }]
+
+[detector]
+kind = "owl"
+# The split export (crates/ac-vision/README.md) caches prompt embeddings; for
+# the combined one, set model = ".../model.onnx" and drop text_encoder.
+model = "../models/owlv2-split-onnx/detector.onnx"
+text_encoder = "../models/owlv2-split-onnx/text_encoder.onnx"
+tokenizer = "../models/owlv2-split-onnx/tokenizer.json"
+score_threshold = 0.2
+# CoreML on Apple Silicon (the default): about 0.2 s per pass after a
+# compile of a few minutes on first use, cached next to the model.
+use_coreml = true
+
+[discovery]
+# OWLv2 base takes about 0.2 s per frame on CoreML and 2 s on an Apple CPU;
+# the tracker fills the gaps.
+rate_hz = 1.0
+max_result_age_s = 3.0
+
+[director]
+mode = "suggest"
+profile = "music"
+
+[output]
+width = 1280
+height = 720
+fps = 30
+# Program audio comes from this source's embedded audio track.
+audio_source = "cam-1"
+# rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
+record_path = "../recordings/show.mp4"
