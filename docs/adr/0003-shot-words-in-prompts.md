@@ -187,10 +187,14 @@ head; it seeds it only from boxes clear of the side edges, then frames every
 box cut by the bottom on it (also at a side edge or with the crown at the
 frame top) and reads the bottom edge with hysteresis: after a box at the
 edge, a box ending within 3% of the bottom is still read as cut off, until
-a box ends above that band. Full, boxes clear of the bottom (cut by the top
-or too squat), and, until the shot holds a `V`, boxes cut by the bottom
-that touch a side edge or the frame top keep the fill rule. Every other
-subject keeps the fill rule, unchanged.
+a box measured on the canon (untruncated) ends above that band. A box that
+measures nothing (too squat, as behind a lectern, or cut by the top) keeps
+that reading wherever it ends, so a speaker never seen whole who steps out
+from behind a lectern with one box just above the edge is not measured as
+a whole body. Full, boxes clear of the bottom (cut by the top or too
+squat), and, until the shot holds a `V`, boxes cut by the bottom that
+touch a side edge or the frame top keep the fill rule. Every other subject
+keeps the fill rule, unchanged.
 
 A shot the preset's zoom ceiling keeps from its size is drawn at the
 ceiling and marked: a LIMITED badge on its multiview tile (never in the
@@ -315,7 +319,7 @@ query, notices included.
    memory and no stored `V`); after a box at the edge, a whole body whose
    feet stay within the 3% band is still read as crown to waist and its
    Full falls to the fill rule; and a head raised while the person was cut
-   stays raised until a box ends above 0.97.
+   stays raised until a box measured on the canon ends above 0.97.
 10. The shot-label rule for aliases and its inferred constants: an alias
     frames shots once 2 detection passes that observed the subject have
     seen it (`alias_confirm_passes`), and stops after 8 such passes in a

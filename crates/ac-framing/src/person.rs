@@ -151,11 +151,13 @@
 //!
 //! Once a shot holds `V` it reads the bottom edge with hysteresis, as the
 //! framer reads the zoom ceiling: a box that reaches the bottom edge (within
-//! [`EDGE_MARGIN`]) puts the shot in the cut state, a box that ends above the
-//! release band, more than [`RELEASE_MARGIN`] (0.03, about 22 px at 720p,
-//! inferred) above the source bottom, takes it out, and a box ending in
-//! between keeps the last state. In the cut state the stored `V` is in force
-//! ([`HeadMemory::assumed_heads_in_force`]):
+//! [`EDGE_MARGIN`]) puts the shot in the cut state, a box the canon can
+//! measure ([`head_height`]: untruncated) that ends above the release band,
+//! more than [`RELEASE_MARGIN`] (0.03, about 22 px at 720p, inferred) above
+//! the source bottom, takes it out, and any other box keeps the last state:
+//! one ending in between, and one that measures nothing (squat, as behind a
+//! lectern, or cut by the top) wherever it ends. In the cut state the stored
+//! `V` is in force ([`HeadMemory::assumed_heads_in_force`]):
 //!
 //! * every box cut by the bottom is framed on the stored `V`, also one that
 //!   touches a side edge (its width is cut, so it cannot update `V`) and one
@@ -169,10 +171,14 @@
 //!   cannot seed `b.h / 7.5`, the scale of a whole body, and collapse Medium
 //!   close and Medium onto the Close.
 //!
-//! Out of the cut state an untruncated box in the band is measured again, so
-//! a person who steps clear of the band and then back to feet at 0.98 is
-//! framed as a whole body, and a head raised while they were cut comes back
-//! down.
+//! Every way out of the cut state is a box measured on the canon, which
+//! seeds or updates the measured head, so once a shot holds `V` a box in the
+//! band never seeds the head: a speaker never seen whole who steps out from
+//! behind a lectern with one box ending at 0.985 is still read as cut by the
+//! bottom. Out of the cut state an untruncated box in the band is measured
+//! again, so a person who steps clear of the band and then back to feet at
+//! 0.98 is framed as a whole body, and a head raised while they were cut
+//! comes back down.
 //!
 //! # Limits
 //!
@@ -198,8 +204,9 @@
 //! a box at the edge, a whole body whose feet stay in the band still reads
 //! as cut by the bottom, so with no head remembered it is framed crown to
 //! waist and its Full falls to the fill rule, and a head raised while the
-//! person was cut stays raised until a box ends above 0.97. All of these
-//! wait for a head source (a head detector, masks or pose).
+//! person was cut stays raised until a box measured on the canon ends above
+//! 0.97. All of these wait for a head source (a head detector, masks or
+//! pose).
 
 use ac_core::{Preset, Rect, ShotSize};
 
@@ -247,9 +254,9 @@ pub const SHOULDER_HEADS: f64 = MAX_ASSUMED_HEADS / MIN_STANDING_ASPECT;
 
 /// Distance from the bottom of the source, as a fraction of its height,
 /// within which a box still reads as cut by the bottom while its shot's
-/// assumed head count is in force: from a box at the edge until a box ends
-/// above this band (hysteresis on [`EDGE_MARGIN`]; about 22 px at 720p,
-/// inferred). See the module docs.
+/// assumed head count is in force: from a box at the edge until a box
+/// measured on the canon ([`head_height`]) ends above this band (hysteresis
+/// on [`EDGE_MARGIN`]; about 22 px at 720p, inferred). See the module docs.
 pub const RELEASE_MARGIN: f64 = 0.03;
 
 /// The lower cut line of `size`, in head heights below the crown; see the
@@ -317,8 +324,9 @@ fn reaches_bottom(bbox: &Rect, margin: f64) -> bool {
 }
 
 /// True when `bbox` is finite, not empty, and ends above the release band
-/// (more than [`RELEASE_MARGIN`] above the source bottom): it takes a shot
-/// out of the cut state. See the module docs.
+/// (more than [`RELEASE_MARGIN`] above the source bottom): such a box takes
+/// a shot out of the cut state when the canon can also measure it
+/// ([`head_height`]). See the module docs.
 fn ends_above_release_band(bbox: &Rect) -> bool {
     is_box(bbox) && !reaches_bottom(bbox, RELEASE_MARGIN)
 }
@@ -435,9 +443,10 @@ pub struct HeadMemory {
     /// The cut state: the shot reads its person as cut by the bottom, so
     /// `assumed_heads` is in force. Set by a box that reaches the bottom
     /// edge (within [`EDGE_MARGIN`]) once a count is stored, cleared by a
-    /// box that ends above the release band, kept by any other box. Never
-    /// true without a stored count: until one is stored there is nothing in
-    /// force.
+    /// box measured on the canon ([`head_height`]) that ends above the
+    /// release band, kept by any other box, also a squat or top-cut one
+    /// above the band. Never true without a stored count: until one is
+    /// stored there is nothing in force.
     cut_by_bottom: bool,
 }
 
@@ -462,9 +471,10 @@ impl HeadMemory {
 
     /// The assumed head count the shot frames on now: the stored count
     /// ([`Self::assumed_heads`]) while the shot is in the cut state (since
-    /// the last box at the bottom edge, no box has ended above the release
-    /// band), `None` otherwise. This is the count [`measured_head`] and
-    /// [`compose_subject`](crate::compose_subject) take. See the module docs.
+    /// the last box at the bottom edge, no box measured on the canon has
+    /// ended above the release band), `None` otherwise. This is the count
+    /// [`measured_head`] and [`compose_subject`](crate::compose_subject)
+    /// take. See the module docs.
     pub fn assumed_heads_in_force(&self) -> Option<f64> {
         self.assumed_heads
             .filter(|v| self.cut_by_bottom && usable_heads(*v))
@@ -479,8 +489,10 @@ impl HeadMemory {
     /// and it never touches the head.
     ///
     /// The cut state ([`Self::assumed_heads_in_force`]): with a count
-    /// stored, a box that reaches the bottom edge enters it; a box that
-    /// ends above the release band leaves it; any other box keeps it.
+    /// stored, a box that reaches the bottom edge enters it; an untruncated
+    /// box ([`head_height`]) that ends above the release band leaves it, and
+    /// is measured; any other box keeps it, also a squat or top-cut one
+    /// above the band, which measures nothing.
     ///
     /// The head: the first box measured on the canon ([`measured_head`],
     /// given the count in force) seeds the memory; later ones move it the
@@ -507,7 +519,7 @@ impl HeadMemory {
         }
         if reaches_bottom(bbox, EDGE_MARGIN) {
             self.cut_by_bottom = self.assumed_heads.is_some();
-        } else if ends_above_release_band(bbox) {
+        } else if ends_above_release_band(bbox) && head_height(bbox, source_aspect).is_some() {
             self.cut_by_bottom = false;
         }
         match (

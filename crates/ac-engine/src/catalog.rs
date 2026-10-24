@@ -30,9 +30,10 @@
 //! is framed as a whole person, cut at body lines, only when the shot's
 //! basis is a person and the detector marked the box a whole person
 //! ([`Basis::framing_extent`]); otherwise it keeps the fill rule. A whole
-//! person's box is measured on its own proportions; a truncated one is
-//! sized by the shot's remembered head, or, when it is cut by the bottom of
-//! the picture, by an assumed head ([`ac_framing::person`]), before the
+//! person's box is measured on its own proportions unless the shot reads
+//! the person as cut by the bottom of the picture; any other box is sized
+//! by the shot's remembered head, or, when it is cut by the bottom or read
+//! as cut by it, by an assumed head ([`ac_framing::person`]), before the
 //! fill rule. A new shot starts framed on its subject the same way
 //! ([`compose_subject`]). Each entry reports whether its shot
 //! is held back by its preset's zoom ceiling ([`ShotEntry::limited_by_zoom`]),

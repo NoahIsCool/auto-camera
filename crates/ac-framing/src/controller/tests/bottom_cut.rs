@@ -2,7 +2,8 @@
 //! through the framer for a minute at 30 Hz: the smoothed assumed head
 //! count keeps the crop and the "(limited)" verdict steady through
 //! gestures, a walk to a side edge, a crown bobbing at the top edge and a
-//! single box that ends just above the bottom edge.
+//! single box that ends just above the bottom edge, also as the speaker
+//! steps out from behind a lectern.
 
 use super::*;
 
@@ -178,4 +179,36 @@ fn one_box_just_above_the_bottom_edge_does_not_collapse_the_shots() {
     }
     let medium = run_shot(ShotSize::Medium, 30.0, lifted_once);
     assert!((medium.last_height() - 0.3804).abs() < 1e-3);
+}
+
+#[test]
+fn a_speaker_stepping_out_from_a_lectern_is_still_read_as_cut() {
+    // Cut by the bottom for 10 s, behind a lectern for 5 s (a squat box
+    // ending at 0.80, which measures nothing), one box ending at 0.985 as
+    // they step out, then cut by the bottom again for 30 s. Had the
+    // lectern ended the cut state, the 0.985 box would be measured as a
+    // whole body and seed b.h / 7.5, and Medium close and Medium would
+    // collapse onto the Close at the ceiling for the rest of the shot.
+    let lectern_exit = |t: f64| {
+        if t < 10.0 {
+            speaker(0.45, 0.10)
+        } else if t < 15.0 {
+            Rect::new(0.45, 0.65, 0.10, 0.15)
+        } else if (t - 15.0).abs() < DT / 2.0 {
+            Rect::new(0.45, 0.65, 0.10, 0.335)
+        } else {
+            speaker(0.45, 0.10)
+        }
+    };
+    for (size, h, limited) in [
+        (ShotSize::Close, 0.25, true),
+        (ShotSize::MediumClose, 0.2855, false),
+        (ShotSize::Medium, 0.3804, false),
+    ] {
+        let trace = run_shot(size, 45.0, lectern_exit);
+        assert_eq!(trace.framer.head_height(), None, "{size:?}");
+        let last = trace.last_height();
+        assert!((last - h).abs() < 1e-3, "{size:?}: {last}");
+        assert_eq!(trace.limited.last(), Some(&limited), "{size:?}");
+    }
 }

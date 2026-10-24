@@ -1,8 +1,9 @@
 //! Tests for the release band as a hysteresis on a shot's last reading of
 //! the bottom edge (the cut state of [`HeadMemory`]): with a count stored,
-//! a box at the edge puts the shot in the cut state, a box ending above the
-//! band takes it out, and a box in the band keeps whichever came last. Also
-//! the limits that remain, as the module docs list them.
+//! a box at the edge puts the shot in the cut state, a box the canon
+//! measures ending above the band takes it out, and any other box (in the
+//! band, or measuring nothing) keeps whichever came last. Also the limits
+//! that remain, as the module docs list them.
 //!
 //! Most tests here use a half-life of zero, so each box moves the head all
 //! the way at once and the gating shows in a single step.
@@ -95,8 +96,10 @@ fn the_framer_s_view_follows_the_cut_state() {
             "{size:?}"
         );
     }
-    // Out of it, the same box is a whole body, Full the whole box.
-    m.observe(&whole(0.6, 0.96), HD, HALF_LIFE, DT);
+    // Out of it, the same box is a whole body, Full the whole box: measured
+    // on its own proportions (a head of 0.08), not sized by the head of
+    // 0.1 remembered from the taller box that ended the cut state.
+    m.observe(&whole(0.75, 0.96), HD, HALF_LIFE, DT);
     m.observe(&short, HD, HALF_LIFE, DT);
     for size in SIZES {
         let p = unlimited(size);
@@ -119,8 +122,9 @@ fn boxes_that_say_nothing_about_the_edge_keep_the_cut_state() {
     assert_eq!(m.assumed_heads_in_force(), None);
     m.observe(&cut(), HD, HALF_LIFE, DT);
     let held = m;
-    // Empty, negative or non-finite boxes, even ones that would end above
-    // the band, change nothing.
+    // Empty, negative or non-finite boxes, and boxes the canon cannot
+    // measure, change nothing, even ones that end above the band: a squat
+    // box (behind a lectern) and one cut by the top.
     for b in [
         Rect::new(0.45, 0.3, 0.0, 0.3),
         Rect::new(0.45, 0.3, 0.1, 0.0),
@@ -128,13 +132,20 @@ fn boxes_that_say_nothing_about_the_edge_keep_the_cut_state() {
         Rect::new(f64::NAN, 0.3, 0.1, 0.3),
         Rect::new(0.45, f64::NAN, 0.1, 0.3),
         Rect::new(0.45, 0.3, 0.1, f64::INFINITY),
+        Rect::new(0.45, 0.3, 0.1, 0.22),
+        Rect::new(0.4, 0.0, 0.2, 0.9),
     ] {
         m.observe(&b, HD, HALF_LIFE, DT);
         assert_eq!(m, held, "{b:?}");
     }
-    // A squat box above the band (a lectern) does end the cut state.
-    m.observe(&Rect::new(0.45, 0.3, 0.1, 0.22), HD, HALF_LIFE, DT);
-    assert_eq!(m.assumed_heads_in_force(), None);
+    assert_eq!(m.assumed_heads_in_force(), Some(3.0));
+    // So a box in the band after a lectern still reads as cut by the
+    // bottom and seeds nothing.
+    assert_eq!(
+        m.observe(&Rect::new(0.45, 0.65, 0.1, 0.335), HD, HALF_LIFE, DT),
+        None
+    );
+    assert_eq!(m.assumed_heads_in_force(), Some(3.0));
 }
 
 #[test]
@@ -159,8 +170,8 @@ fn the_band_follows_the_edge_not_the_body() {
         compose_subject(&seen_by(back, &m), &full, HD, HD),
         compose(&back, &full, HD, HD)
     );
-    // A head raised while the person was cut stays raised until a box
-    // ends above the band.
+    // A head raised while the person was cut stays raised until a box the
+    // canon measures ends above the band.
     let mut m = HeadMemory::new();
     m.observe(&whole(0.6, 0.95), HD, INSTANT, DT);
     assert!(is_head(m.observe(&cut_close(), HD, INSTANT, DT), 0.1));
