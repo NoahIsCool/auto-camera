@@ -93,6 +93,11 @@ impl EngineCore {
                 prompt: q.prompt.clone(),
                 parse: q.parse.clone(),
                 presets: q.presets.clone(),
+                matches: self
+                    .sources
+                    .iter()
+                    .filter_map(|s| s.discovery.matches.get(&q.id).cloned())
+                    .collect(),
             })
             .collect();
         let out = self.switcher.output();
@@ -152,6 +157,7 @@ impl EngineCore {
             preview_monitor: self.preview_monitor.clone(),
             render_issues: self.render_issues.clone(),
             program_changes: self.program_changes,
+            shared_detector: self.shared_detector,
         }
     }
 }

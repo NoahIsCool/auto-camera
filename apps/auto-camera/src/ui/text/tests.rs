@@ -180,11 +180,26 @@ fn output_text_covers_every_state_and_stat() {
     );
 }
 
-/// A live query for `prompt`, read with the built-in lexicon, framed by
-/// `sizes` (the shot words' sizes, or medium and close, when `None`).
+/// A live query for `prompt`, read with the built-in lexicon for a
+/// detector that does not see actions (OWLv2), framed by `sizes` (the shot
+/// words' sizes, or medium and close, when `None`).
 fn query(prompt: &str, literal: bool, sizes: Option<&[ac_core::ShotSize]>) -> QueryView {
-    let lexicon = ac_core::Lexicon::builtin();
-    let parse = ac_engine::read_prompt(prompt, literal, &lexicon);
+    query_for(&reader(false), prompt, literal, sizes)
+}
+
+/// The built-in lexicon, for a detector that does or does not see actions.
+fn reader(sees_actions: bool) -> ac_engine::PromptReader {
+    ac_engine::PromptReader::new(ac_core::Lexicon::builtin(), sees_actions)
+}
+
+/// [`query`], read with `reader`.
+fn query_for(
+    reader: &ac_engine::PromptReader,
+    prompt: &str,
+    literal: bool,
+    sizes: Option<&[ac_core::ShotSize]>,
+) -> QueryView {
+    let parse = ac_engine::read_prompt(prompt, literal, reader);
     let explicit = sizes.map(ac_engine::shot_presets);
     QueryView {
         id: ac_core::QueryId("q".into()),
@@ -192,7 +207,249 @@ fn query(prompt: &str, literal: bool, sizes: Option<&[ac_core::ShotSize]>) -> Qu
         prompt: prompt.into(),
         presets: ac_engine::queries::settle_presets(explicit, &parse),
         parse,
+        matches: Vec::new(),
     }
+}
+
+/// A pass on `source` that found `count` boxes, the best at `best`, all
+/// above the 0.35 floor.
+fn found(source: &str, count: usize, best: Option<f32>) -> MatchView {
+    MatchView {
+        source: ac_core::SourceId(source.into()),
+        seq: 41,
+        pts: Duration::from_secs(75),
+        count,
+        best,
+        kept: count,
+        floor: 0.35,
+    }
+}
+
+#[test]
+fn prompt_feedback_counts_matches_and_rounds_the_best_score() {
+    assert_eq!(
+        match_text(&found("s", 3, Some(0.7149))),
+        "3 matches · best 0.71"
+    );
+    assert_eq!(
+        match_text(&found("s", 1, Some(0.42))),
+        "1 match · best 0.42"
+    );
+    assert_eq!(match_text(&found("s", 0, None)), NO_MATCHES);
+    // A count without a score cannot happen; it reads as nothing found.
+    assert_eq!(match_text(&found("s", 2, None)), NO_MATCHES);
+}
+
+#[test]
+fn prompt_feedback_says_how_many_boxes_fall_below_the_store_floor() {
+    let below = MatchView {
+        kept: 0,
+        floor: 0.5,
+        ..found("s", 1, Some(0.4))
+    };
+    assert_eq!(
+        match_text(&below),
+        "1 match below the 0.50 floor · best 0.40"
+    );
+    let mixed = MatchView {
+        kept: 2,
+        floor: 0.5,
+        ..found("s", 3, Some(0.71))
+    };
+    assert_eq!(
+        match_text(&mixed),
+        "2 matches · best 0.71 · 1 below the 0.50 floor"
+    );
+    let mut snap = snapshot();
+    snap.sources[0].discovery_enabled = true;
+    let mut q = snap.queries[0].clone();
+    q.matches = vec![MatchView {
+        source: snap.sources[0].id.clone(),
+        ..below
+    }];
+    assert_eq!(match_lines(&snap, &q)[0].1, Tone::Warning, "nothing framed");
+    q.matches[0] = MatchView {
+        source: snap.sources[0].id.clone(),
+        ..mixed
+    };
+    assert_eq!(match_lines(&snap, &q)[0].1, Tone::Plain);
+}
+
+#[test]
+fn a_failing_detector_replaces_the_old_feedback_with_its_reason() {
+    use ac_engine::PassOutcome;
+    let mut snap = snapshot();
+    snap.sources[0].discovery_enabled = true;
+    let mut q = snap.queries[0].clone();
+    // The startup failed before any pass: not "no detector pass yet".
+    let d = &mut snap.sources[0].discovery;
+    d.errors = 4;
+    d.last_error = Some("detector unavailable: the sidecar exited before hello".into());
+    d.last_outcome = Some(PassOutcome::Failed);
+    let lines = match_lines(&snap, &q);
+    assert_eq!(lines[0].0, DETECTOR_ERROR);
+    assert_eq!(lines[0].1, Tone::Warning);
+    assert!(lines[0].2.contains("exited before hello"), "{}", lines[0].2);
+    assert!(
+        lines[0].2.contains("no pass has been applied"),
+        "{}",
+        lines[0].2
+    );
+    // Mid-show: the old numbers move to the hover text.
+    q.matches = vec![found("stage", 3, Some(0.71))];
+    let lines = match_lines(&snap, &q);
+    assert_eq!(lines[0].0, DETECTOR_ERROR);
+    assert!(
+        lines[0]
+            .2
+            .contains("last applied pass found 3 matches · best 0.71 on frame 41 at 1:15"),
+        "{}",
+        lines[0].2
+    );
+    let d = &mut snap.sources[0].discovery;
+    d.stale = 5;
+    d.last_outcome = Some(PassOutcome::Stale);
+    assert_eq!(
+        match_lines(&snap, &q)[0].0,
+        "detector answers too old (5 dropped)"
+    );
+    let d = &mut snap.sources[0].discovery;
+    d.timeouts = 1;
+    d.last_outcome = Some(PassOutcome::TimedOut);
+    let line = match_lines(&snap, &q).remove(0);
+    assert_eq!(line.0, "detector not answering (1 timed out)");
+    // Only a shared detector process is blamed on a restart.
+    assert!(!snap.shared_detector);
+    assert!(line.2.contains("slower than that, or stuck"), "{}", line.2);
+    assert!(!line.2.contains("sidecar"), "{}", line.2);
+    snap.shared_detector = true;
+    let hover = match_lines(&snap, &q).remove(0).2;
+    assert!(hover.contains("restarted sidecar"), "{hover}");
+    snap.sources[0].discovery.last_outcome = Some(PassOutcome::Applied);
+    assert_eq!(match_lines(&snap, &q)[0].0, "3 matches · best 0.71");
+}
+
+#[test]
+fn the_status_bar_counts_detector_failures_and_warns() {
+    use ac_engine::PassOutcome;
+    let mut snap = snapshot();
+    let s = &mut snap.sources[0];
+    s.discovery_enabled = true;
+    let plain = source_line(s, Duration::ZERO);
+    assert!(!plain.contains("detect "), "{plain}");
+    assert_eq!(source_tone(s), Tone::Plain);
+    assert_eq!(source_hover(s), "");
+    s.discovery.last_latency = Some(Duration::from_millis(640));
+    s.discovery.errors = 3;
+    s.discovery.stale = 2;
+    s.discovery.timeouts = 1;
+    s.discovery.last_error = Some("the sidecar is unavailable: crashed".into());
+    s.discovery.last_outcome = Some(PassOutcome::Failed);
+    let line = source_line(s, Duration::ZERO);
+    assert!(
+        line.ends_with("detect 640.0 ms · 3 detector errors · 2 too old · 1 timed out · NO SIGNAL"),
+        "{line}"
+    );
+    assert_eq!(source_tone(s), Tone::Warning);
+    assert_eq!(
+        source_hover(s),
+        "newest detector error: the sidecar is unavailable: crashed"
+    );
+}
+
+#[test]
+fn a_preparing_detector_reads_as_preparing_not_as_not_answering() {
+    use ac_engine::PassOutcome;
+    let mut snap = preparing_snapshot();
+    let q = snap.queries[0].clone();
+    assert!(snap.sources[0].discovery_enabled && snap.sources[0].discovery.preparing);
+    let preparing = (
+        PREPARING.to_string(),
+        Tone::Weak,
+        "loading the model; the window and program keep running".to_string(),
+    );
+    assert_eq!(match_lines(&snap, &q), std::slice::from_ref(&preparing));
+    assert_eq!(source_tone(&snap.sources[0]), Tone::Plain, "not amber");
+    // Preparing wins over a timeout on record, which is what a load used
+    // to look like.
+    let mut timed_out = snap.clone();
+    let d = &mut timed_out.sources[0].discovery;
+    d.timeouts = 3;
+    d.last_outcome = Some(PassOutcome::TimedOut);
+    assert_eq!(
+        match_lines(&timed_out, &q),
+        std::slice::from_ref(&preparing)
+    );
+    // A shared detector starting: every source prepares, and one line
+    // says so.
+    let mut second = snap.sources[0].clone();
+    second.id = ac_core::SourceId("pulpit".into());
+    second.name = "Pulpit".into();
+    snap.sources.push(second);
+    assert_eq!(match_lines(&snap, &q), [preparing]);
+    // Detectors of their own load apart: each source says where it is.
+    snap.sources[0].discovery.preparing = false;
+    let lines = match_lines(&snap, &q);
+    let texts: Vec<(&str, Tone)> = lines.iter().map(|l| (l.0.as_str(), l.1)).collect();
+    assert_eq!(
+        texts,
+        [
+            ("stage: no detector pass yet", Tone::Weak),
+            ("Pulpit: preparing the detector", Tone::Weak),
+        ]
+    );
+    // Once it is ready, a request that gets no answer is amber again.
+    let d = &mut snap.sources[1].discovery;
+    d.preparing = false;
+    d.timeouts = 1;
+    d.last_outcome = Some(PassOutcome::TimedOut);
+    let lines = match_lines(&snap, &q);
+    assert_eq!(lines[1].0, "Pulpit: detector not answering (1 timed out)");
+    assert_eq!(lines[1].1, Tone::Warning);
+}
+
+#[test]
+fn prompt_feedback_lines_name_sources_only_when_there_are_several() {
+    let mut snap = snapshot();
+    let mut q = snap.queries[0].clone();
+    assert!(q.matches.is_empty());
+    assert!(match_lines(&snap, &q).is_empty(), "discovery is off");
+    snap.sources[0].discovery_enabled = true;
+    assert_eq!(
+        match_lines(&snap, &q),
+        [(NO_PASS_YET.to_string(), Tone::Weak, String::new())]
+    );
+    q.matches = vec![found("stage", 2, Some(0.9))];
+    let lines = match_lines(&snap, &q);
+    assert_eq!(lines[0].0, "2 matches · best 0.90");
+    assert_eq!(lines[0].1, Tone::Plain);
+    assert_eq!(
+        lines[0].2,
+        "newest detector pass on stage: frame 41 at 1:15"
+    );
+    let mut second = snap.sources[0].clone();
+    second.id = ac_core::SourceId("pulpit".into());
+    second.name = "Pulpit".into();
+    snap.sources.push(second);
+    // Neither source has a pass yet: one line, not one per source.
+    let empty = QueryView {
+        matches: Vec::new(),
+        ..q.clone()
+    };
+    assert_eq!(
+        match_lines(&snap, &empty),
+        [(NO_PASS_YET.to_string(), Tone::Weak, String::new())]
+    );
+    q.matches.push(found("pulpit", 0, None));
+    let lines = match_lines(&snap, &q);
+    let texts: Vec<(&str, Tone)> = lines.iter().map(|l| (l.0.as_str(), l.1)).collect();
+    assert_eq!(
+        texts,
+        [
+            ("stage: 2 matches · best 0.90", Tone::Plain),
+            ("Pulpit: no matches", Tone::Warning),
+        ]
+    );
 }
 
 #[test]
@@ -255,6 +512,30 @@ fn an_action_role_is_noted_in_the_form_and_the_query_hover() {
     // An object role draws none.
     assert!(parse_notes(&ac_core::parse_prompt("guitarist close-up", &lexicon)).is_empty());
     assert!(!query_hover(&query("guitarist close-up", false, None)).contains("Note"));
+}
+
+#[test]
+fn an_action_role_draws_no_note_on_a_detector_that_sees_actions() {
+    // The form reads its preview, and the engine its queries, through the
+    // studio's reader: OWLv2's notes the action, the sidecar's does not.
+    let read = |sees_actions| {
+        parse_notes(&ac_engine::read_prompt(
+            "speaker upper body",
+            false,
+            &reader(sees_actions),
+        ))
+    };
+    assert_eq!(read(false).len(), 1);
+    assert!(read(true).is_empty(), "{:?}", read(true));
+    let hover = query_hover(&query_for(&reader(true), "speaker upper body", false, None));
+    assert_eq!(
+        hover,
+        "Detector sees: a person speaking · Framing: Medium, Medium close (person)"
+    );
+    // Other notes stay.
+    let notes = parse_notes(&ac_engine::read_prompt("singer wide", false, &reader(true)));
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].starts_with("Note: \"wide\""), "{notes:?}");
 }
 
 #[test]

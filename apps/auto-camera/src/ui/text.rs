@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use ac_core::{ParsedPrompt, PromptWarning, ShotId};
 use ac_engine::{
-    EngineSnapshot, OutputState, OutputView, QueryView, ShotStatus, ShotView, SourceView,
-    TimingView,
+    EngineSnapshot, MatchView, OutputState, OutputView, PassOutcome, QueryView, ShotStatus,
+    ShotView, SourceView, TimingView,
 };
 use ac_output::EncoderStats;
 
@@ -147,7 +147,188 @@ pub fn query_hover(q: &QueryView) -> String {
     lines.join("\n")
 }
 
-/// One source's health for the status bar, at master-clock `media_time`.
+/// Prompt feedback for a pass that found nothing.
+pub const NO_MATCHES: &str = "no matches";
+
+/// Prompt feedback for a query no applied pass has looked for yet.
+pub const NO_PASS_YET: &str = "no detector pass yet";
+
+/// Prompt feedback for a source whose newest detector pass failed.
+pub const DETECTOR_ERROR: &str = "detector error";
+
+/// Prompt feedback for a source whose newest answer came too late to use.
+pub const TOO_OLD: &str = "detector answers too old";
+
+/// Prompt feedback for a source whose newest request got no answer.
+pub const NOT_ANSWERING: &str = "detector not answering";
+
+/// Prompt feedback for a source whose detector is still loading.
+pub const PREPARING: &str = "preparing the detector";
+
+/// The hover text of [`PREPARING`].
+pub const PREPARING_HOVER: &str = "loading the model; the window and program keep running";
+
+/// How a prompt feedback line is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Matches were found.
+    Plain,
+    /// Nothing usable was found, or the detector is failing (amber).
+    Warning,
+    /// No pass has looked for the query yet, or the detector is still
+    /// preparing.
+    Weak,
+}
+
+/// What one pass found for a query (spec M2): "3 matches · best 0.71",
+/// "1 match · best 0.42", [`NO_MATCHES`], and, when some boxes score below
+/// the subject store's floor (they are never framed), how many: "1 match
+/// below the 0.50 floor · best 0.40", or "3 matches · best 0.71 · 1 below
+/// the 0.50 floor".
+pub fn match_text(m: &MatchView) -> String {
+    let Some(best) = m.best.filter(|_| m.count > 0) else {
+        return NO_MATCHES.into();
+    };
+    let below = m.count.saturating_sub(m.kept);
+    let plural = |n: usize| if n == 1 { "match" } else { "matches" };
+    if m.kept == 0 {
+        return format!(
+            "{below} {} below the {:.2} floor · best {best:.2}",
+            plural(below),
+            m.floor
+        );
+    }
+    let mut text = format!("{} {} · best {best:.2}", m.kept, plural(m.kept));
+    if below > 0 {
+        text.push_str(&format!(" · {below} below the {:.2} floor", m.floor));
+    }
+    text
+}
+
+/// How `m` is drawn: amber when nothing it found can be framed.
+fn match_tone(m: &MatchView) -> Tone {
+    if m.kept == 0 {
+        Tone::Warning
+    } else {
+        Tone::Plain
+    }
+}
+
+/// "the last applied pass found 3 matches · best 0.71 on frame 41 at
+/// 1:15", or that there was none.
+fn last_pass(m: Option<&MatchView>) -> String {
+    match m {
+        Some(m) => format!(
+            "the last applied pass found {} on frame {} at {}",
+            match_text(m),
+            m.seq,
+            clock(m.pts)
+        ),
+        None => "no pass has been applied for this query yet".into(),
+    }
+}
+
+/// One source's feedback for a query, with its tone and hover text. While
+/// the source's detector is still loading, the line says [`PREPARING`]
+/// (dimmed: a load is not a failure, and no request goes out until it
+/// ends). When the source's newest request failed, came back too late or
+/// got no answer, that is what the line says (amber, with the reason on
+/// hover), since the last applied pass's numbers would look current. A
+/// request with no answer is blamed on a restarting sidecar only when
+/// `shared` (one detector process serves every source); otherwise the
+/// detector is slower than the timeout or stuck.
+fn source_feedback(
+    source: &SourceView,
+    m: Option<&MatchView>,
+    shared: bool,
+) -> (String, Tone, String) {
+    let d = &source.discovery;
+    if d.preparing {
+        return (PREPARING.into(), Tone::Weak, PREPARING_HOVER.into());
+    }
+    let failing = match d.last_outcome {
+        Some(PassOutcome::Failed) => Some((
+            DETECTOR_ERROR.to_owned(),
+            d.last_error.clone().unwrap_or_default(),
+        )),
+        Some(PassOutcome::Stale) => Some((
+            format!("{TOO_OLD} ({} dropped)", d.stale),
+            "answers arrived more than discovery.max_result_age_s after their frame, \
+             so they were dropped"
+                .to_owned(),
+        )),
+        Some(PassOutcome::TimedOut) => Some((
+            format!("{NOT_ANSWERING} ({} timed out)", d.timeouts),
+            if shared {
+                "no answer within discovery.timeout_s (a restarted sidecar may still be \
+                 loading its model)"
+            } else {
+                "no answer within discovery.timeout_s (the detector is slower than that, \
+                 or stuck)"
+            }
+            .to_owned(),
+        )),
+        Some(PassOutcome::Applied) | None => None,
+    };
+    if let Some((text, why)) = failing {
+        return (text, Tone::Warning, format!("{why}\n{}", last_pass(m)));
+    }
+    match m {
+        Some(m) => (
+            match_text(m),
+            match_tone(m),
+            format!(
+                "newest detector pass on {}: frame {} at {}",
+                source.name,
+                m.seq,
+                clock(m.pts)
+            ),
+        ),
+        None => (NO_PASS_YET.into(), Tone::Weak, String::new()),
+    }
+}
+
+/// A query row's prompt feedback: one line per source that runs discovery,
+/// named after the source when the studio has several, with how to draw
+/// it and its hover text (the frame the pass looked at, or why the
+/// detector is failing there). When every source has the same nothing to
+/// say yet ([`NO_PASS_YET`], or [`PREPARING`] while a shared detector
+/// starts), a single line; when discovery is off everywhere, nothing.
+pub fn match_lines(snap: &EngineSnapshot, q: &QueryView) -> Vec<(String, Tone, String)> {
+    let several = snap.sources.len() > 1;
+    let lines: Vec<(&SourceView, (String, Tone, String))> = snap
+        .sources
+        .iter()
+        .filter(|s| s.discovery_enabled)
+        .map(|s| {
+            let m = q.matches.iter().find(|m| m.source == s.id);
+            (s, source_feedback(s, m, snap.shared_detector))
+        })
+        .collect();
+    if let Some((_, first)) = lines.first()
+        && lines.len() > 1
+        && lines
+            .iter()
+            .all(|(_, line)| line.1 == Tone::Weak && line.0 == first.0)
+    {
+        return vec![first.clone()];
+    }
+    lines
+        .into_iter()
+        .map(|(s, (text, tone, hover))| {
+            let text = if several {
+                format!("{}: {text}", s.name)
+            } else {
+                text
+            };
+            (text, tone, hover)
+        })
+        .collect()
+}
+
+/// One source's health for the status bar at master-clock `media_time`:
+/// frames, the newest successful detector pass's time, and how many
+/// requests failed, came back too late or got no answer.
 ///
 /// While the source's detector is still loading the line says so, with how
 /// long it has been loading: a detector prepares from the engine's start,
@@ -162,16 +343,45 @@ pub fn source_line(source: &SourceView, media_time: Duration) -> String {
         "{} {fps}/{:.0} fps · {} missed",
         source.name, source.nominal_fps, source.missed
     );
-    if let Some(latency) = source.discovery.last_latency {
+    let d = &source.discovery;
+    if let Some(latency) = d.last_latency {
         line.push_str(&format!(" · detect {}", millis(latency)));
     }
-    if source.discovery.preparing {
+    for (n, what) in [
+        (d.errors, "detector errors"),
+        (d.stale, "too old"),
+        (d.timeouts, "timed out"),
+    ] {
+        if n > 0 {
+            line.push_str(&format!(" · {n} {what}"));
+        }
+    }
+    if d.preparing {
         line.push_str(&format!(" · preparing detector {}", clock(media_time)));
     }
     if !source.available {
         line.push_str(" · NO SIGNAL");
     }
     line
+}
+
+/// How a source's status-bar line is drawn: amber while its newest
+/// detector request failed, came back too late or got no answer.
+pub fn source_tone(source: &SourceView) -> Tone {
+    match source.discovery.last_outcome {
+        Some(PassOutcome::Failed | PassOutcome::Stale | PassOutcome::TimedOut) => Tone::Warning,
+        Some(PassOutcome::Applied) | None => Tone::Plain,
+    }
+}
+
+/// A source's status-bar hover text: the newest detector error, if any.
+pub fn source_hover(source: &SourceView) -> String {
+    source
+        .discovery
+        .last_error
+        .as_ref()
+        .map(|e| format!("newest detector error: {e}"))
+        .unwrap_or_default()
 }
 
 /// Tick timing for the status bar.

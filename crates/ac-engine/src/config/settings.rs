@@ -16,6 +16,7 @@ use ac_switcher::{Transition, TransitionKind};
 use serde::{Deserialize, Serialize};
 
 use super::ConfigError;
+use super::sidecar::SidecarSettings;
 
 /// Which H.264 encoder to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -178,14 +179,20 @@ pub enum DetectorSettings {
         #[serde(default)]
         person_threshold: Option<f32>,
     },
+    /// A detector in its own process (SAM 3.1 on MLX first), started once
+    /// and shared by every source; see [`SidecarSettings`].
+    Sidecar(SidecarSettings),
 }
 
 impl DetectorSettings {
-    /// The lowest score this detector's detections can carry, when it is
-    /// below the subject store's default: OWL matching people first scores
-    /// everyone and described-person prompts on the person scale (default
-    /// 0.15; see `ac_vision::matching`), and a store floor above that would
-    /// silently drop them.
+    /// The lowest score this detector's detections can carry, for the
+    /// subject store's floor to follow when it is below the store's
+    /// default, which would otherwise silently drop them:
+    ///
+    /// * OWL matching people first scores everyone and described-person
+    ///   prompts on the person scale (default 0.15; see
+    ///   `ac_vision::matching`);
+    /// * the sidecar returns boxes down to its `score_threshold`.
     pub fn score_floor(&self) -> Option<f32> {
         match self {
             DetectorSettings::Owl {
@@ -196,8 +203,37 @@ impl DetectorSettings {
                 person_threshold
                     .unwrap_or(ac_vision::matching::MatchParams::default().person_threshold),
             ),
+            DetectorSettings::Sidecar(s) => Some(s.score_threshold),
             _ => None,
         }
+    }
+
+    /// True when one detector process serves every source, one pass at a
+    /// time (the sidecar), so the engine keeps one request in flight for
+    /// the whole studio instead of one per source (see `crate::core`).
+    pub fn is_shared(&self) -> bool {
+        matches!(self, DetectorSettings::Sidecar(_))
+    }
+
+    /// True when the detector sees what a person is doing, not only people
+    /// and objects, so a role whose phrase names an action
+    /// ([`ac_core::RoleNeeds::Action`]) needs no notice
+    /// ([`crate::queries`]). This is the one capability of the design's
+    /// contract (Phase 2, "Capability contract"; §4.2: each role "carries a
+    /// `needs` tag ..., and the UI warns when the chosen model lacks the
+    /// capability") that the engine reads so far, and it reads it from the
+    /// detector's kind, never from a model name:
+    ///
+    /// * the sidecar runs SAM 3.1, which found the speaker for "a person
+    ///   speaking" with no false subjects (`sam31-vs-owlv2.md`); until a
+    ///   sidecar's hello declares capabilities, every sidecar is taken to
+    ///   see actions;
+    /// * OWLv2 boxes people and objects: "a person speaking" picked every
+    ///   person (benchmark B0);
+    /// * the synthetic detector gives every query every box, and no
+    ///   detector sees nothing.
+    pub fn sees_actions(&self) -> bool {
+        matches!(self, DetectorSettings::Sidecar(_))
     }
 
     /// Checks scores and sizes.
@@ -228,6 +264,7 @@ impl DetectorSettings {
                 }
                 Ok(())
             }
+            DetectorSettings::Sidecar(s) => s.validate(),
         }
     }
 }

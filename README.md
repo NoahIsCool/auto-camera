@@ -38,7 +38,10 @@ recording path, start/stop, encoder statistics). Under the prompt a live
 line says how it reads, for example "Detector sees: a person speaking ·
 Framing: Medium, Medium close (person)", and the framing checkboxes follow
 the prompt's shot words until you tick one yourself (see
-[Prompts](#prompts)). A tile whose preset's zoom ceiling keeps it looser
+[Prompts](#prompts)). Under each live query, a line says what the newest
+detector pass found for it ("3 matches · best 0.71", or "no matches" in
+amber, per source when there are several), so a prompt the detector does
+not understand shows up at once. A tile whose preset's zoom ceiling keeps it looser
 than its size carries an amber LIMITED badge in the corner of its picture,
 and the monitors and the director's suggestion name it "Speaker 1 Close
 (limited)"; its hover text says when it looks the same as another of the
@@ -85,7 +88,8 @@ the end with the queries they answer:
   "ticks": 160,
   "sources": [{ "id": "stage", "fps": 31.0, "frames": 155, "missed": 3, "discovery_preparing": false, "detector_ready_s": 0.03, "discovery_applied": 40 }],
   "queries": [{ "prompt": "person", "detector_phrase": "person", "presets": ["medium", "close"], "basis": "person",
-                "parse": "Detector sees: person · Framing: no shot words (person)" }],
+                "parse": "Detector sees: person · Framing: no shot words (person)",
+                "matches": [{ "source": "stage", "count": 3, "best": 0.9, "seq": 148, "pts_seconds": 4.933 }] }],
   "max_subjects": 3,
   "program": { "last": "stage/wide", "changes": 1, "log": [[0.23, "stage/wide"]] },
   "director": { "mode": "suggest", "profile": "talk", "takes": 0, "reason": "best available shot" },
@@ -94,7 +98,9 @@ the end with the queries they answer:
 }
 ```
 
-(abridged). The exit status is 0 on success, 1 when the engine or the output
+(abridged). Each query's `matches` is the prompt feedback of the window:
+what the newest applied detector pass of each source found for it, and on
+which frame. The exit status is 0 on success, 1 when the engine or the output
 failed (`ok` is false and `error` says why), 2 for usage and configuration
 errors. Recordings are never overwritten: an existing `--record` path is an
 error.
@@ -128,7 +134,7 @@ prompt = "drummer wide"        # no presets: the shot word "wide" picks Full, an
                                # the detector is asked for "a person playing drums"
 
 [detector]
-kind = "owl"                 # "synthetic" (ground truth) or "none"
+kind = "owl"                 # "sidecar" (SAM 3.1, below), "synthetic" (ground truth) or "none"
 model = "../models/owlv2-base-onnx/model.onnx"
 tokenizer = "../models/owlv2-base-onnx/tokenizer.json"
 
@@ -187,7 +193,8 @@ operator's text, only what the parser makes of it:
   singing". Each is a hypothesis until it is benchmarked on footage.
   Speaking and singing are actions, which OWLv2 cannot see: every person
   gets such a query's shots, and the parse carries a notice saying to take
-  the speaker's shot by hand.
+  the speaker's shot by hand. The sidecar (SAM 3.1) sees actions, so on it
+  the notice is not shown.
 - **Basis.** A subject whose head noun is a person or role word is framed
   as a person: on a whole-person box, shots are cut at body lines measured
   in head heights from the crown (Close at the shoulders, Medium at the
@@ -209,8 +216,9 @@ operator's text, only what the parser makes of it:
 - **Lexicon.** The words are data. A `[lexicon]` table adds entries or
   replaces built-in ones: `roles = [{ word = "worship leader", phrase = "a
   person singing", needs = "action" }]` (`needs`, `action` or `object`, is
-  optional; an action draws the notice), `shots = [{ phrase = "upper body",
-  sizes = ["medium"] }]`, `person_words = ["organist"]`.
+  optional; an action draws the notice unless the detector sees actions),
+  `shots = [{ phrase = "upper body", sizes = ["medium"] }]`,
+  `person_words = ["organist"]`.
 
 ## The ONNX detector
 
@@ -231,6 +239,72 @@ message saying so. Detections are whole people: a prompt picks the people
 holding the object it names, so "a person playing guitar" frames guitarists,
 not guitars (see "Prompts" in the crate README).
 
+## The SAM 3.1 sidecar
+
+SAM 3.1 finds people by what they do ("a person speaking"), which OWLv2
+cannot express. On a Mac it runs through mlx-vlm in Python, so it runs as a
+separate process, a sidecar, behind the same detector interface
+([ADR 0004](docs/adr/0004-out-of-process-model-hosts.md)). One process
+serves every source. `kind = "sidecar"` makes it the studio's detector, and
+every query goes to it
+([`config/sam3-sidecar.example.toml`](config/sam3-sidecar.example.toml)):
+
+```toml
+[detector]
+kind = "sidecar"
+command = ["../models/sam3/.venv/bin/python", "../sidecars/sam3-mlx/server.py",
+           "--backend", "mlx", "--model", "../models/sam31-mlx", "--side", "672"]
+score_threshold = 0.3        # default 0.5; SAM's scores are not OWLv2's
+# send_side = 1008           # longest side sent, unless the shorter would go below --side
+# startup_timeout_s = 60     # wait for the model to load
+# request_timeout_s = 5      # one pass; must be below discovery.timeout_s
+
+[discovery]
+rate_hz = 1.0
+max_result_age_s = 3.0       # answers are one pass old; room for slower passes
+```
+
+```sh
+cargo run -p auto-camera -- --config config/sam3-sidecar.example.toml
+```
+
+- `command` is a program and its arguments, never a shell line. Elements
+  with a `/` that do not start with `-` or `~` are paths, resolved against
+  the config file; a bare program name is looked up on `PATH`. The program
+  and every such path must exist, and the process must start, or the
+  studio does not start and says why.
+- The model loads while the sources play (4.6 s on Noah's M3 Max, then a
+  warm-up pass). Until the sidecar's first start ends, with its hello or
+  a failure, every source is preparing: no frame is sent and no timeout
+  counted, the window says "preparing the detector", and a headless run
+  waits for it (for at least `startup_timeout_s`), but not for a restart.
+  A sidecar that fails to start (a wrong `--model` is
+  reported in milliseconds, a cold load can miss `startup_timeout_s`), or
+  that crashes or misses a deadline later, is restarted after a backoff of
+  1 s, doubling up to 30 s; meanwhile its passes fail with the reason,
+  shown in amber in the window. Quitting, by closing the window or with
+  Ctrl-C, closes its stdin, waits up to 2 s, then kills and reaps it, and
+  the sidecar exits by itself if the app dies: no process is left behind.
+- Sources take turns once the sidecar is ready: one frame is with it at a
+  time, and the source that waited longest goes next with its newest frame. Answers are
+  then about one pass old whatever the number of sources, so the 2 s
+  `max_result_age_s` default fits; each source gets a pass about every
+  N × the pass time, and `max_undetected_s` should cover about three of
+  those intervals.
+- Measured at 672 px: 0.48 s per pass for 1 prompt, 0.64 s for 3, 1.05 s
+  for 9. "a person speaking" found the speaker in 10 of 20 labelled frames
+  at a 0.5 threshold and 14 of 20 at 0.3. The subject store's floor follows
+  a `score_threshold` below its own 0.35.
+- The venv, the weights, the licence (Meta's SAM License) and the
+  protocol are in [`sidecars/sam3-mlx/README.md`](sidecars/sam3-mlx/README.md)
+  and [`crates/ac-sidecar/README.md`](crates/ac-sidecar/README.md). The
+  real model has not run through this path yet; on the Mac, run the smoke
+  test described there first.
+
+This is Phase 2 of the model-picker design: one detector for the studio.
+Every prompt gets SAM's false hits too, so it is for trying prompts rather
+than for a show; choosing a model per query comes later.
+
 ## Crates
 
 | Crate | Role |
@@ -239,6 +313,7 @@ not guitars (see "Prompts" in the crate README).
 | `ac-media` | Frames, audio blocks and the source trait, with latest-frame mailboxes |
 | `ac-sources` | File (ffmpeg) and synthetic sources; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector |
+| `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
 | `ac-framing` | Ideal crops (fill rule for objects, body cut lines for whole people, zoom-limit flags) and per-shot smoothing |
 | `ac-director` | Shot scoring, suggestions and opt-in auto-takes |
@@ -259,4 +334,11 @@ cargo test                                   # no GPU, camera or network needed;
 ```
 
 Set `AC_REQUIRE_FFMPEG=1` to make the ffmpeg tests fail instead of skip when
-ffmpeg is missing; CI does, after installing it.
+ffmpeg is missing; CI does, after installing it. The sidecar host's tests
+also drive `sidecars/sam3-mlx/server.py` on its fake backend when
+`python3` (3.10 or newer) is on `PATH`, and skip otherwise. The sidecar's
+own tests need only the standard library:
+
+```sh
+(cd sidecars/sam3-mlx && python3 -m unittest)
+```

@@ -12,8 +12,17 @@
 //!
 //! 1. **Protection.** The subjects of the program and preview shots are
 //!    pushed to their stores, so on-air subjects are never retired.
-//! 2. **Discovery results** are applied unless stale
-//!    ([`crate::discovery::staleness`]).
+//! 2. **Discovery results** free their source's request slot (unless a
+//!    newer request replaced a timed-out one) and are applied unless stale
+//!    ([`crate::discovery::staleness`]). Each applied result also becomes
+//!    the prompt feedback of every live query it looked for on that source
+//!    (spec M2): how many detections it returned, how many of them reach
+//!    the subject store's floor (only those can become shots) and the best
+//!    score ([`crate::snapshot::MatchView`]), tagged with the frame's
+//!    sequence number and PTS. Stale and failed results change no
+//!    feedback; they are recorded as the source's newest outcome
+//!    ([`crate::snapshot::PassOutcome`]), so the window can say the
+//!    feedback is no longer current.
 //! 3. **Frames.** Each source's newest frame, if new, advances its tracker
 //!    and store (media time = the frame's PTS).
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
@@ -22,9 +31,19 @@
 //!    proposes (and in Auto mode takes) a shot.
 //! 7. **Rendering.** The compositor renders the program; monitors and
 //!    multiview tiles are rendered at their own, lower rates.
-//! 8. **Discovery requests** are issued for sources that are due, asking
-//!    for each query's parsed detector phrase ([`Query::detector_phrase`]),
-//!    not its prompt.
+//! 8. **Discovery requests** are issued for sources that are due (at most
+//!    `discovery.rate_hz` each, never while one is in flight), with each
+//!    source's newest frame, asking for each query's parsed detector
+//!    phrase ([`Query::detector_phrase`]), not its prompt. When one
+//!    detector process serves every source (the sidecar,
+//!    [`crate::config::DetectorSettings::is_shared`]), the studio keeps
+//!    one request in flight in all, and the due source that waited longest
+//!    since its last turn goes next. Requests then never queue behind each
+//!    other's passes, so an answer is about one pass old rather than one
+//!    pass per source (two sources at 1.05 s a pass would otherwise get
+//!    every answer back 2.1 s old, past the 2 s age limit), and each
+//!    source's rate falls to what the process can serve: with N sources, a
+//!    pass every N pass times at most.
 //!
 //! A source whose detector is still loading (the runtime says so in its
 //! [`SourceFeed`]) is *preparing*: it gets no requests and counts no
@@ -33,8 +52,14 @@
 //! frame goes out on that same tick, and records that tick's master-clock
 //! time as [`DiscoveryStats::ready_after`]. A source starts preparing when
 //! it has a detector, so the snapshot taken before the first tick already
-//! says so. The loading state is tick input like the frames, so the core
-//! stays a deterministic function of its inputs.
+//! says so. A shared detector is one detector for the whole studio: while
+//! the sidecar's first start is still running (any source's loader still
+//! waits for its hello or its failure), every source is preparing, and they
+//! all become ready on the same tick, so the sources start taking turns
+//! only once that start has ended, the first source first; after a failed
+//! start each turn's pass fails with the reason. The loading state is tick
+//! input like the
+//! frames, so the core stays a deterministic function of its inputs.
 //!
 //! Given the same configuration, frames, results and commands, the core
 //! produces the same program, which is what the deterministic tests rely on.
@@ -44,22 +69,23 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use ac_compositor::{Compositor, CompositorConfig};
-use ac_core::{Lexicon, Query, QueryId, ShotId, SourceId};
+use ac_core::{Query, QueryId, ShotId, SourceId};
 use ac_director::{Director, DirectorDecision};
 use ac_framing::FramerConfig;
 use ac_media::{SourceInfo, SourceState, VideoFrame};
 use ac_switcher::Switcher;
-use ac_vision::PromptQuery;
 
 use crate::catalog::Catalog;
 use crate::config::{DiscoverySettings, MonitorSettings, StudioConfig};
-use crate::discovery::{DiscoveryRequest, DiscoveryResult, staleness};
+use crate::discovery::{DiscoveryRequest, DiscoveryResult};
+use crate::queries::PromptReader;
 use crate::schedule::RateMeter;
-use crate::snapshot::DiscoveryStats;
+use crate::snapshot::{DiscoveryStats, MatchView};
 use crate::vision::SourceVision;
 
 mod commands;
 mod directing;
+mod passes;
 mod render;
 mod shots;
 mod snapshot;
@@ -99,10 +125,16 @@ struct DiscoveryState {
     next_due: Duration,
     /// When the request in flight was sent.
     in_flight_since: Option<Duration>,
+    /// When the newest request was sent, for taking turns on a shared
+    /// detector.
+    last_sent: Option<Duration>,
     /// Sequence number of the newest frame requested.
     last_requested: Option<u64>,
     /// Sequence number of the newest frame whose results were applied.
     last_applied: Option<u64>,
+    /// Prompt feedback: per live query, what the newest applied result
+    /// that looked for it found.
+    matches: HashMap<QueryId, MatchView>,
     /// Counters, and whether the detector is still preparing.
     stats: DiscoveryStats,
 }
@@ -185,10 +217,14 @@ pub struct EngineCore {
     /// Prompt queries in creation order, each prompt read once when the
     /// query was created ([`crate::queries`]).
     queries: Vec<Query>,
-    /// The prompt parser's vocabulary, for queries added by command.
-    lexicon: Lexicon,
+    /// How prompts of queries added by command are read: the studio's
+    /// lexicon and what its detector sees ([`crate::queries`]).
+    prompts: PromptReader,
     /// Discovery tuning.
     discovery: DiscoverySettings,
+    /// One detector process serves every source, one pass at a time (the
+    /// sidecar): the studio keeps one request in flight in all.
+    shared_detector: bool,
     /// Framing tuning for new shots.
     framing: FramerConfig,
     /// Monitor and tile rendering.
@@ -287,8 +323,9 @@ impl EngineCore {
         let mut core = Self {
             sources,
             queries,
-            lexicon: config.prompt_lexicon(),
+            prompts: PromptReader::of(config),
             discovery: config.discovery,
+            shared_detector: config.detector.is_shared(),
             framing: config.framing,
             monitors: config.monitors,
             catalog: Catalog::new(),
@@ -375,8 +412,14 @@ impl EngineCore {
         for r in results {
             self.apply_result(r);
         }
+        // A shared detector is ready for every source or for none.
+        let studio_loading = self.shared_detector
+            && feeds
+                .iter()
+                .zip(&self.sources)
+                .any(|(f, s)| s.discovery.enabled && f.detector_loading);
         for (i, feed) in feeds.iter().enumerate().take(self.sources.len()) {
-            self.ingest_feed(i, feed);
+            self.ingest_feed(i, feed, studio_loading);
         }
         self.sync_catalog();
         self.step_framing(dt);
@@ -391,46 +434,15 @@ impl EngineCore {
         }
     }
 
-    /// Applies one discovery result unless it is stale.
-    fn apply_result(&mut self, r: DiscoveryResult) {
-        let live: Vec<QueryId> = self.queries.iter().map(|q| q.id.clone()).collect();
-        let max_age = self.discovery.max_result_age();
-        let Some(s) = self.sources.get_mut(r.source) else {
-            return;
-        };
-        let d = &mut s.discovery;
-        d.in_flight_since = None;
-        d.stats.last_latency = Some(r.latency);
-        let detections = match r.outcome {
-            Ok(dets) if r.frame.source == s.id => dets,
-            Ok(_) => {
-                d.stats.errors += 1;
-                d.stats.last_error = Some("result for another source".into());
-                return;
-            }
-            Err(e) => {
-                d.stats.errors += 1;
-                d.stats.last_error = Some(e);
-                return;
-            }
-        };
-        let newest = s.frame.as_ref().map(|f| f.pts);
-        if staleness(r.frame.seq, r.frame.pts, d.last_applied, newest, max_age).is_some() {
-            d.stats.stale += 1;
-            return;
-        }
-        d.last_applied = Some(r.frame.seq);
-        d.stats.applied += 1;
-        s.vision
-            .on_detections(&r.frame, s.frame.as_ref(), &detections, &live);
-    }
-
-    /// Takes a source's newest frame and advances its vision when it is new.
-    fn ingest_feed(&mut self, i: usize, feed: &SourceFeed) {
+    /// Takes a source's newest frame and advances its vision when it is new,
+    /// and whether its detector is still loading: its own loader, or, when
+    /// `studio_loading`, the shared detector's (see the module docs).
+    fn ingest_feed(&mut self, i: usize, feed: &SourceFeed, studio_loading: bool) {
         let now = self.now;
         let s = &mut self.sources[i];
         s.state = feed.state;
-        s.discovery.note_loading(feed.detector_loading, now);
+        s.discovery
+            .note_loading(feed.detector_loading || studio_loading, now);
         let Some(frame) = &feed.frame else {
             return;
         };
@@ -444,54 +456,6 @@ impl EngineCore {
         s.frames += 1;
         s.rate.record(now);
         s.vision.on_frame(frame);
-    }
-
-    /// Issues discovery requests for sources that are due and not
-    /// preparing.
-    fn schedule_discovery(&mut self) -> Vec<(usize, DiscoveryRequest)> {
-        let now = self.now;
-        let timeout = self.discovery.timeout();
-        let interval = self.discovery.interval();
-        // The detector gets each query's parsed phrase, never the operator's
-        // prompt: "speaker upper body" asks for "a person speaking".
-        let queries: Vec<PromptQuery> = self
-            .queries
-            .iter()
-            .map(|q| PromptQuery {
-                id: q.id.clone(),
-                prompt: q.detector_phrase().to_string(),
-            })
-            .collect();
-        let mut out = Vec::new();
-        for (i, s) in self.sources.iter_mut().enumerate() {
-            let d = &mut s.discovery;
-            if !d.enabled || d.stats.preparing {
-                continue;
-            }
-            if let Some(since) = d.in_flight_since {
-                if now.saturating_sub(since) < timeout {
-                    continue;
-                }
-                d.in_flight_since = None;
-                d.stats.timeouts += 1;
-            }
-            let Some(frame) = &s.frame else { continue };
-            if queries.is_empty() || now < d.next_due || d.last_requested == Some(frame.seq) {
-                continue;
-            }
-            d.in_flight_since = Some(now);
-            d.next_due = now + interval;
-            d.last_requested = Some(frame.seq);
-            d.stats.requests += 1;
-            out.push((
-                i,
-                DiscoveryRequest {
-                    frame: frame.clone(),
-                    queries: queries.clone(),
-                },
-            ));
-        }
-        out
     }
 
     /// Index of the source with `id`.

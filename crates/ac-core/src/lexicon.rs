@@ -30,9 +30,10 @@
 //!   ([`RoleNeeds`], design §4.2): an *action* (speaking, singing) or an
 //!   *object* the person plays (a guitar, drums). OWLv2 sees people and
 //!   objects, not actions, so the parser adds a notice to every prompt
-//!   rewritten to an action role. The notice does not depend on the
-//!   detector yet: that waits for the detectors' capability contract
-//!   (design Phase 2), and the tag keeps the data model-neutral until then.
+//!   rewritten to an action role, which the engine drops when the studio's
+//!   detector sees actions (the sidecar's SAM 3.1). The tag keeps the data
+//!   model-neutral: it says what a phrase needs, and the detector what it
+//!   sees.
 //! * Person words ("woman", "player") name people. A subject whose head
 //!   noun is a person or role word is framed on the person basis.
 //!

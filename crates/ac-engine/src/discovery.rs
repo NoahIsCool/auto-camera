@@ -2,12 +2,16 @@
 //!
 //! Each source has one discovery worker thread that owns that source's
 //! [`Detector`]. The engine thread decides when to ask (at most
-//! `discovery.rate_hz` per source, never while a request is in flight) and
-//! hands the worker the newest frame through a single-slot mailbox, so the
-//! detector always works on the newest frame and requests never queue. The
+//! `discovery.rate_hz` per source, never while a request is in flight; for
+//! a detector shared by every source, such as the sidecar, never while any
+//! source's request is, the sources taking turns) and hands the worker the
+//! newest frame through a single-slot mailbox, so the detector always works
+//! on the newest frame and requests never queue. The
 //! worker answers on a channel with a [`DiscoveryResult`] carrying the frame
 //! it looked at, so results are tagged with that frame's source, sequence
-//! number and PTS.
+//! number and PTS, and the ids of the queries it looked for (a query added
+//! while the pass ran was not looked for, so its absence from the result
+//! says nothing about it).
 //!
 //! Results are applied on the engine thread unless they are stale
 //! ([`staleness`]): computed on a frame older than one already applied, or
@@ -22,9 +26,14 @@
 //! The detector is *loaded* on the worker thread too. [`build_detector`]
 //! checks the settings and that the model files exist (so a bad config still
 //! fails `Engine::start`), and returns a [`DetectorLoader`] that the worker
-//! runs first. Loading a real model can take minutes (CoreML compiles OWLv2
-//! on first use); done on the engine thread it would hold the window and the
-//! first picture back that long while the sources ran unread.
+//! runs first. A sidecar detector is shared by every source, so
+//! [`crate::detectors`] starts its process once at engine start, and each
+//! source's loader waits for the sidecar's hello instead (a first start
+//! that fails does not fail that loader: its detector's passes fail with
+//! the reason while the process is restarted). Loading a real model can
+//! take minutes (CoreML compiles OWLv2 on first use); done on the engine
+//! thread it would hold the window and the first picture back that long
+//! while the sources ran unread.
 //!
 //! While the loader runs, the source is **preparing**: the worker could not
 //! take a request yet, so the engine sends none and counts no timeouts (a
@@ -52,7 +61,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ac_core::Extent;
+use ac_core::{Extent, QueryId};
 use ac_media::VideoFrame;
 use ac_sources::{SourceConfig, SyntheticPattern};
 use ac_vision::{Detection, Detector, PromptQuery, ScriptedDetector};
@@ -79,6 +88,8 @@ pub struct DiscoveryResult {
     pub source: usize,
     /// The frame that was looked at.
     pub frame: VideoFrame,
+    /// Ids of the queries the request asked for.
+    pub queries: Vec<QueryId>,
     /// The detections, or the detector's error message.
     pub outcome: Result<Vec<Detection>, String>,
     /// Processing time of the detector pass.
@@ -149,7 +160,8 @@ fn ready(detector: Box<dyn Detector>) -> DetectorLoader {
 }
 
 /// Checks the settings for one source and returns its detector loader, or
-/// `None` when discovery is off.
+/// `None` when discovery is off. The sidecar is shared by the whole studio,
+/// so [`crate::detectors::Detectors::build`] makes its loaders instead.
 pub fn build_detector(
     settings: &DetectorSettings,
     source: &SourceConfig,
@@ -172,6 +184,9 @@ pub fn build_detector(
             }
         },
         DetectorSettings::Owl { .. } => build_owl(settings).map(Some),
+        DetectorSettings::Sidecar(_) => Err(
+            "the sidecar detector is shared by every source; build it with crate::detectors".into(),
+        ),
     }
 }
 
@@ -283,6 +298,7 @@ impl DiscoveryWorker {
                     let result = DiscoveryResult {
                         source: index,
                         frame: request.frame,
+                        queries: request.queries.into_iter().map(|q| q.id).collect(),
                         outcome,
                         latency: started.elapsed(),
                     };
@@ -340,7 +356,7 @@ impl Drop for DiscoveryWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ac_core::{QueryId, Rect, SourceId};
+    use ac_core::{Rect, SourceId};
     use std::sync::mpsc::channel;
 
     /// `v` milliseconds.
@@ -451,6 +467,7 @@ mod tests {
             });
             let r = rx.recv_timeout(Duration::from_secs(10)).unwrap();
             assert_eq!((r.source, r.frame.seq), (3, seq));
+            assert_eq!(r.queries, [QueryId("q".into())], "what it looked for");
             if seq == 7 {
                 assert!(r.outcome.unwrap_err().contains("panicked"));
             } else {

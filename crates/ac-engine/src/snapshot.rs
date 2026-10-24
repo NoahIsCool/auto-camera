@@ -113,6 +113,35 @@ pub struct QueryView {
     pub parse: ParsedPrompt,
     /// Framings.
     pub presets: Vec<Preset>,
+    /// Prompt feedback (spec M2): what the newest applied discovery pass
+    /// of each source found for this query, in source order. A source is
+    /// missing until a pass that looked for this query has been applied
+    /// there.
+    pub matches: Vec<MatchView>,
+}
+
+/// What one source's newest applied discovery pass found for one query, so
+/// a prompt the detector does not understand shows up as "no matches" (or
+/// a low best score) instead of silently framing nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchView {
+    /// The source the pass ran on.
+    pub source: SourceId,
+    /// Sequence number of the frame the pass looked at.
+    pub seq: u64,
+    /// PTS of that frame.
+    pub pts: Duration,
+    /// Detections the detector returned for the query.
+    pub count: usize,
+    /// Highest score among them; `None` when there were none.
+    pub best: Option<f32>,
+    /// Those at or above the subject store's floor ([`Self::floor`]): only
+    /// these can become subjects and shots. When the detector's cut-off is
+    /// below the floor, the others are reported but framed nowhere.
+    pub kept: usize,
+    /// The subject store's lowest usable score (`subjects.min_score`, or
+    /// the detector's floor; see `DetectorSettings::score_floor`).
+    pub floor: f32,
 }
 
 impl QueryView {
@@ -160,6 +189,22 @@ pub struct DirectorView {
     pub takes: u64,
 }
 
+/// How a source's newest discovery request ended, so the window can tell
+/// a detector that works from one whose answers fail or come too late
+/// (the feedback of the last applied pass stays, and would look current).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassOutcome {
+    /// Its detections were applied.
+    Applied,
+    /// It was dropped as stale (superseded, or older than
+    /// `discovery.max_result_age_s`).
+    Stale,
+    /// The detector returned an error.
+    Failed,
+    /// No answer came within `discovery.timeout_s`.
+    TimedOut,
+}
+
 /// Discovery counters of one source, and whether its detector is ready.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DiscoveryStats {
@@ -180,10 +225,13 @@ pub struct DiscoveryStats {
     pub errors: u64,
     /// Requests abandoned after the timeout.
     pub timeouts: u64,
-    /// Latency of the newest result.
+    /// Latency of the newest successful pass (applied or stale); a failed
+    /// pass is not timed, since a refusal returns at once.
     pub last_latency: Option<Duration>,
     /// Newest detector error.
     pub last_error: Option<String>,
+    /// How the newest request ended; `None` before the first did.
+    pub last_outcome: Option<PassOutcome>,
 }
 
 /// One source's health.
@@ -308,6 +356,10 @@ pub struct EngineSnapshot {
     pub render_issues: Vec<String>,
     /// Times the program shot changed.
     pub program_changes: u64,
+    /// One detector process serves every source, one pass at a time (the
+    /// sidecar), so a source's request can wait behind another source's
+    /// pass or a restart of that process.
+    pub shared_detector: bool,
 }
 
 impl EngineSnapshot {

@@ -1,9 +1,12 @@
 //! Headless runs on small synthetic studios (real time, about a second each).
 
+mod summary;
+
 use super::*;
 use ac_core::{ShotSize, TrackState};
 use ac_engine::{
-    DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, ShotView, TimingView,
+    DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, ShotView, SidecarSettings,
+    TimingView,
 };
 use ac_media::SourceInfo;
 use ac_sources::SourceConfig;
@@ -44,6 +47,12 @@ fn options(seconds: f64, record: Option<PathBuf>) -> HeadlessOptions {
 /// The snapshot of [`studio`] before its first tick, built by a real core:
 /// its detector is still preparing.
 fn preparing_snapshot() -> Arc<EngineSnapshot> {
+    first_snapshot(&studio())
+}
+
+/// The snapshot of `config` (one 320x180 source, "stage") before its
+/// first tick, built by a real core that starts no detector.
+fn first_snapshot(config: &StudioConfig) -> Arc<EngineSnapshot> {
     let info = SourceInfo {
         id: ac_core::SourceId("stage".into()),
         width: 320,
@@ -51,7 +60,7 @@ fn preparing_snapshot() -> Arc<EngineSnapshot> {
         fps: 30.0,
         audio: None,
     };
-    let core = EngineCore::new(&studio(), vec![info], &[true]).unwrap();
+    let core = EngineCore::new(config, vec![info], &[true]).unwrap();
     Arc::new(core.snapshot(OutputView::default(), TimingView::default(), true))
 }
 
@@ -83,7 +92,12 @@ fn temp_path(name: &str) -> PathBuf {
 
 #[test]
 fn a_run_without_a_director_puts_the_wide_on_program() {
-    let s = run(studio(), Path::new("studio.toml"), &options(0.6, None));
+    let s = run(
+        studio(),
+        Path::new("studio.toml"),
+        &options(0.6, None),
+        &QuitSignal::new(),
+    );
     assert!(s.ok, "{:?}", s.error);
     assert!(s.ticks > 10);
     assert_eq!(s.program.last.as_deref(), Some("stage/wide"));
@@ -114,6 +128,16 @@ fn a_run_without_a_director_puts_the_wide_on_program() {
     assert_eq!(s.threads_joined, 1, "the discovery worker");
     assert_eq!(s.director.mode, DirectorMode::Off);
     assert!((s.timing.budget_ms - 33.33).abs() < 0.01);
+    // Prompt feedback: the ground truth finds both subjects at 0.9.
+    let m = &s.queries[0].matches;
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert_eq!(
+        (m[0].source.as_str(), m[0].count, m[0].best),
+        ("stage", 2, Some(0.9))
+    );
+    let json = serde_json::to_value(&s.queries[0]).unwrap();
+    assert_eq!(json["matches"][0]["count"], 2);
+    assert_eq!(json["matches"][0]["best"], 0.9);
 }
 
 #[test]
@@ -121,7 +145,12 @@ fn a_run_with_the_auto_director_switches_by_itself() {
     let mut c = studio();
     c.director.mode = DirectorMode::Auto;
     // The establishing take mixes up from black over 0.8 s.
-    let s = run(c, Path::new("studio.toml"), &options(1.5, None));
+    let s = run(
+        c,
+        Path::new("studio.toml"),
+        &options(1.5, None),
+        &QuitSignal::new(),
+    );
     assert!(s.ok, "{:?}", s.error);
     assert!(s.program.changes >= 1);
     assert!(!s.program.log.is_empty());
@@ -139,7 +168,12 @@ fn unusable_setups_fail_with_a_summary() {
             audio: false,
         },
     );
-    let s = run(missing, Path::new("x.toml"), &options(1.0, None));
+    let s = run(
+        missing,
+        Path::new("x.toml"),
+        &options(1.0, None),
+        &QuitSignal::new(),
+    );
     assert!(!s.ok);
     assert!(s.error.unwrap().contains("did not start"));
     assert!(s.sources.is_empty());
@@ -150,6 +184,7 @@ fn unusable_setups_fail_with_a_summary() {
         studio(),
         Path::new("x.toml"),
         &options(1.0, Some(existing.clone())),
+        &QuitSignal::new(),
     );
     assert!(!s.ok);
     assert!(
@@ -204,6 +239,7 @@ fn a_run_whose_engine_dies_fails_at_once_with_the_reason() {
             clock,
             ..EngineOptions::default()
         },
+        &QuitSignal::new(),
     );
     assert!(!s.ok);
     let error = s.error.as_deref().unwrap_or_default();
@@ -226,6 +262,7 @@ fn a_recording_run_finalizes_the_file() {
         studio(),
         Path::new("x.toml"),
         &options(1.0, Some(path.clone())),
+        &QuitSignal::new(),
     );
     assert!(s.ok, "{:?}", s.error);
     let out = s.output.as_ref().expect("output summary");
@@ -244,7 +281,12 @@ fn the_summary_is_json() {
     config
         .queries
         .push(QuerySettings::new("Speaker", "speaker upper body"));
-    let s = run(config, Path::new("studio.toml"), &options(0.5, None));
+    let s = run(
+        config,
+        Path::new("studio.toml"),
+        &options(0.5, None),
+        &QuitSignal::new(),
+    );
     let v: serde_json::Value = serde_json::to_value(&s).unwrap();
     for key in [
         "ok", "ticks", "sources", "queries", "shots", "subjects", "program", "director", "timing",
@@ -317,7 +359,12 @@ fn the_summary_is_json() {
 /// ([`the_sampler_keeps_each_shots_narrowest_and_widest_crop`]).
 #[test]
 fn moving_subjects_report_the_range_of_their_crop_sizes() {
-    let s = run(studio(), Path::new("studio.toml"), &options(2.0, None));
+    let s = run(
+        studio(),
+        Path::new("studio.toml"),
+        &options(2.0, None),
+        &QuitSignal::new(),
+    );
     assert!(s.ok, "{:?}", s.error);
     let subject_shots: Vec<&ShotSummary> =
         s.shots.iter().filter(|v| v.id != "stage/wide").collect();
@@ -356,81 +403,9 @@ fn the_sampler_keeps_each_shots_narrowest_and_widest_crop() {
 }
 
 #[test]
-fn a_run_that_ends_while_the_detector_loads_says_so() {
-    let mut snap = (*preparing_snapshot()).clone();
-    let summary = |snap: &EngineSnapshot| {
-        let s = summarize(
-            Path::new("x.toml"),
-            &options(1.0, None),
-            Instant::now(),
-            Some("stopped".into()),
-            Totals {
-                ticks: 0,
-                threads_joined: 0,
-            },
-            Some(snap),
-            Some(snap),
-            &Sampler::default(),
-        );
-        serde_json::to_value(&s).unwrap()
-    };
-    let v = summary(&snap);
-    assert_eq!(v["sources"][0]["discovery_preparing"], true);
-    assert!(v["sources"][0]["detector_ready_s"].is_null());
-    assert_eq!(v["sources"][0]["discovery_requests"], 0);
-    // Unsampled shots report their crop as the whole range.
-    assert_eq!(v["shots"][0]["crop_width_min"], 1.0);
-
-    let d = &mut snap.sources[0].discovery;
-    d.preparing = false;
-    d.ready_after = Some(Duration::from_millis(152_500));
-    let v = summary(&snap);
-    assert_eq!(v["sources"][0]["discovery_preparing"], false);
-    assert_eq!(v["sources"][0]["detector_ready_s"], 152.5);
-}
-
-#[test]
-fn shots_name_the_shot_they_look_the_same_as() {
-    let mut snap = (*preparing_snapshot()).clone();
-    let wide = snap.shots[0].clone();
-    let medium = ShotView {
-        id: ShotId("stage/1/medium".into()),
-        limited_by_zoom: true,
-        ..wide.clone()
-    };
-    let medium_close = ShotView {
-        id: ShotId("stage/1/medium_close".into()),
-        limited_by_zoom: true,
-        same_picture_as: Some(medium.id.clone()),
-        ..wide
-    };
-    snap.shots.extend([medium, medium_close]);
-    let s = summarize(
-        Path::new("x.toml"),
-        &options(1.0, None),
-        Instant::now(),
-        None,
-        Totals {
-            ticks: 0,
-            threads_joined: 0,
-        },
-        Some(&snap),
-        Some(&snap),
-        &Sampler::default(),
-    );
-    let v = serde_json::to_value(&s).unwrap();
-    let shots = v["shots"].as_array().unwrap();
-    assert_eq!(shots.len(), 3);
-    assert!(shots[0]["same_picture_as"].is_null());
-    assert!(shots[1]["same_picture_as"].is_null());
-    assert_eq!(shots[1]["limited_by_zoom"], true);
-    assert_eq!(shots[2]["same_picture_as"], "stage/1/medium");
-    assert_eq!(shots[2]["limited_by_zoom"], true);
-}
-
-#[test]
 fn the_detector_phase_waits_for_every_detector_and_gives_up_in_time() {
     let preparing = preparing_snapshot();
+    let quit = QuitSignal::new();
     let mut ready = (*preparing).clone();
     ready.sources[0].discovery.preparing = false;
     let ready = Arc::new(ready);
@@ -447,7 +422,7 @@ fn the_detector_phase_waits_for_every_detector_and_gives_up_in_time() {
         }
     };
     assert_eq!(
-        await_detectors(next, &mut sampler, Duration::from_secs(10)),
+        await_detectors(next, &mut sampler, Duration::from_secs(10), &quit),
         Ok(())
     );
     assert_eq!(looks, 4);
@@ -459,6 +434,7 @@ fn the_detector_phase_waits_for_every_detector_and_gives_up_in_time() {
         || preparing.clone(),
         &mut Sampler::default(),
         Duration::from_millis(100),
+        &quit,
     )
     .unwrap_err();
     assert_eq!(error, "the detector was still loading after 0.1 s");
@@ -472,6 +448,7 @@ fn the_detector_phase_waits_for_every_detector_and_gives_up_in_time() {
         || Arc::new(dead.clone()),
         &mut Sampler::default(),
         Duration::from_secs(10),
+        &quit,
     )
     .unwrap_err();
     assert!(
@@ -485,9 +462,40 @@ fn the_detector_phase_waits_for_every_detector_and_gives_up_in_time() {
     none.sources[0].discovery.preparing = false;
     let none = Arc::new(none);
     assert_eq!(
-        await_detectors(|| none.clone(), &mut Sampler::default(), Duration::ZERO),
+        await_detectors(
+            || none.clone(),
+            &mut Sampler::default(),
+            Duration::ZERO,
+            &quit
+        ),
         Ok(())
     );
+
+    // A termination signal ends the wait.
+    let signalled = QuitSignal::new();
+    signalled.signal();
+    let error = await_detectors(
+        || preparing.clone(),
+        &mut Sampler::default(),
+        Duration::from_secs(10),
+        &signalled,
+    )
+    .unwrap_err();
+    assert_eq!(error, INTERRUPTED);
+}
+
+#[test]
+fn the_detector_wait_covers_a_sidecars_startup_deadline() {
+    let sidecar = |startup_timeout_s| {
+        DetectorSettings::Sidecar(SidecarSettings {
+            startup_timeout_s,
+            ..SidecarSettings::new(["python3"])
+        })
+    };
+    assert_eq!(detector_limit(&sidecar(60.0)), DETECTOR_TIMEOUT);
+    assert!(detector_limit(&sidecar(600.0)) >= Duration::from_secs(600) + SIGNAL_TIMEOUT);
+    assert_eq!(detector_limit(&studio().detector), DETECTOR_TIMEOUT);
+    assert_eq!(detector_limit(&DetectorSettings::None), DETECTOR_TIMEOUT);
 }
 
 #[test]
@@ -523,4 +531,70 @@ fn the_sample_configs_load() {
         panic!("a file source");
     };
     assert!(path.is_absolute() && path.ends_with("media/rehearsal.mp4"));
+    let sam = StudioConfig::load(&root.join("sam3-sidecar.example.toml")).unwrap();
+    let DetectorSettings::Sidecar(sidecar) = &sam.detector else {
+        panic!("a sidecar detector: {:?}", sam.detector);
+    };
+    // The venv, the server and the weights resolve against the config;
+    // flags and numbers stay as written.
+    let command: Vec<&str> = sidecar.command.iter().map(String::as_str).collect();
+    let resolved =
+        |i: usize, tail: &str| Path::new(command[i]).is_absolute() && command[i].ends_with(tail);
+    assert!(resolved(0, "models/sam3/.venv/bin/python"), "{command:?}");
+    assert!(resolved(1, "sidecars/sam3-mlx/server.py"), "{command:?}");
+    assert!(resolved(5, "models/sam31-mlx"), "{command:?}");
+    assert_eq!(
+        [command[2], command[3], command[6], command[7]],
+        ["--backend", "mlx", "--side", "672"]
+    );
+    let server = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sidecars/sam3-mlx/server.py");
+    assert_eq!(
+        Path::new(command[1]).canonicalize().unwrap(),
+        server.canonicalize().unwrap(),
+        "the example points at the real server"
+    );
+    assert_eq!(sidecar.score_threshold, 0.3);
+    assert_eq!(
+        sam.store_config().unwrap().min_score,
+        0.3,
+        "the floor follows"
+    );
+    assert_eq!(sam.discovery.max_result_age_s, 3.0);
+    let queries = sam.build_queries().unwrap();
+    let phrases: Vec<&str> = queries.iter().map(|q| q.detector_phrase()).collect();
+    assert_eq!(
+        phrases,
+        [
+            "a person speaking",
+            "a person playing guitar",
+            "a person playing drums"
+        ]
+    );
+    // SAM sees actions: the speaker draws no notice, as the example says.
+    assert!(
+        queries[0].parse.warnings.is_empty(),
+        "{:?}",
+        queries[0].parse
+    );
+}
+
+#[test]
+fn a_termination_signal_ends_the_run_early_and_still_shuts_down() {
+    let quit = QuitSignal::new();
+    let signaller = quit.clone();
+    let started = Instant::now();
+    let waker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        signaller.signal()
+    });
+    let s = run(studio(), Path::new("x.toml"), &options(30.0, None), &quit);
+    assert_eq!(waker.join().unwrap(), crate::signals::Signal::First);
+    assert!(!s.ok);
+    assert_eq!(s.error.as_deref(), Some(INTERRUPTED));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the run waited out its time: {:?}",
+        started.elapsed()
+    );
+    assert!(s.threads_joined > 0, "the engine was shut down: {s:?}");
 }

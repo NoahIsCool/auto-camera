@@ -8,9 +8,10 @@
 //!
 //! Besides counters it carries what a run without a window needs to judge
 //! the pictures: how each query's prompt was read (what the detector was
-//! asked for, the framings and any notices), whether each source's detector
-//! was ready and when (a run that ended while it loaded says nothing about
-//! detection), each shot's crop width and height range over the run (Phase
+//! asked for, the framings and any notices) and what the newest detector
+//! pass on each source found for it (spec M2), whether each source's
+//! detector was ready and when (a run that ended while it loaded says
+//! nothing about detection), each shot's crop width and height range over the run (Phase
 //! 1 Milestone 1 of `/mnt/project-files/research/model-picker-design.md` §5
 //! asks a headless band run for a crop-height variation of at most 10% on
 //! static performers), whether each shot is zoom-limited and which shot it
@@ -82,8 +83,9 @@ pub struct SourceSummary {
     /// The run ended while the source's detector was still loading, so the
     /// discovery counters say nothing about the detector.
     pub discovery_preparing: bool,
-    /// Master-clock seconds at which the detector was ready (`null` while
-    /// it loaded, and without a detector).
+    /// Master-clock seconds at which the detector's load ended (`null`
+    /// while it loaded, and without a detector). The load may have failed:
+    /// then `discovery_errors` and `discovery_last_error` say why.
     pub detector_ready_s: Option<f64>,
     /// Discovery requests sent.
     pub discovery_requests: u64,
@@ -128,6 +130,29 @@ pub struct QuerySummary {
     pub parse: String,
     /// The parse's notices, one sentence each.
     pub notes: Vec<String>,
+    /// What the newest applied detector pass of each source found for it,
+    /// in source order; sources without such a pass are left out.
+    pub matches: Vec<MatchSummary>,
+}
+
+/// Prompt feedback in the summary: one source's newest applied pass.
+#[derive(Debug, Clone, Serialize)]
+pub struct MatchSummary {
+    /// Source id.
+    pub source: String,
+    /// Detections returned for the query.
+    pub count: usize,
+    /// Those at or above the subject store's floor; only these can become
+    /// subjects.
+    pub kept: usize,
+    /// The floor, to two decimals.
+    pub floor: f64,
+    /// Their best score, to two decimals; `null` when there were none.
+    pub best: Option<f64>,
+    /// Sequence number of the frame the pass looked at.
+    pub seq: u64,
+    /// That frame's PTS, in seconds.
+    pub pts_seconds: f64,
 }
 
 /// One shot in the summary.

@@ -19,8 +19,10 @@ use crate::config::{DetectorSettings, MonitorSettings, PresetSpec, QuerySettings
 use crate::discovery::synthetic_detector;
 use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 
+mod feedback;
 mod framing;
 mod protection;
+mod shared;
 mod switching;
 mod vision;
 
@@ -156,6 +158,7 @@ impl Rig {
             self.pending.push(DiscoveryResult {
                 source: *i,
                 frame: req.frame.clone(),
+                queries: req.queries.iter().map(|q| q.id.clone()).collect(),
                 outcome,
                 latency: Duration::ZERO,
             });

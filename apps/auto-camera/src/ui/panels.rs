@@ -11,16 +11,23 @@
 
 use std::path::PathBuf;
 
-use ac_core::{Lexicon, TrackState};
+use ac_core::TrackState;
 use ac_director::{ContentProfile, DirectorMode};
-use ac_engine::{EngineCommand, EngineSnapshot, OutputState};
+use ac_engine::{EngineCommand, EngineSnapshot, OutputState, PromptReader};
 use eframe::egui::{self, Color32, RichText, Ui};
 
 use super::query_form::{self, QueryForm};
 use super::text::{
-    destinations, dropped_line, encoder_lines, output_state, percent, query_hover, query_line,
-    shot_name, source_line, timing_line,
+    Tone, destinations, dropped_line, encoder_lines, match_lines, output_state, percent,
+    query_hover, query_line, shot_name, source_hover, source_line, source_tone, timing_line,
 };
+
+/// Amber, for warnings such as a prompt with no matches.
+const AMBER: Color32 = Color32::from_rgb(230, 140, 40);
+
+/// Indent of a query's feedback line, under its name (past the remove
+/// button).
+const FEEDBACK_INDENT: f32 = 24.0;
 
 /// The output form.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -103,12 +110,12 @@ pub fn director(ui: &mut Ui, snap: &EngineSnapshot) -> Vec<EngineCommand> {
 }
 
 /// The queries panel: live queries, the add form (its prompt read with
-/// `lexicon`, the engine's) and the subjects.
+/// `prompts`, the engine's reader) and the subjects.
 pub fn queries(
     ui: &mut Ui,
     snap: &EngineSnapshot,
     form: &mut QueryForm,
-    lexicon: &Lexicon,
+    prompts: &PromptReader,
 ) -> Vec<EngineCommand> {
     let mut commands = Vec::new();
     ui.heading("Queries");
@@ -126,9 +133,27 @@ pub fn queries(
             ui.label(RichText::new(query_line(q)).weak())
                 .on_hover_text(query_hover(q));
         });
+        // Prompt feedback (spec M2): what the newest pass found.
+        let lines = match_lines(snap, q);
+        if !lines.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(FEEDBACK_INDENT);
+                for (text, tone, hover) in lines {
+                    let text = match tone {
+                        Tone::Plain => RichText::new(text),
+                        Tone::Warning => RichText::new(text).color(AMBER),
+                        Tone::Weak => RichText::new(text).weak(),
+                    };
+                    let label = ui.label(text);
+                    if !hover.is_empty() {
+                        label.on_hover_text(hover);
+                    }
+                }
+            });
+        }
     }
     ui.add_space(4.0);
-    commands.extend(query_form::show(ui, form, lexicon));
+    commands.extend(query_form::show(ui, form, prompts));
     ui.separator();
     ui.heading("Subjects");
     if snap.subjects.is_empty() {
@@ -209,7 +234,7 @@ pub fn output(ui: &mut Ui, snap: &EngineSnapshot, form: &mut OutputForm) -> Vec<
         }
         let color = match out.state {
             OutputState::Running => Color32::from_rgb(230, 40, 40),
-            OutputState::Failed(_) => Color32::from_rgb(230, 140, 40),
+            OutputState::Failed(_) => AMBER,
             _ => ui.visuals().text_color(),
         };
         ui.label(
@@ -240,7 +265,16 @@ pub fn output(ui: &mut Ui, snap: &EngineSnapshot, form: &mut OutputForm) -> Vec<
 pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, notice: Option<(&str, bool)>) {
     ui.horizontal_wrapped(|ui| {
         for s in &snap.sources {
-            ui.label(source_line(s, snap.media_time));
+            let line = source_line(s, snap.media_time);
+            let text = match source_tone(s) {
+                Tone::Warning => RichText::new(line).color(AMBER),
+                Tone::Plain | Tone::Weak => RichText::new(line),
+            };
+            let label = ui.label(text);
+            let hover = source_hover(s);
+            if !hover.is_empty() {
+                label.on_hover_text(hover);
+            }
             ui.separator();
         }
         ui.label(timing_line(&snap.timing));
@@ -249,8 +283,7 @@ pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, notice: Option<(&str, bool
         if !snap.render_issues.is_empty() {
             ui.separator();
             ui.label(
-                RichText::new(format!("render: {}", snap.render_issues.join("; ")))
-                    .color(Color32::from_rgb(230, 140, 40)),
+                RichText::new(format!("render: {}", snap.render_issues.join("; "))).color(AMBER),
             );
         }
         if let Some((text, error)) = notice {
@@ -299,15 +332,31 @@ mod tests {
     #[test]
     fn the_panels_render_headless_without_commands() {
         let ctx = egui::Context::default();
-        let snap = snapshot();
+        let mut snap = snapshot();
+        // A query with prompt feedback from two passes, one empty.
+        let mut second = snap.queries[0].clone();
+        second.id = ac_core::QueryId("other".into());
+        for count in [2, 0] {
+            second.matches.push(ac_engine::MatchView {
+                source: snap.sources[0].id.clone(),
+                seq: 7,
+                pts: std::time::Duration::from_secs(1),
+                count,
+                best: (count > 0).then_some(0.8),
+                kept: count,
+                floor: 0.35,
+            });
+        }
+        snap.queries.push(second);
+        snap.sources[0].discovery_enabled = true;
         let mut q = QueryForm::default();
         let mut o = OutputForm::default();
         let mut commands = Vec::new();
-        let lexicon = Lexicon::builtin();
+        let prompts = PromptReader::new(ac_core::Lexicon::builtin(), false);
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             commands.clear();
             commands.extend(director(ui, &snap));
-            commands.extend(queries(ui, &snap, &mut q, &lexicon));
+            commands.extend(queries(ui, &snap, &mut q, &prompts));
             commands.extend(output(ui, &snap, &mut o));
             status_bar(ui, &snap, Some(("cut: no preview", true)));
         });

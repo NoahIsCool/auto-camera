@@ -7,10 +7,12 @@
 //! upper body" asks the detector for "a person speaking" and asks for
 //! Medium and Medium close shots. The form reads the prompt on every frame
 //! with the engine's own rules ([`ac_engine::read_prompt`]) and the same
-//! lexicon, built from the same config
-//! ([`ac_engine::StudioConfig::prompt_lexicon`]), so the parse line under
-//! the prompt ("Detector sees: a person speaking · Framing: Medium, Medium
-//! close (person)") is exactly what the engine will make of it.
+//! reader, built from the same config ([`ac_engine::PromptReader::of`]:
+//! the lexicon, and whether the detector sees actions), so the parse line
+//! under the prompt ("Detector sees: a person speaking · Framing: Medium,
+//! Medium close (person)") and the notices under it are exactly what the
+//! engine will make of it. On OWLv2 "speaker" draws a notice that the
+//! detector cannot see speaking; on the sidecar it draws none.
 //!
 //! The size checkboxes **follow the parse** until the operator touches one:
 //! while untouched they show the prompt's shot sizes, or the engine's
@@ -27,8 +29,8 @@
 //!   parser's reason as the hover text.
 //! * Literal prompts are sent as typed; their parse line says "(literal)".
 
-use ac_core::{Lexicon, ParsedPrompt, Preset, ShotSize};
-use ac_engine::{EngineCommand, default_presets, preset_for, read_prompt};
+use ac_core::{ParsedPrompt, Preset, ShotSize};
+use ac_engine::{EngineCommand, PromptReader, default_presets, preset_for, read_prompt};
 use eframe::egui::{self, Color32, RichText, Ui};
 
 use super::text::{parse_line, parse_notes};
@@ -91,9 +93,9 @@ fn ticks(sizes: &[ShotSize]) -> [bool; 4] {
 }
 
 impl QueryForm {
-    /// The prompt as the engine will read it, with `lexicon`.
-    pub fn parse(&self, lexicon: &Lexicon) -> ParsedPrompt {
-        read_prompt(&self.prompt, self.literal, lexicon)
+    /// The prompt as the engine will read it, with `prompts`.
+    pub fn parse(&self, prompts: &PromptReader) -> ParsedPrompt {
+        read_prompt(&self.prompt, self.literal, prompts)
     }
 
     /// Unless the operator touched them, sets the sizes to those `parse`
@@ -126,7 +128,7 @@ impl QueryForm {
     }
 
     /// The `AddQuery` command, or why the form is incomplete.
-    pub fn command(&self, lexicon: &Lexicon) -> Result<EngineCommand, String> {
+    pub fn command(&self, prompts: &PromptReader) -> Result<EngineCommand, String> {
         let (name, prompt) = (self.name.trim(), self.prompt.trim());
         if name.is_empty() {
             return Err("give the query a name".into());
@@ -134,7 +136,7 @@ impl QueryForm {
         if prompt.is_empty() {
             return Err("describe what to look for".into());
         }
-        if let Some(error) = self.parse(lexicon).error() {
+        if let Some(error) = self.parse(prompts).error() {
             return Err(error.to_string());
         }
         let presets = self.presets();
@@ -151,7 +153,7 @@ impl QueryForm {
 }
 
 /// Draws the form and returns the `AddQuery` command when Add was clicked.
-pub fn show(ui: &mut Ui, form: &mut QueryForm, lexicon: &Lexicon) -> Option<EngineCommand> {
+pub fn show(ui: &mut Ui, form: &mut QueryForm, prompts: &PromptReader) -> Option<EngineCommand> {
     egui::Grid::new("query-form").num_columns(2).show(ui, |ui| {
         ui.label("Name");
         ui.text_edit_singleline(&mut form.name);
@@ -161,7 +163,7 @@ pub fn show(ui: &mut Ui, form: &mut QueryForm, lexicon: &Lexicon) -> Option<Engi
             .on_hover_text(PROMPT_HINT);
         ui.end_row();
     });
-    let parse = form.parse(lexicon);
+    let parse = form.parse(prompts);
     form.follow(&parse);
     let mut touched = false;
     ui.horizontal_wrapped(|ui| {
@@ -186,7 +188,7 @@ pub fn show(ui: &mut Ui, form: &mut QueryForm, lexicon: &Lexicon) -> Option<Engi
     if form.overrides(&parse) {
         ui.label(RichText::new(OVERRIDDEN).small().weak());
     }
-    let ready = form.command(lexicon);
+    let ready = form.command(prompts);
     let add = ui.add_enabled(ready.is_ok(), egui::Button::new("Add query"));
     match ready {
         Ok(cmd) if add.clicked() => {
@@ -206,9 +208,10 @@ mod tests {
     use super::*;
     use ShotSize::{Close, Full, Medium, MediumClose};
 
-    /// The built-in lexicon.
-    fn lexicon() -> Lexicon {
-        Lexicon::builtin()
+    /// The built-in lexicon, for a detector that does not see actions
+    /// (OWLv2).
+    fn owl() -> PromptReader {
+        PromptReader::new(ac_core::Lexicon::builtin(), false)
     }
 
     /// A form with `name` and `prompt` whose sizes followed the prompt.
@@ -218,14 +221,14 @@ mod tests {
             prompt: prompt.into(),
             ..QueryForm::default()
         };
-        let parse = form.parse(&lexicon());
+        let parse = form.parse(&owl());
         form.follow(&parse);
         form
     }
 
     /// The sizes of the command's presets.
     fn command_sizes(form: &QueryForm) -> Vec<ShotSize> {
-        match form.command(&lexicon()) {
+        match form.command(&owl()) {
             Ok(EngineCommand::AddQuery {
                 presets: Some(p), ..
             }) => sizes_of(&p),
@@ -243,7 +246,7 @@ mod tests {
             prompt,
             presets,
             literal,
-        }) = form.command(&lexicon())
+        }) = form.command(&owl())
         else {
             panic!("a command");
         };
@@ -257,25 +260,22 @@ mod tests {
     #[test]
     fn incomplete_query_forms_say_what_is_missing() {
         let mut form = QueryForm::default();
-        assert_eq!(
-            form.command(&lexicon()).unwrap_err(),
-            "give the query a name"
-        );
+        assert_eq!(form.command(&owl()).unwrap_err(), "give the query a name");
         form.name = "Pastor".into();
         form.prompt = "   ".into();
         assert_eq!(
-            form.command(&lexicon()).unwrap_err(),
+            form.command(&owl()).unwrap_err(),
             "describe what to look for"
         );
         form.prompt = "person at the lectern".into();
         form.sizes = [false; 4];
         assert_eq!(
-            form.command(&lexicon()).unwrap_err(),
+            form.command(&owl()).unwrap_err(),
             "pick at least one framing"
         );
         // Shot words with nothing to frame: the parser's reason.
         form.prompt = "close-up".into();
-        let why = form.command(&lexicon()).unwrap_err();
+        let why = form.command(&owl()).unwrap_err();
         assert!(why.contains("only names a shot size"), "{why}");
     }
 
@@ -286,17 +286,17 @@ mod tests {
         assert_eq!(command_sizes(&form), [Medium, MediumClose]);
         // Retyping follows the new shot words.
         form.prompt = "speaker close-up".into();
-        form.follow(&form.parse(&lexicon()));
+        form.follow(&form.parse(&owl()));
         assert_eq!(command_sizes(&form), [Close]);
         // No shot words: the engine's default.
         form.prompt = "speaker".into();
-        form.follow(&form.parse(&lexicon()));
+        form.follow(&form.parse(&owl()));
         assert_eq!(command_sizes(&form), [Medium, Close]);
         // Once touched, the operator's choice stays.
         form.sizes = [true, false, false, false];
         form.touched = true;
         form.prompt = "speaker close-up".into();
-        let parse = form.parse(&lexicon());
+        let parse = form.parse(&owl());
         form.follow(&parse);
         assert_eq!(command_sizes(&form), [Full]);
         assert!(form.overrides(&parse));
@@ -309,7 +309,7 @@ mod tests {
     fn an_invalid_prompt_keeps_the_default_sizes() {
         let form = typed("X", "upper body");
         assert_eq!(form.sizes, QueryForm::default().sizes);
-        assert!(form.command(&lexicon()).is_err());
+        assert!(form.command(&owl()).is_err());
     }
 
     #[test]
@@ -318,12 +318,12 @@ mod tests {
             literal: true,
             ..typed("Experiment", "speaker upper body")
         };
-        form.follow(&form.parse(&lexicon()));
-        let parse = form.parse(&lexicon());
+        form.follow(&form.parse(&owl()));
+        let parse = form.parse(&owl());
         assert_eq!(parse.model_phrase, "speaker upper body");
         let Ok(EngineCommand::AddQuery {
             literal, presets, ..
-        }) = form.command(&lexicon())
+        }) = form.command(&owl())
         else {
             panic!("a command");
         };
@@ -337,6 +337,8 @@ mod tests {
         ctx: egui::Context,
         /// The form being shown.
         form: QueryForm,
+        /// How the form reads its prompt.
+        prompts: PromptReader,
         /// The newest frame's output.
         out: egui::FullOutput,
     }
@@ -347,6 +349,7 @@ mod tests {
             Self {
                 ctx: egui::Context::default(),
                 form,
+                prompts: owl(),
                 out: egui::FullOutput::default(),
             }
         }
@@ -362,24 +365,32 @@ mod tests {
                 ..Default::default()
             };
             let mut cmd = None;
-            let form = &mut self.form;
+            let (form, prompts) = (&mut self.form, &self.prompts);
             self.out = self.ctx.run_ui(input, |ui| {
-                cmd = show(ui, form, &lexicon());
+                cmd = show(ui, form, prompts);
             });
             cmd
         }
 
-        /// Where the newest frame painted exactly `text`.
-        fn find(&self, text: &str) -> egui::Pos2 {
+        /// Every text the newest frame painted, with its centre.
+        fn texts(&self) -> Vec<(&str, egui::Pos2)> {
             self.out
                 .shapes
                 .iter()
-                .find_map(|c| match &c.shape {
-                    egui::Shape::Text(t) if t.galley.text() == text => {
-                        Some(t.pos + t.galley.rect.center().to_vec2())
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) => {
+                        Some((t.galley.text(), t.pos + t.galley.rect.center().to_vec2()))
                     }
                     _ => None,
                 })
+                .collect()
+        }
+
+        /// Where the newest frame painted exactly `text`.
+        fn find(&self, text: &str) -> egui::Pos2 {
+            self.texts()
+                .into_iter()
+                .find_map(|(t, pos)| (t == text).then_some(pos))
                 .unwrap_or_else(|| panic!("{text:?} is not on screen"))
         }
 
@@ -436,7 +447,7 @@ mod tests {
             ..QueryForm::default()
         });
         w.frame(Vec::new());
-        let notes = parse_notes(&w.form.parse(&lexicon()));
+        let notes = parse_notes(&w.form.parse(&owl()));
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("an action"), "{notes:?}");
         let line =
@@ -445,6 +456,17 @@ mod tests {
             w.find(&notes[0]).y > line.y,
             "the note is under the parse line"
         );
+        // A detector that sees actions (the sidecar): the same parse line,
+        // and no note.
+        w.prompts.sees_actions = true;
+        w.frame(Vec::new());
+        w.find("Detector sees: a person speaking · Framing: Medium, Medium close (person)");
+        let painted = w.texts();
+        assert!(
+            painted.iter().all(|(t, _)| !t.starts_with("Note:")),
+            "{painted:?}"
+        );
+        assert!(parse_notes(&w.form.parse(&w.prompts)).is_empty());
     }
 
     #[test]

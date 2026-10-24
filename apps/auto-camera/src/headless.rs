@@ -12,11 +12,13 @@
 //! 3. **Detector**: when a source has discovery, wait until no source's
 //!    detector is preparing, for at most [`DETECTOR_TIMEOUT`] (a cold
 //!    CoreML compile of OWLv2 takes two to three minutes, and every new
-//!    build pays CoreML's own part of it again). Timing the run from the
-//!    first wide would spend a short run on the load, and ending the
-//!    process mid-compile would throw the compile away, since CoreML keeps
-//!    only a compile that finished; so the run waits, and fails with
-//!    "still loading" rather than reporting a detector that never ran.
+//!    build pays CoreML's own part of it again), or, on a sidecar, for at
+//!    least its `startup_timeout_s` ([`detector_limit`]), since the window
+//!    would keep preparing that long too. Timing the run from the first
+//!    wide would spend a short run on the load, and ending the process
+//!    mid-compile would throw the compile away, since CoreML keeps only a
+//!    compile that finished; so the run waits, and fails with "still
+//!    loading" rather than reporting a detector that never ran.
 //! 4. **Output**: with `--record`, start the program output and wait until
 //!    ffmpeg runs. The output also streams when the config sets an RTMP URL.
 //! 5. **Run** for the requested time, sampling snapshots to log program
@@ -24,11 +26,18 @@
 //! 6. **Stop** the output and wait for the recording to be finalized, then
 //!    shut the engine down, which joins every thread and reaps ffmpeg.
 //!
+//! A termination signal (Ctrl-C, `SIGTERM`, `SIGHUP`) ends whichever phase
+//! is running; the engine is then shut down as after a normal run (which
+//! also finishes a running recording and ends the detector sidecar), and
+//! the summary says [`INTERRUPTED`].
+//!
 //! The summary ([`summary`]) is always produced; `ok` is false and `error`
 //! says why when a phase failed. It reports how each query's prompt was
 //! read (what the detector was asked for, the shot words' sizes, the basis
-//! and any notices), so a prompt that does not mean what the operator
-//! thought shows up in a headless run too. Snapshots are sampled every
+//! and any notices) and what the newest detector pass on each source found
+//! for it (the match count and best score, spec M2), so a prompt that does
+//! not mean what the operator thought, or that the detector does not
+//! understand, shows up in a headless run too. Snapshots are sampled every
 //! [`SAMPLE`] from the detector phase on, so two program changes closer
 //! together than that show as one, and a crop range can miss a single
 //! tick's extreme.
@@ -38,25 +47,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::signals::QuitSignal;
 use ac_core::{Rect, ShotId};
 use ac_director::{CandidateKind, ContentProfile, DirectorMode};
 use ac_engine::{
-    Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot, MonitorSettings,
-    OutputState, StudioConfig,
+    DetectorSettings, Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot,
+    MonitorSettings, OutputState, StudioConfig,
 };
 
 mod summary;
 
 pub use summary::{
-    DirectorSummary, OutputSummary, ProgramSummary, QuerySummary, ShotSummary, SourceSummary,
-    SubjectSummary, Summary, TimingSummary,
+    DirectorSummary, MatchSummary, OutputSummary, ProgramSummary, QuerySummary, ShotSummary,
+    SourceSummary, SubjectSummary, Summary, TimingSummary,
 };
 
 /// Interval between snapshot samples.
 const SAMPLE: Duration = Duration::from_millis(20);
 /// Longest wait for a source to deliver its first frames.
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(15);
-/// Longest wait for the detectors to load: a cold CoreML compile of OWLv2
+/// Longest wait for the detectors to load, unless a sidecar's own startup
+/// deadline is longer ([`detector_limit`]): a cold CoreML compile of OWLv2
 /// took 140 to 176 s on an M3 Max, so this leaves room for a slower Mac.
 const DETECTOR_TIMEOUT: Duration = Duration::from_secs(300);
 /// Longest wait for ffmpeg to start.
@@ -77,8 +88,13 @@ pub struct HeadlessOptions {
 }
 
 /// Runs `config` headless on the wall clock; see the module docs.
-pub fn run(config: StudioConfig, path: &Path, options: &HeadlessOptions) -> Summary {
-    run_with(config, path, options, EngineOptions::default())
+pub fn run(
+    config: StudioConfig,
+    path: &Path,
+    options: &HeadlessOptions,
+    quit: &QuitSignal,
+) -> Summary {
+    run_with(config, path, options, EngineOptions::default(), quit)
 }
 
 /// [`run`] with explicit engine options (tests use a faster clock).
@@ -87,15 +103,17 @@ pub fn run_with(
     path: &Path,
     options: &HeadlessOptions,
     engine_options: EngineOptions,
+    quit: &QuitSignal,
 ) -> Summary {
     let started = Instant::now();
     config.monitors = MonitorSettings::disabled();
+    let limit = detector_limit(&config.detector);
     let engine = match Engine::start_with(config, engine_options) {
         Ok(e) => e,
         Err(e) => return failed_to_start(path, options, started, e.to_string()),
     };
     let mut sampler = Sampler::default();
-    let error = drive(&engine, options, &mut sampler).err();
+    let error = drive(&engine, options, limit, &mut sampler, quit).err();
     let (ticks, threads_joined, final_snapshot, error) = match engine.shutdown() {
         Ok(r) => (r.ticks, r.threads_joined, Some(r.final_snapshot), error),
         Err(e) => (0, 0, None, error.or(Some(e.to_string()))),
@@ -130,12 +148,43 @@ fn failure_in(snap: &EngineSnapshot, why: &str) -> String {
     }
 }
 
-/// Phases 2 to 6; returns why the run failed.
-fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> Result<(), String> {
+/// Why a run that a termination signal cut short failed.
+pub const INTERRUPTED: &str = "interrupted by a termination signal";
+
+/// How long phase 3 may wait for the detectors of `detector`: the fixed
+/// [`DETECTOR_TIMEOUT`], or for a sidecar its `startup_timeout_s` plus
+/// [`SIGNAL_TIMEOUT`] when that is longer. The sidecar's deadline counts
+/// from its spawn at engine start, before phase 2, so this covers it with
+/// room for the loaders to hand over to the core.
+fn detector_limit(detector: &DetectorSettings) -> Duration {
+    match detector {
+        DetectorSettings::Sidecar(s) => {
+            DETECTOR_TIMEOUT.max(Duration::from_secs_f64(s.startup_timeout_s) + SIGNAL_TIMEOUT)
+        }
+        _ => DETECTOR_TIMEOUT,
+    }
+}
+
+/// Phases 2 to 6; returns why the run failed. Phase 3 waits for the
+/// detectors for at most `detector_limit`. A termination signal (`quit`)
+/// ends any phase early, and the caller shuts the engine down as after a
+/// normal run.
+fn drive(
+    engine: &Engine,
+    options: &HeadlessOptions,
+    detector_limit: Duration,
+    sampler: &mut Sampler,
+    quit: &QuitSignal,
+) -> Result<(), String> {
     let h = engine.handle();
     let snap = h
-        .wait_until(SIGNAL_TIMEOUT, |s| first_wide(s).is_some())
+        .wait_until(SIGNAL_TIMEOUT, |s| {
+            quit.requested() || first_wide(s).is_some()
+        })
         .ok_or_else(|| failure(&h, "no source delivered a picture in time"))?;
+    if quit.requested() {
+        return Err(INTERRUPTED.into());
+    }
     sampler.record(&snap);
     if snap.director.mode != DirectorMode::Auto && snap.switcher.program.is_none() {
         let wide = first_wide(&snap).expect("checked above");
@@ -143,7 +192,7 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
             .and_then(|_| h.send(EngineCommand::Cut))
             .map_err(|e| format!("cannot put a wide on program: {e}"))?;
     }
-    await_detectors(|| h.snapshot(), sampler, DETECTOR_TIMEOUT)?;
+    await_detectors(|| h.snapshot(), sampler, detector_limit, quit)?;
     if let Some(record) = &options.record {
         h.send(EngineCommand::StartOutput {
             rtmp_url: None,
@@ -154,9 +203,13 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
         // Idle, so wait for a state the start leads to.
         let snap = h
             .wait_until(OUTPUT_START_TIMEOUT, |s| {
-                !matches!(s.output.state, OutputState::Idle | OutputState::Starting)
+                quit.requested()
+                    || !matches!(s.output.state, OutputState::Idle | OutputState::Starting)
             })
             .ok_or_else(|| failure(&h, "the output did not start in time"))?;
+        if quit.requested() {
+            return Err(INTERRUPTED.into());
+        }
         if snap.output.state != OutputState::Running {
             return Err(format!("the output did not start: {:?}", snap.output.state));
         }
@@ -168,6 +221,9 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
         sampler.record(&snap);
         if !snap.running {
             return Err(failure(&h, "the engine stopped early"));
+        }
+        if quit.requested() {
+            return Err(INTERRUPTED.into());
         }
         if matches!(snap.output.state, OutputState::Failed(_)) {
             return Err(format!("the output failed: {:?}", snap.output.state));
@@ -190,11 +246,12 @@ fn drive(engine: &Engine, options: &HeadlessOptions, sampler: &mut Sampler) -> R
 }
 
 /// Phase 3: samples `snapshot` until no source's detector is preparing,
-/// for at most `limit` (real time); see the module docs.
+/// for at most `limit` (real time), or until `quit`; see the module docs.
 fn await_detectors(
     mut snapshot: impl FnMut() -> Arc<EngineSnapshot>,
     sampler: &mut Sampler,
     limit: Duration,
+    quit: &QuitSignal,
 ) -> Result<(), String> {
     let started = Instant::now();
     loop {
@@ -202,6 +259,9 @@ fn await_detectors(
         sampler.record(&snap);
         if !snap.running {
             return Err(failure_in(&snap, "the engine stopped early"));
+        }
+        if quit.requested() {
+            return Err(INTERRUPTED.into());
         }
         if !snap.sources.iter().any(|s| s.discovery.preparing) {
             return Ok(());
@@ -405,6 +465,19 @@ fn summarize(
                         .iter()
                         .filter(|w| !w.is_error())
                         .map(ToString::to_string)
+                        .collect(),
+                    matches: q
+                        .matches
+                        .iter()
+                        .map(|m| MatchSummary {
+                            source: m.source.0.clone(),
+                            count: m.count,
+                            kept: m.kept,
+                            floor: round(f64::from(m.floor), 2),
+                            best: m.best.map(|b| round(f64::from(b), 2)),
+                            seq: m.seq,
+                            pts_seconds: round(m.pts.as_secs_f64(), 3),
+                        })
                         .collect(),
                 })
                 .collect()

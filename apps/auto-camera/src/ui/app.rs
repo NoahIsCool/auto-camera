@@ -9,13 +9,16 @@
 //! The window repaints at about the monitor rate while the engine runs.
 //!
 //! Closing the window shuts the engine down, which finishes a running
-//! recording before the process exits.
+//! recording before the process exits. A termination signal (Ctrl-C in
+//! the terminal, `SIGTERM`, `SIGHUP`; [`crate::signals`]) closes the window
+//! the same way.
 
 use std::time::{Duration, Instant};
 
-use ac_core::{Lexicon, ShotId};
+use ac_core::ShotId;
 use ac_engine::{
-    CommandError, CommandReply, Engine, EngineCommand, EngineHandle, PendingReply, StudioConfig,
+    CommandError, CommandReply, Engine, EngineCommand, EngineHandle, PendingReply, PromptReader,
+    StudioConfig,
 };
 use eframe::egui;
 
@@ -25,6 +28,7 @@ use super::panels::{self, OutputForm};
 use super::query_form::QueryForm;
 use super::switching::{self, SwitchState};
 use super::textures::Textures;
+use crate::signals::QuitSignal;
 
 /// How long a notice stays in the status bar.
 const NOTICE_FOR: Duration = Duration::from_secs(8);
@@ -84,9 +88,10 @@ pub struct OperatorApp {
     switch: SwitchState,
     /// The add-query form.
     query_form: QueryForm,
-    /// The prompt parser's vocabulary, built from the same config as the
-    /// engine's, so the form reads prompts exactly as the engine will.
-    lexicon: Lexicon,
+    /// How prompts are read (the lexicon and what the detector sees),
+    /// built from the same config as the engine's, so the form reads
+    /// prompts exactly as the engine will.
+    prompts: PromptReader,
     /// The output form.
     output_form: OutputForm,
     /// Replies not yet arrived, with their command names.
@@ -95,6 +100,8 @@ pub struct OperatorApp {
     notice: Option<Notice>,
     /// Program aspect ratio.
     aspect: f32,
+    /// Termination signals; when one has come the window closes.
+    quit: QuitSignal,
 }
 
 impl std::fmt::Debug for OperatorApp {
@@ -115,7 +122,7 @@ impl OperatorApp {
             textures: Textures::default(),
             switch: SwitchState::new(config.switcher.to_transition()),
             query_form: QueryForm::default(),
-            lexicon: config.prompt_lexicon(),
+            prompts: PromptReader::of(config),
             output_form: OutputForm::new(
                 config.output.rtmp_url.as_deref(),
                 config.output.record_path.as_deref(),
@@ -123,7 +130,14 @@ impl OperatorApp {
             pending: Vec::new(),
             notice: None,
             aspect: config.output.width as f32 / config.output.height.max(1) as f32,
+            quit: QuitSignal::new(),
         }
+    }
+
+    /// The same app, closing its window once `quit` is requested.
+    pub fn with_quit(mut self, quit: QuitSignal) -> Self {
+        self.quit = quit;
+        self
     }
 
     /// Posts `command`; its reply is collected by [`Self::poll`].
@@ -167,9 +181,13 @@ impl OperatorApp {
         }
     }
 
-    /// Draws one frame into `ui`.
+    /// Draws one frame into `ui`; asks the window to close once a
+    /// termination signal came (closing shuts the engine down).
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if self.quit.requested() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let snap = self.handle.snapshot();
         self.poll();
         let ids: Vec<ShotId> = snap.shots.iter().map(|s| s.id.clone()).collect();
@@ -197,7 +215,7 @@ impl OperatorApp {
                         ui,
                         &snap,
                         &mut self.query_form,
-                        &self.lexicon,
+                        &self.prompts,
                     ));
                     ui.separator();
                     commands.extend(panels::output(ui, &snap, &mut self.output_form));

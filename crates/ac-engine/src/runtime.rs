@@ -1,15 +1,17 @@
 //! The engine runtime: threads, channels, mailboxes and the master clock.
 //!
-//! [`Engine::start`] opens every source, builds one detector per source,
-//! and spawns:
+//! [`Engine::start`] opens every source, builds one detector per source
+//! ([`Detectors::build`]; a sidecar detector starts its one shared process
+//! here), and spawns:
 //!
 //! * the **engine thread** (`ac-engine`), which owns the [`EngineCore`],
-//!   the sources, the discovery workers' inboxes and the
-//!   [`OutputController`], and runs the master clock: one tick per output
-//!   frame on the injected [`Clock`] ([`TickSchedule`]);
+//!   the sources, the discovery workers' inboxes, the sidecar service (if
+//!   any) and the [`OutputController`], and runs the master clock: one tick
+//!   per output frame on the injected [`Clock`] ([`TickSchedule`]);
 //! * one **discovery worker** per source with a detector
 //!   (`ac-discovery-<source>`);
-//! * whatever the sources and the encoder spawn internally (decoders,
+//! * whatever the sources, the sidecar service and the encoder spawn
+//!   internally (decoders, the sidecar process and its `ac-sam-*` threads,
 //!   ffmpeg pipes), owned by those objects.
 //!
 //! Communication is by message passing only:
@@ -26,11 +28,12 @@
 //!
 //! No lock is shared between threads except inside these mailboxes, and none
 //! is held across I/O. [`Engine::shutdown`] (or dropping the [`Engine`])
-//! sends [`EngineCommand::Shutdown`]; the engine thread then stops and joins
-//! the workers, finishes the encoder (the recording is finalized), stops
-//! every source, publishes a final snapshot with `running == false` and
-//! exits, and `shutdown` joins it. No thread or child process outlives the
-//! engine.
+//! sends [`EngineCommand::Shutdown`]; the engine thread then stops the
+//! sidecar (interrupting a pass or a load in progress, so the workers end
+//! at once; see [`crate::detectors`]), stops and joins the workers,
+//! finishes the encoder (the recording is finalized), stops every source,
+//! publishes a final snapshot with `running == false` and exits, and
+//! `shutdown` joins it. No thread or child process outlives the engine.
 //!
 //! The engine thread can also die: a bug that panics anywhere in a tick or
 //! a command unwinds it. Unwinding drops what the thread owned (sources
@@ -44,23 +47,30 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ac_media::{SourceInfo, VideoSource};
 use ac_output::AudioFormat;
+use ac_sidecar::SidecarService;
 use ac_sources::{Clock, WallClock, open_source_with_clock};
 use thiserror::Error;
 
 use crate::command::{CommandError, CommandReply, EngineCommand};
 use crate::config::{ConfigError, StudioConfig};
 use crate::core::{EngineCore, SourceFeed};
-use crate::discovery::{DiscoveryResult, DiscoveryWorker, build_detector};
+use crate::detectors::Detectors;
+use crate::discovery::{DiscoveryResult, DiscoveryWorker};
 use crate::mailbox::Latest;
 use crate::output::OutputController;
 use crate::schedule::{PhaseLock, TickDecision, TickSchedule, TickTimer};
 use crate::snapshot::{EngineSnapshot, OutputState, OutputView, TimingView};
+
+mod handle;
+
+use handle::Envelope;
+pub use handle::{EngineHandle, PendingReply};
 
 /// Longest single wait of the engine thread between ticks.
 const WAIT_SLICE: Duration = Duration::from_millis(10);
@@ -89,6 +99,10 @@ pub enum EngineError {
         /// Why.
         message: String,
     },
+    /// The shared detector sidecar could not be started (a program or path
+    /// in its command is missing, or the process cannot be spawned).
+    #[error("detector sidecar: {0}")]
+    Sidecar(String),
     /// The core rejected the setup.
     #[error("engine setup: {0}")]
     Setup(String),
@@ -129,109 +143,6 @@ impl std::fmt::Debug for EngineOptions {
     }
 }
 
-/// A command with an optional reply channel.
-struct Envelope {
-    /// The command.
-    command: EngineCommand,
-    /// Where to send the result.
-    reply: Option<Sender<Result<CommandReply, CommandError>>>,
-}
-
-/// The answer to a command sent with [`EngineHandle::post`].
-#[derive(Debug)]
-pub struct PendingReply {
-    /// The reply channel.
-    rx: Receiver<Result<CommandReply, CommandError>>,
-}
-
-impl PendingReply {
-    /// The answer if it has arrived, without waiting.
-    pub fn try_get(&self) -> Option<Result<CommandReply, CommandError>> {
-        match self.rx.try_recv() {
-            Ok(r) => Some(r),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                Some(Err(CommandError::Unavailable("engine stopped")))
-            }
-        }
-    }
-
-    /// Waits up to `timeout` for the answer.
-    pub fn wait(self, timeout: Duration) -> Result<CommandReply, CommandError> {
-        match self.rx.recv_timeout(timeout) {
-            Ok(r) => r,
-            Err(RecvTimeoutError::Timeout) => Err(CommandError::Unavailable("no answer in time")),
-            Err(RecvTimeoutError::Disconnected) => Err(CommandError::Unavailable("engine stopped")),
-        }
-    }
-}
-
-/// A cloneable handle for sending commands and reading snapshots.
-#[derive(Clone)]
-pub struct EngineHandle {
-    /// Command channel.
-    tx: Sender<Envelope>,
-    /// Snapshot mailbox.
-    snapshots: Arc<Latest<Arc<EngineSnapshot>>>,
-    /// The snapshot published before the engine thread started.
-    initial: Arc<EngineSnapshot>,
-}
-
-impl std::fmt::Debug for EngineHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EngineHandle")
-            .field("snapshot_version", &self.snapshots.version())
-            .finish_non_exhaustive()
-    }
-}
-
-impl EngineHandle {
-    /// Sends `command` and returns a handle to its answer.
-    pub fn post(&self, command: EngineCommand) -> PendingReply {
-        let (reply, rx) = channel();
-        // A send error means the engine is gone; the reply then reports it.
-        let _ = self.tx.send(Envelope {
-            command,
-            reply: Some(reply),
-        });
-        PendingReply { rx }
-    }
-
-    /// Sends `command` and waits up to [`COMMAND_TIMEOUT`] for the answer.
-    pub fn send(&self, command: EngineCommand) -> Result<CommandReply, CommandError> {
-        self.post(command).wait(COMMAND_TIMEOUT)
-    }
-
-    /// The newest snapshot.
-    pub fn snapshot(&self) -> Arc<EngineSnapshot> {
-        self.snapshots.get().unwrap_or_else(|| self.initial.clone())
-    }
-
-    /// Version of the newest snapshot (increases by one per publish).
-    pub fn snapshot_version(&self) -> u64 {
-        self.snapshots.version()
-    }
-
-    /// Polls snapshots until `done` holds or `timeout` (real time) passes.
-    pub fn wait_until(
-        &self,
-        timeout: Duration,
-        done: impl Fn(&EngineSnapshot) -> bool,
-    ) -> Option<Arc<EngineSnapshot>> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let s = self.snapshot();
-            if done(&s) {
-                return Some(s);
-            }
-            if Instant::now() >= deadline || !s.running {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-}
-
 /// What the engine thread reports when it ends.
 #[derive(Debug, Clone)]
 pub struct EngineReport {
@@ -265,6 +176,10 @@ struct Runtime {
     core: EngineCore,
     /// Sources, in config order.
     sources: Vec<Box<dyn VideoSource>>,
+    /// The detector sidecar the workers share, if any. Declared before the
+    /// workers so that, when a panic unwinds the thread, it is dropped
+    /// first too (see [`Runtime::shutdown`]).
+    sidecar: Option<SidecarService>,
     /// Discovery workers, by source.
     workers: Vec<Option<DiscoveryWorker>>,
     /// Discovery results.
@@ -312,16 +227,10 @@ impl Engine {
                     })?;
             sources.push(src);
         }
-        let mut detectors = Vec::new();
-        for entry in &config.sources {
-            let d = build_detector(&config.detector, &entry.input).map_err(|message| {
-                EngineError::Detector {
-                    id: entry.id.clone(),
-                    message,
-                }
-            })?;
-            detectors.push(d);
-        }
+        let Detectors {
+            loaders: detectors,
+            sidecar,
+        } = Detectors::build(&config)?;
         let infos: Vec<SourceInfo> = sources.iter().map(|s| s.info().clone()).collect();
         let enabled: Vec<bool> = detectors.iter().map(Option::is_some).collect();
         let core = EngineCore::new(&config, infos.clone(), &enabled).map_err(EngineError::Setup)?;
@@ -359,6 +268,7 @@ impl Engine {
         let runtime = Runtime {
             core,
             sources,
+            sidecar,
             workers,
             results,
             commands,
@@ -580,9 +490,18 @@ impl Runtime {
         snapshot
     }
 
-    /// Stops workers, output and sources, and publishes the final snapshot.
+    /// Stops the sidecar, the workers, the output and the sources, and
+    /// publishes the final snapshot. The sidecar goes first: dropping its
+    /// service interrupts a pass or a load in progress, so the workers can
+    /// be joined at once instead of after a request deadline.
     fn shutdown(mut self) -> EngineReport {
         let mut joined = 0;
+        if let Some(service) = self.sidecar.take() {
+            // Ends the process (stdin closed, 2 s grace, kill, reap) and
+            // joins the service thread.
+            drop(service);
+            joined += 1;
+        }
         for w in self.workers.iter_mut().flatten() {
             joined += usize::from(w.stop());
         }

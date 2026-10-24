@@ -26,12 +26,21 @@
 //! the config's `lexicon` additions ([`StudioConfig::prompt_lexicon`]):
 //! shot words pick its presets when it lists none, role words become the
 //! detector phrase, and `literal = true` sends the text as typed. Explicit
-//! `presets` always win over shot words; see [`crate::queries`].
+//! `presets` always win over shot words. A role that names an action draws
+//! a notice unless the `detector` sees actions
+//! ([`DetectorSettings::sees_actions`]); see [`crate::queries`].
+//!
+//! The `detector` table picks one detector `kind` for the whole studio:
+//! `"none"`, `"synthetic"` (ground truth of synthetic sources), `"owl"`
+//! (OWLv2 through ONNX Runtime, one instance per source) or `"sidecar"` (a
+//! detector in its own process, SAM 3.1 on MLX first, started once and
+//! shared by every source; [`SidecarSettings`]). Every query goes to it.
 //!
 //! The `tracker` and `framing` tables are partial: keys given override the
 //! crate defaults and unknown keys are rejected. Relative file paths
-//! (`sources[].path` and detector model paths) are resolved against the
-//! directory of the config file.
+//! (`sources[].path`, detector model paths and the path-like elements of a
+//! sidecar's `command`) are resolved against the directory of the config
+//! file.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -47,12 +56,16 @@ use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
+use crate::queries::PromptReader;
+
 mod settings;
+mod sidecar;
 
 pub use settings::{
     DetectorSettings, DirectorSettings, DiscoverySettings, EncoderSetting, MonitorSettings,
     OutputSettings, SubjectSettings, SwitcherSettings,
 };
+pub use sidecar::SidecarSettings;
 
 /// Errors from loading or validating a [`StudioConfig`].
 #[derive(Debug, Error)]
@@ -183,15 +196,15 @@ impl QuerySettings {
             .map(|specs| specs.iter().map(PresetSpec::to_preset).collect())
     }
 
-    /// The query, its prompt read with `lexicon`; see [`crate::queries`].
-    pub fn build(&self, lexicon: &Lexicon) -> Result<Query, String> {
+    /// The query, its prompt read with `reader`; see [`crate::queries`].
+    pub fn build(&self, reader: &PromptReader) -> Result<Query, String> {
         crate::queries::build_query(
             self.query_id(),
             &self.name,
             &self.prompt,
             self.explicit_presets(),
             self.literal,
-            lexicon,
+            reader,
         )
     }
 }
@@ -335,7 +348,8 @@ impl StudioConfig {
         }
     }
 
-    /// Makes relative source and model paths relative to `dir`.
+    /// Makes relative source, model and sidecar command paths relative to
+    /// `dir`.
     pub fn resolve_paths(&mut self, dir: &Path) {
         let fix = |p: &mut PathBuf| {
             if p.is_relative() {
@@ -347,18 +361,21 @@ impl StudioConfig {
                 fix(path);
             }
         }
-        if let DetectorSettings::Owl {
-            model,
-            text_encoder,
-            tokenizer,
-            ..
-        } = &mut self.detector
-        {
-            fix(model);
-            fix(tokenizer);
-            if let Some(t) = text_encoder {
-                fix(t);
+        match &mut self.detector {
+            DetectorSettings::Owl {
+                model,
+                text_encoder,
+                tokenizer,
+                ..
+            } => {
+                fix(model);
+                fix(tokenizer);
+                if let Some(t) = text_encoder {
+                    fix(t);
+                }
             }
+            DetectorSettings::Sidecar(sidecar) => sidecar.resolve_paths(dir),
+            DetectorSettings::None | DetectorSettings::Synthetic { .. } => {}
         }
     }
 
@@ -394,6 +411,15 @@ impl StudioConfig {
         self.build_queries()?;
         self.detector.validate().map_err(ConfigError::Invalid)?;
         self.discovery.validate().map_err(ConfigError::Invalid)?;
+        if let DetectorSettings::Sidecar(sidecar) = &self.detector
+            && sidecar.request_timeout_s >= self.discovery.timeout_s
+        {
+            return bad(format!(
+                "detector.request_timeout_s ({} s) must be below discovery.timeout_s ({} s), \
+                 after which the engine abandons a request",
+                sidecar.request_timeout_s, self.discovery.timeout_s
+            ));
+        }
         self.tracker
             .validate()
             .map_err(|e| ConfigError::Invalid(format!("tracker: {e}")))?;
@@ -427,11 +453,11 @@ impl StudioConfig {
         lexicon
     }
 
-    /// The queries in config order, each prompt read once with
-    /// [`Self::prompt_lexicon`]; fails on the first invalid or duplicate
-    /// query.
+    /// The queries in config order, each prompt read once with the
+    /// studio's [`PromptReader`] (its lexicon and its detector); fails on
+    /// the first invalid or duplicate query.
     pub fn build_queries(&self) -> Result<Vec<Query>, ConfigError> {
-        let lexicon = self.prompt_lexicon();
+        let reader = PromptReader::of(self);
         let mut ids = HashSet::new();
         let mut out = Vec::new();
         for q in &self.queries {
@@ -442,7 +468,7 @@ impl StudioConfig {
                     id.0
                 )));
             }
-            let query = q.build(&lexicon).map_err(ConfigError::Invalid)?;
+            let query = q.build(&reader).map_err(ConfigError::Invalid)?;
             if !ids.insert(id.0.clone()) {
                 return Err(ConfigError::Invalid(format!(
                     "duplicate query id {:?}",
