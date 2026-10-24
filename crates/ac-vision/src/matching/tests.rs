@@ -433,7 +433,11 @@ fn only_rounding_sized_differences_are_ties() {
         (r(0.39999, 0.0, 0.8, 1.0), 0.3),
     ];
     assert_eq!(holder(&people, &object, 0.45), Some(1));
-    let people = [(r(0.0, 0.0, 0.4, 1.0), 0.5), (r(0.4, 0.0, 0.8, 1.0), 0.3)];
+    // Equal halves, but rounding gives the lower-scored person the larger
+    // one (0.5000000000000001 against 0.49999999999999994): only the margin
+    // gives the object to the higher score.
+    let people = [(r(0.4, 0.0, 0.8, 1.0), 0.5), (r(0.0, 0.0, 0.4, 1.0), 0.3)];
+    assert!(contained_fraction(&object, &people[0].0) < contained_fraction(&object, &people[1].0));
     assert_eq!(holder(&people, &object, 0.45), Some(0));
     assert_eq!(holder(&people, &object, 0.6), None);
     assert_eq!(holder(&[], &object, 0.45), None);
