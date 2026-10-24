@@ -4,8 +4,9 @@
 //! Frames are 1280x720, the width the example configs decode to; the tracker
 //! reduces them to its 384 px working width as it does on the Mac. Luma is
 //! `light x albedo` with the performers' albedo attached to their bodies, so
-//! a performer's texture moves with them and a light cue scales every grey
-//! level of the scene by the same factor. A shadow multiplies the wall by
+//! a performer's texture moves with them. A wash scales every grey level of
+//! the scene by the same factor; a followspot lights a performer's figure
+//! and not the backdrop around it. A shadow multiplies the wall by
 //! `1 - dark x mask`, so its depth is a fixed fraction of the wall level: 12 %
 //! of a wall at 0.7 is 21 grey levels, and the shadow's box then has a
 //! standard deviation of about 0.03 (7 grey levels), against 0.1 to 0.2 for a
@@ -175,8 +176,18 @@ pub fn backdrop(x: f64, y: f64) -> f64 {
     0.35 + 0.15 * (value_noise(x / 40.0, y / 40.0, 21) - 0.5)
 }
 
-/// A performer `figure` in front of the backdrop, under `light`, at `(x, y)`.
-pub fn lit_performer((x, y): (f64, f64), figure: Figure, light: f64) -> f64 {
+/// A performer `figure` in front of the backdrop at `(x, y)`, with the light
+/// `on_figure` on the figure's own pixels and `on_backdrop` on the rest.
+///
+/// Equal lights are a wash, which scales every grey level of the performer's
+/// box by the same factor. A followspot lights the figure more than the
+/// backdrop around it, inside its box too, which changes the box's structure
+/// as well as its contrast.
+pub fn lit_performer(
+    (x, y): (f64, f64),
+    figure: Figure,
+    (on_figure, on_backdrop): (f64, f64),
+) -> f64 {
     let m = figure.mask(x, y);
-    light * (backdrop(x, y) * (1.0 - m) + figure.albedo(x, y, 0) * m)
+    on_backdrop * backdrop(x, y) * (1.0 - m) + on_figure * figure.albedo(x, y, 0) * m
 }

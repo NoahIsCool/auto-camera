@@ -32,28 +32,28 @@
 //!
 //! The confidence is the peak NCC, in `0..=1`. The box moves to the peak only
 //! when the peak is at least `accept_score` *and* no separate local maximum
-//! comes within `ambiguity_margin` of it *and* it passes the contrast check
-//! below. Otherwise the subject is considered occluded or ambiguous: the box
-//! coasts on its decaying velocity instead of jumping to a distractor, and an
-//! ambiguous or contrast-refused match reports at most `ambiguous_confidence`.
-//! The appearance template learns the new look with `learning_rate` only when
-//! the confidence reaches `update_score` and the box is fully inside the
-//! frame, so occluders and the frame border are not learned. The tracker
-//! never drops a subject by itself.
+//! comes within `ambiguity_margin` of it *and* the contrast check below does
+//! not hold it back. Otherwise the subject is considered occluded or
+//! ambiguous: the box coasts on its decaying velocity instead of jumping to a
+//! distractor. An ambiguous match, or a match of at least `accept_score` held
+//! back by its contrast, reports at most `ambiguous_confidence`; a match
+//! below `accept_score` reports its own score. The appearance template learns
+//! the new look with `learning_rate` only when the confidence reaches
+//! `update_score` and the box is fully inside the frame, so occluders and the
+//! frame border are not learned. The tracker never drops a subject by itself.
 //!
-//! NCC is blind to contrast: it divides both patches by their own standard
-//! deviation. A faint template, such as a shadow on a wall whose box varies
-//! by seven grey levels, matches a nearby high-contrast performer of the same
-//! shape at 0.70 to 0.76 (or a gentle wall gradient at about 0.6) while its
-//! own score sinks as the performer enters its window. So each match also carries its
-//! contrast gain: the window's standard deviation over the template's, on the
-//! same visible pixels (O(1) from the integral images). A match whose gain is
-//! outside `1 / max_contrast_gain ..= max_contrast_gain` moves the box only if
-//! it reaches `update_score`; below that it coasts like an ambiguous match,
-//! without scale probes or learning. It is not refused outright, because a
-//! light cue changes a real performer's contrast three to five times in one
-//! frame: their match stays strong, is accepted and learned, and the template
-//! takes on the new contrast at `learning_rate` per frame.
+//! NCC is blind to contrast, so a faint template, such as a shadow on a wall,
+//! matches a nearby high-contrast performer of the same shape at 0.70 to
+//! 0.76. Each match therefore also carries its contrast gain, the window's
+//! standard deviation over the template's on the same pixels. The check
+//! holds back a match below `update_score` whose gain is outside
+//! `1 / max_contrast_gain ..= max_contrast_gain` only when it also lands
+//! farther than `surprise_fraction` of the box's shorter side from the
+//! prediction (more after skipped frames or a late start), as such a jump
+//! does. A match near the prediction is judged as
+//! before: a performer whose contrast a light cue changes, a followspot that
+//! weakens their match to about 0.7 included, is followed where they were
+//! heading. The `search` submodule's docs give the theory and the limits.
 //!
 //! The check does not help when the start box already holds someone else's
 //! pixels (a neighbour's head in a corner of a shadow's box): the template
@@ -343,7 +343,7 @@ fn step(
             );
             track.confidence = match other {
                 // Held back by its ambiguity or its contrast, not its score.
-                Some(m) if m.ambiguous || m.score >= config.accept_score => {
+                Some(m) if m.ambiguous || m.contrast_refused(config) => {
                     m.score.min(config.ambiguous_confidence)
                 }
                 Some(m) => m.score,

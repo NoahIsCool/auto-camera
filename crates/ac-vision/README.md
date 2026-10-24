@@ -28,16 +28,23 @@ detector re-anchors subjects; the tracker never retires one by itself.
 
 NCC ignores contrast, so a faint template (a shadow on a wall) would also
 match a nearby high-contrast performer of the same shape, or a gentle wall
-gradient, at 0.6 to 0.76. Each match therefore carries its contrast gain, the
-window's standard deviation over the template's on the same pixels. A match
-whose gain is outside `1 / max_contrast_gain ..= max_contrast_gain` (default
-2.5) moves the box only if it scores at least `update_score` (0.8); below
-that it coasts at the ambiguous confidence. A performer under a sudden light
-cue keeps matching strongly, so they are still followed and the template
-relearns their new contrast. The check does not help when the start box
-already holds a neighbour's pixels (a head in the corner of a shadow's box):
-the template then follows that head. That case waits on measurements from the
-band clip; a false subject such as a shadow is for the operator to hide.
+relief, at 0.6 to 0.76, a box width or more from where it was heading. Each
+match therefore carries its contrast gain, the window's standard deviation
+over the template's on the same pixels. A match that lands farther than
+`surprise_fraction` (default 0.25) of the box's shorter side from the
+prediction, with a gain outside `1 / max_contrast_gain ..= max_contrast_gain`
+(default 2.5), moves the box only if it scores at least `update_score` (0.8);
+a match of at least `accept_score` held back this way coasts and reports at
+most the ambiguous confidence (0.3), while a match below `accept_score`, held
+back by its score, reports that score. A match near the prediction is judged
+on its score alone, so a performer whose contrast a light cue changes is
+followed where they were heading, even under a followspot that lights them and
+not the backdrop and weakens their match to about 0.7. The distance widens
+with the search window after skipped frames or a late start, when the
+prediction is less certain. The check does not help when the start box already
+holds a neighbour's pixels (a head in the corner of a shadow's box): the
+template then follows that head. That case waits on measurements from the band
+clip; a false subject such as a shadow is for the operator to hide.
 
 Measured with `cargo run --release -p ac-vision --example track_bench` on a
 4-core 2.1 GHz Xeon VM: 16 subjects on 1080p in 7.4 ms per frame (most of it
