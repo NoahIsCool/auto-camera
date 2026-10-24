@@ -148,16 +148,34 @@ h = (cut - crown) / (1 - headroom)                             top = crown - hea
 
 An untruncated box is always measured on its own proportions, so Full is
 the whole box. A box that touches the top or bottom edge of the source, or
-is too squat in pixels for a standing body, falls back to the fill rule
-unless the shot remembers a head height from an earlier untruncated box;
-then its head is the larger of the remembered one and the box height over
-7.5, because the visible part of a body bounds the whole from below. Each
-shot's framer owns that memory and is its only writer: smoothed with a 5 s
-half-life over untruncated boxes, raised (never lowered) toward the visible
-bound by truncated ones. A lectern hiding the legs therefore keeps the zoom,
-and a person who walks toward the camera until their feet leave the picture
-is not sized by the smaller head they had further away. Every other subject
-keeps the fill rule, unchanged.
+is too squat in pixels for a standing body, uses a head height the shot
+remembers from an earlier untruncated box: the larger of the remembered one
+and the box height over 7.5, because the visible part of a body bounds the
+whole from below. Each shot's framer owns that memory and is its only
+writer: smoothed with a 5 s half-life over untruncated boxes, raised (never
+lowered) toward the visible bound by truncated ones. A lectern hiding the
+legs therefore keeps the zoom, and a person who walks toward the camera
+until their feet leave the picture is not sized by the smaller head they had
+further away.
+
+With nothing remembered, a box cut by the bottom edge with its crown in the
+picture (a speaker framed from the knees up) is cut from the crown on a
+bounded assumed head instead of the fill rule. It is read as showing
+`V = clamp(1.875 * pixel aspect, 1.6, 3.0)` head heights, so the head is the
+box height over `V`, and no frame reaches below the box, so the crown keeps
+the preset's headroom. For every box tall enough to be a standing body `V`
+is 3, crown to waist, the loosest head the assumption allows: when more of
+the body shows, shots come out looser than their size; only a box showing
+less (a chest-up in profile) comes out tighter. The width term only keeps
+`V` continuous across the squat threshold. The framer smooths `V` with the
+same 5 s half-life in a slot of its own that never becomes a remembered
+head; it seeds it only from boxes clear of the side edges, then frames every
+box cut by the bottom on it (also at a side edge or with the crown at the
+frame top) and, as hysteresis, still reads a box ending within 3% of the
+bottom as cut off. Full, boxes clear of the bottom (cut by the top or too
+squat), and, until the shot holds a `V`, boxes cut by the bottom that touch
+a side edge or the frame top keep the fill rule. Every other subject keeps
+the fill rule, unchanged.
 
 A shot the preset's zoom ceiling keeps from its size is drawn at the
 ceiling and marked: a LIMITED badge on its multiview tile (never in the
@@ -203,6 +221,15 @@ query, notices included.
   headstock above the head move the crown; a seated drummer or a lectern
   makes boxes look truncated. A head source (an OWLv2 head query, SAM masks
   or pose; design §4.5) replaces it later without changing this decision.
+- The no-head fallback for a person cut off by the bottom of the picture is
+  now bounded. On a speaker framed from the knees up (a box 0.35 of the
+  frame high) Close is drawn at the 4x ceiling and marked limited, and
+  Medium close and Medium are 0.285 and 0.38 high with the crown 6% and 8%
+  down, where the fill rule framed the whole visible body at every size
+  (0.38, 0.45 and 0.58 high, crown 8%, 22% and 40% down). Band members whose
+  boxes run off the bottom get tighter shots, more of them limited, which
+  the band clip has yet to confirm; this supersedes design §4.5 item 3 for
+  such boxes.
 - The parser is a heuristic. Known misreadings follow the table as written,
   each now with a notice that points at `literal = true`, the escape hatch:
   a leading "ms" ("Ms Smith close-up" asks for Medium and Close of "Smith"),
@@ -253,3 +280,18 @@ query, notices included.
    as the thing to look for.
 8. A subject found by several queries getting the shots of all of them,
    each named after its query.
+9. The assumed head for a person cut off by the bottom of the picture, and
+   its inferred constants: a shoulder width of 1.875 head heights (which
+   ties the 1.6 squat threshold to crown to waist), a floor of 1.6 and a cap
+   of 3.0 visible head heights (the Close and Medium cut lines), and the
+   3% release band at the bottom edge. Also open: whether such shots get
+   an approximate mark (none today; a Close drawn at the ceiling is already
+   marked limited) and its wording; what Full of such a person should be
+   (the fill rule today, a 1.14x crop with the crown 60% down, or the
+   visible box with Full headroom); and the residual risks. A chest-up box
+   seen in profile gets its Close cut near the neck; a whole body whose
+   feet touch the bottom edge gets its Close cut near the hip; a
+   mid-distance person cut by the bottom (a box about 0.25 high) has Close
+   and Medium close both drawn at the ceiling and marked as the same
+   picture; a shot whose very first box ends just above the edge (bottom
+   0.97 to 0.99) still measures a whole body.

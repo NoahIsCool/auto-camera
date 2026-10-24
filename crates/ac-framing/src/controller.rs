@@ -12,7 +12,12 @@
 //!   proportions, so Full is always the whole box; the memory sizes only
 //!   truncated boxes, so a person whose legs go behind a lectern keeps their
 //!   zoom instead of falling back to the fill rule (see [`crate::person`]).
-//!   The memory lives and dies with the shot.
+//!   In a separate slot it smooths, with the same half-life, how many head
+//!   heights a box cut by the bottom of the picture is assumed to show: a
+//!   speaker never seen whole is framed down from the crown on that
+//!   bounded guess, steady through gestures, a walk to the side of the
+//!   picture and boxes that end just above the bottom edge. The guess never
+//!   becomes a remembered head. The memory lives and dies with the shot.
 //! * **Dead zone with hysteresis.** The camera starts moving only when the
 //!   ideal centre leaves an engage band (a fraction of the current crop size)
 //!   and stops once the error is below a quarter of that band. Small sway gives
@@ -156,7 +161,8 @@ pub struct ShotFramer {
     limited_by_zoom: bool,
     /// [`Composition::zoom_fit`] of the newest target.
     zoom_fit: f64,
-    /// The shot's remembered head height; written only by [`Self::aim`].
+    /// The shot's remembered head height and assumed head count; written
+    /// only by [`Self::aim`].
     head: HeadMemory,
 }
 
@@ -190,20 +196,23 @@ impl ShotFramer {
     /// aspect ratios.
     ///
     /// A person box first updates the shot's head memory, which then sizes
-    /// the shot only if the box looks truncated ([`compose_subject`]).
-    /// Objects never touch the memory.
+    /// the shot only if the box looks truncated ([`compose_subject`]): the
+    /// remembered head first, then the assumed head count for a box cut by
+    /// the bottom. Objects never touch the memory.
     pub fn aim(&mut self, bbox: &Rect, extent: Extent, preset: &Preset, dt: f64) -> Composition {
-        let remembered_head = match extent {
+        let (remembered_head, assumed_heads) = match extent {
             Extent::Person => {
                 let half_life = self.config.head_half_life;
-                self.head.observe(bbox, self.source_aspect, half_life, dt)
+                let head = self.head.observe(bbox, self.source_aspect, half_life, dt);
+                (head, self.head.assumed_heads())
             }
-            Extent::Object => None,
+            Extent::Object => (None, None),
         };
         let subject = SubjectGeometry {
             bbox: *bbox,
             extent,
             remembered_head,
+            assumed_heads,
         };
         compose_subject(&subject, preset, self.source_aspect, self.output_aspect)
     }

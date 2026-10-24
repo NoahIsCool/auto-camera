@@ -1,11 +1,14 @@
 //! Tests for person-basis composition, built around the worked example of
 //! the model-picker design (section 4.5): a whole person half the frame
 //! high, 16:9 in and out.
+//! Boxes cut by the bottom of the picture are in [`bottom_cut`].
 
 use ac_core::{Extent, Preset, Rect, ShotSize};
 
 use super::*;
 use crate::compose::{SubjectGeometry, compose_subject};
+
+mod bottom_cut;
 
 /// 16:9.
 const HD: f64 = 16.0 / 9.0;
@@ -133,16 +136,39 @@ fn the_zoom_ceiling_limits_close_shots_of_a_distant_person() {
 }
 
 #[test]
-fn boxes_touching_an_edge_look_truncated_and_use_the_fill_rule() {
+fn boxes_touching_an_edge_look_truncated_and_only_a_bottom_cut_assumes_a_head() {
     let cut_by_bottom = Rect::new(0.4, 0.5, 0.15, 0.5);
     let cut_by_top = Rect::new(0.4, 0.0, 0.15, 0.6);
     for b in [cut_by_bottom, cut_by_top] {
         assert!(looks_truncated(&b, HD), "{b:?}");
         assert_eq!(head_height(&b, HD), None);
-        for size in SIZES {
-            let p = preset(size);
-            assert_eq!(person_crop(b, &p, HD, HD), compose(&b, &p, HD, HD));
-        }
+    }
+    // Cut by the bottom, crown in the picture, not squat: crown to waist,
+    // so the head is b.h / 3 and each size but Full is cut on it.
+    let b = cut_by_bottom;
+    assert_eq!(assumed_visible_heads(&b, HD), Some(MAX_ASSUMED_HEADS));
+    let head = b.h / 3.0;
+    for size in [ShotSize::Medium, ShotSize::MediumClose, ShotSize::Close] {
+        let p = unlimited(size);
+        let r = person_crop(b, &p, HD, HD).rect(HD, HD);
+        let cut = b.y + cut_heads(size).unwrap() * head;
+        assert!((r.bottom() - cut).abs() < 1e-9, "{size:?}: {r:?}");
+        assert!(((b.y - r.y) / r.h - p.headroom).abs() < 1e-9, "{size:?}");
+        assert!((r.center().x - b.center().x).abs() < 1e-9, "{size:?}");
+        assert_ne!(person_crop(b, &p, HD, HD), compose(&b, &p, HD, HD));
+    }
+    // Full's cut, the feet, is outside the box: the fill rule.
+    let p = preset(ShotSize::Full);
+    assert_eq!(person_crop(b, &p, HD, HD), compose(&b, &p, HD, HD));
+    // Cut by the top, the crown is unknown: the fill rule at every size.
+    assert_eq!(assumed_visible_heads(&cut_by_top, HD), None);
+    for size in SIZES {
+        let p = preset(size);
+        assert_eq!(
+            person_crop(cut_by_top, &p, HD, HD),
+            compose(&cut_by_top, &p, HD, HD),
+            "{size:?}"
+        );
     }
     // Within the margin still counts; just outside it does not.
     assert!(looks_truncated(&Rect::new(0.4, 0.5, 0.1, 0.495), HD));
@@ -283,6 +309,11 @@ fn degenerate_inputs_give_finite_crops() {
         Rect::new(0.4, 0.3, -0.1, -0.5),
         Rect::new(-3.0, 7.0, 0.1, 0.5),
         Rect::FULL,
+        // Cut by the bottom: clear of the sides, at a side, below the
+        // picture.
+        Rect::new(0.45, 0.65, 0.1, 0.35),
+        Rect::new(0.0, 0.65, 0.1, 0.35),
+        Rect::new(0.4, 7.0, 0.1, 0.5),
     ];
     let aspects = [HD, 9.0 / 16.0, 0.0, -1.0, f64::NAN, f64::INFINITY];
     let mut presets: Vec<Preset> = SIZES.iter().map(|&s| preset(s)).collect();
@@ -299,25 +330,40 @@ fn degenerate_inputs_give_finite_crops() {
         });
     }
     let heads = [None, Some(0.05), Some(f64::NAN), Some(0.0), Some(1e300)];
+    let assumed = [
+        None,
+        Some(2.0),
+        Some(f64::NAN),
+        Some(0.0),
+        Some(f64::INFINITY),
+        Some(1e300),
+    ];
     for b in boxes {
         for p in &presets {
             for src in aspects {
                 for out in aspects {
                     for head_height in heads {
-                        for extent in [Extent::Person, Extent::Object] {
-                            let g = SubjectGeometry {
-                                bbox: b,
-                                extent,
-                                remembered_head: head_height,
-                            };
-                            let c = compose_subject(&g, p, src, out);
-                            let r = c.rect(src, out);
-                            let ok = [c.center.x, c.center.y, c.width, r.h]
-                                .iter()
-                                .all(|v| v.is_finite())
-                                && c.width > 0.0
-                                && c.width <= 1.0;
-                            assert!(ok, "{b:?} {p:?} {src} {out} {head_height:?}: {c:?}");
+                        for assumed_heads in assumed {
+                            for extent in [Extent::Person, Extent::Object] {
+                                let g = SubjectGeometry {
+                                    bbox: b,
+                                    extent,
+                                    remembered_head: head_height,
+                                    assumed_heads,
+                                };
+                                let c = compose_subject(&g, p, src, out);
+                                let r = c.rect(src, out);
+                                let ok = [c.center.x, c.center.y, c.width, r.h]
+                                    .iter()
+                                    .all(|v| v.is_finite())
+                                    && c.width > 0.0
+                                    && c.width <= 1.0;
+                                assert!(
+                                    ok,
+                                    "{b:?} {p:?} {src} {out} {head_height:?} \
+                                     {assumed_heads:?}: {c:?}"
+                                );
+                            }
                         }
                     }
                 }
