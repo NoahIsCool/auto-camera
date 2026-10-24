@@ -40,14 +40,18 @@ pub struct StoreConfig {
     pub alias_iou: f64,
     /// When a matched detection overlaps the subject's current box by less
     /// than this IoU, the fast tracker has drifted and is restarted from the
-    /// detection, in `0.0..=1.0`.
+    /// detection, in `0.0..=1.0`. A tracker that coasted since the previous
+    /// detection is restarted whatever the overlap ([`crate::record`]).
     pub reseed_iou: f64,
     /// A tracking subject becomes lost after this long without a confident
     /// observation. Must be positive.
     pub lost_after: Duration,
     /// A lost subject that nothing protects is retired after this long lost.
     pub retire_after: Duration,
-    /// Track observations below this confidence are ignored, in `0.0..=1.0`.
+    /// Track observations below this confidence never move a box, in
+    /// `0.0..=1.0`. They only count as coasting evidence: a tracker that
+    /// reports nothing else between two detections is restarted by the
+    /// second ([`crate::record`]).
     pub track_min_confidence: f32,
     /// An alias frames shots only after it has been seen in this many
     /// detection passes that observed its subject ([`crate::labels`]), at

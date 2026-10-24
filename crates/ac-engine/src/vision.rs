@@ -6,7 +6,10 @@
 //!
 //! * **Every new frame** advances the [`TemplateTracker`], feeds its
 //!   observations to [`SubjectStore::ingest_tracks`] with the frame's PTS,
-//!   and runs [`SubjectStore::tick`] at that PTS.
+//!   and runs [`SubjectStore::tick`] at that PTS. Low-confidence
+//!   observations are passed on too: they do not move a box, but they tell
+//!   the store that a tracker coasts, so that its next detection restarts
+//!   it even when it agrees with the box.
 //! * **Every accepted detection batch** goes to
 //!   [`SubjectStore::ingest_detections`] with the PTS of the frame it was
 //!   computed on.

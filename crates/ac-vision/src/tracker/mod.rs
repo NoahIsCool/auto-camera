@@ -40,7 +40,14 @@
 //! below `accept_score` reports its own score. The appearance template learns
 //! the new look with `learning_rate` only when the confidence reaches
 //! `update_score` and the box is fully inside the frame, so occluders and the
-//! frame border are not learned. The tracker never drops a subject by itself.
+//! frame border are not learned. The tracker never drops a subject by itself,
+//! and never restarts one: a coasting subject keeps its old template and
+//! reports a low confidence for as long as the cause lasts. Restarts come
+//! from the subject store (`ac-subjects`), which re-seeds the tracker from a
+//! detection that disagrees with the box, from the first detection after the
+//! tracker coasted on every frame since the previous one, and from the
+//! detection that recovers a subject lost for want of confident
+//! observations.
 //!
 //! NCC is blind to contrast, so a faint template, such as a shadow on a wall,
 //! matches a nearby high-contrast performer of the same shape at 0.70 to

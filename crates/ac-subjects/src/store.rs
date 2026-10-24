@@ -19,6 +19,18 @@
 //! time-based transitions. Nothing reads a wall clock, so a recorded stream of
 //! calls replays to the same events.
 //!
+//! While a subject is tracking, a matched detection may also restart its
+//! tracker (a [`StoreEvent::NeedsTrackerStart`] while it runs). That happens
+//! when the detection disagrees with the box (the tracker drifted), when no
+//! tracker runs (a failed start), and when the tracker coasted on every
+//! observation it reported since the subject's previous applied detection
+//! ([`crate::record`]). A coasting tracker reports no confident observation,
+//! so only detections keep its subject alive. When they are applied within
+//! `lost_after` of the previous one's PTS (pass interval plus latency), the
+//! first one after a whole window of coasting restarts the tracker; when
+//! they are further apart, the subject is lost first and the detection that
+//! recovers it restarts the tracker.
+//!
 //! # Invariants
 //!
 //! * Ids come from a counter that only moves forward: they are unique for the
@@ -33,6 +45,11 @@
 //!   tracking, except after a start the engine reported as failed
 //!   ([`SubjectStore::tracker_failed`]): the subject then follows its
 //!   detections alone until the next matching detection retries the start.
+//! * A tracker that coasted since the previous applied detection is
+//!   restarted by the next applied one. A subject that got no track
+//!   observation in that window, or a confident one, is not: without
+//!   observations a detection that agrees with the box only re-anchors it,
+//!   as it always has.
 //! * Fast-track observations never create or revive a subject; only
 //!   detections and operator reacquires do.
 //! * Shot labels ([`crate::labels`]) change only in detection passes that
@@ -52,7 +69,7 @@ use ac_core::{QueryId, Rect, SourceId, Subject, SubjectId, TrackState};
 use crate::config::StoreConfig;
 use crate::event::{RetireReason, StoreError, StoreEvent};
 use crate::observation::{TrackObservation, sanitize};
-use crate::record::SubjectRecord;
+use crate::record::{SubjectRecord, TrackerReport};
 
 /// Stable identities for the subjects of one source.
 #[derive(Debug, Clone)]
@@ -127,24 +144,34 @@ impl SubjectStore {
 
     /// Applies fast-tracker observations made on the frame at `pts`.
     ///
-    /// An observation moves its subject's box when the subject is tracking,
-    /// its tracker is running, the box is valid, the confidence reaches
-    /// `track_min_confidence` and `pts` is not older than the subject's
-    /// current box. Anything else is ignored: tracks never create or revive a
-    /// subject. Emits one [`StoreEvent::Updated`] per moved subject.
+    /// An observation is *usable* when the subject is tracking, its tracker
+    /// is running, the box is valid, the confidence is a number and `pts` is
+    /// not older than the subject's current box. A usable observation whose
+    /// confidence reaches `track_min_confidence` moves the box; one below it
+    /// leaves the box alone and only counts as coasting evidence
+    /// ([`crate::record`]), so that the next detection restarts a tracker
+    /// that coasted all along. Anything else is ignored: tracks never create
+    /// or revive a subject. Emits one [`StoreEvent::Updated`] per moved
+    /// subject.
     pub fn ingest_tracks(&mut self, pts: Duration, obs: &[TrackObservation]) -> Vec<StoreEvent> {
         let mut events = Vec::new();
         let min = self.config.track_min_confidence;
         for ob in obs {
-            // `>=` is false for NaN, so a NaN confidence is rejected too.
+            // Both comparisons are false for NaN, which is neither confident
+            // nor coasting evidence.
             let confident = ob.confidence >= min;
-            let (Some(bbox), true) = (sanitize(&ob.bbox), confident) else {
+            let coasting = ob.confidence < min;
+            let (Some(bbox), true) = (sanitize(&ob.bbox), confident || coasting) else {
                 continue;
             };
             let Some(rec) = self.subjects.get_mut(&ob.id) else {
                 continue;
             };
             if !rec.is_tracking() || !rec.tracker_running || pts < rec.motion.box_pts {
+                continue;
+            }
+            rec.note_track(confident);
+            if !confident {
                 continue;
             }
             rec.move_to(bbox, pts);
@@ -320,6 +347,7 @@ impl SubjectStore {
     pub fn tracker_failed(&mut self, id: SubjectId) {
         if let Some(rec) = self.subjects.get_mut(&id) {
             rec.tracker_running = false;
+            rec.tracker_report = TrackerReport::Silent;
         }
     }
 
@@ -342,6 +370,7 @@ impl SubjectStore {
         rec.lost_since = Some(at);
         rec.shadowed_since = None;
         rec.motion.velocity = Default::default();
+        rec.tracker_report = TrackerReport::Silent;
         events.push(StoreEvent::Lost { id });
         if rec.tracker_running {
             rec.tracker_running = false;

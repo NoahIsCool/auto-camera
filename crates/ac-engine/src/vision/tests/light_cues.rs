@@ -9,10 +9,16 @@
 //! [`SourceVision`] the way the core does, with detections from the
 //! subject's true box applied a few frames late on the frame they were
 //! computed on, and check that a cue costs the subject neither its tracking
-//! state nor its identity: an agreeing detection only re-anchors the box and
-//! never restarts the tracker, so a tracker that refused every match after a
-//! cue would leave the subject running on detections alone (or losing it
-//! between passes).
+//! state nor its identity. An agreeing detection only re-anchors the box
+//! while the tracker reports confident matches, so in the first tests only
+//! the tracker's own matches keep the subject followed between passes.
+//!
+//! The last two cover what the check gives up: under a sustained spot the
+//! template keeps its old contrast, so a performer who sidesteps farther
+//! than the surprising-move distance in one frame is held back from then
+//! on. The store restarts a tracker that coasted on everything it reported
+//! since the previous pass; at one pass a second the subject is lost first
+//! and the pass that recovers it restarts the tracker instead.
 //!
 //! Frames are 320 x 180 grey, luma `light x albedo`, and nothing clips.
 //! Under a wash the subject's texture fills its box and the cue scales every
@@ -126,6 +132,18 @@ fn play(
     pass: u64,
     light: (Cue, u64),
     x_at: impl Fn(u64) -> f64,
+    check: impl FnMut(u64, &SourceVision),
+) -> SourceVision {
+    play_late(frames, (pass, LATENCY), light, x_at, check)
+}
+
+/// [`play`] with a detection pass every `pass` frames applied `latency`
+/// frames late.
+fn play_late(
+    frames: u64,
+    (pass, latency): (u64, u64),
+    light: (Cue, u64),
+    x_at: impl Fn(u64) -> f64,
     mut check: impl FnMut(u64, &SourceVision),
 ) -> SourceVision {
     let mut v = vision();
@@ -137,7 +155,7 @@ fn play(
         if seq % pass == 0 {
             pending.push((seq, f.clone()));
         }
-        while pending.first().is_some_and(|(s, _)| seq >= s + LATENCY) {
+        while pending.first().is_some_and(|(s, _)| seq >= s + latency) {
             let (s, seen) = pending.remove(0);
             let det = ac_vision::Detection {
                 query: q[0].clone(),
@@ -147,7 +165,7 @@ fn play(
             };
             v.on_detections(&seen, Some(&f), &[det], &q);
         }
-        if seq >= light.1 && seq > LATENCY {
+        if seq >= light.1 && seq > latency {
             check(seq, &v);
         }
     }
@@ -254,4 +272,65 @@ fn a_followspot_during_a_late_start_keeps_the_walker() {
     });
     assert_eq!(v.stats().created, 1, "{:?}", v.stats());
     assert_eq!(v.store().len(), 1);
+}
+
+#[test]
+fn a_sidestep_under_a_followspot_is_restarted_by_the_next_pass() {
+    // Under the spot the template keeps its old contrast (the match stays
+    // below `update_score`), so when the performer steps 13 px sideways in
+    // one frame, more than the 11 px that `surprise_fraction` makes of the
+    // box's width, the match is surprising and held back, and so is every
+    // later one: the tracker coasts at 0.3 where they stood. That box still
+    // overlaps them at IoU 0.54, above `reseed_iou`, so every pass agrees
+    // with it, and at two passes a second the subject is never lost either.
+    // Before the store restarted coasting trackers, the passes only
+    // re-anchored the box and the tracker coasted to the end of the run.
+    // The pass from frame 75, applied after the sidestep, closes a window
+    // that holds the confident frames before it; the pass from frame 90, the
+    // first on the new spot, closes one in which the tracker only coasted,
+    // and restarts it under the spot.
+    const SIDESTEP: u64 = 80;
+    let x_at = |seq: u64| if seq < SIDESTEP { 140.0 } else { 153.0 };
+    for latency in [6, 15] {
+        let restarted = 90 + latency;
+        let v = play_late(240, (15, latency), (Cue::Spot, CUE), x_at, |seq, v| {
+            if seq < SIDESTEP {
+                assert_tracking(seq, v, 0.5);
+            } else if seq < restarted {
+                // The lockout the restart ends.
+                let state = v.store().get(SubjectId(1)).map(|s| s.state);
+                assert_eq!(state, Some(ac_core::TrackState::Tracking), "frame {seq}");
+                assert!(v.confidence(SubjectId(1)) <= 0.3, "frame {seq}");
+            } else {
+                assert_on(seq, v, x_at(seq));
+                assert_tracking(seq, v, 0.8);
+            }
+        });
+        assert_eq!(v.stats().created, 1, "latency {latency}: {:?}", v.stats());
+        assert_eq!(v.store().len(), 1);
+    }
+}
+
+#[test]
+fn a_sidestep_under_a_followspot_at_one_pass_a_second_is_recovered() {
+    // At one pass a second the subject is lost before the restart rule can
+    // act: the pass from frame 90 closes a window that still holds the
+    // tracker's confident frames before the sidestep, so it only re-anchors
+    // the box, and a second after that pass's frame, with no confident
+    // observation since, the subject is lost (frame 121). The pass from
+    // frame 120 recovers it under the same id and restarts the tracker
+    // under the spot, which follows them from then on.
+    const SIDESTEP: u64 = 80;
+    let x_at = |seq: u64| if seq < SIDESTEP { 140.0 } else { 153.0 };
+    for latency in [6, 15] {
+        let recovered = 120 + latency;
+        let v = play_late(240, (30, latency), (Cue::Spot, CUE), x_at, |seq, v| {
+            if seq >= recovered {
+                assert_on(seq, v, x_at(seq));
+                assert_tracking(seq, v, 0.8);
+            }
+        });
+        assert_eq!(v.stats().created, 1, "latency {latency}: {:?}", v.stats());
+        assert_eq!(v.store().len(), 1);
+    }
 }

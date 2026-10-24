@@ -24,7 +24,12 @@ In short: frames are reduced to a 384 px wide luma pyramid; each subject is
 matched on the level where its box is at most 32 px, over a window of half its
 size around the constant-velocity prediction. It moves only on a strong,
 unambiguous peak; otherwise it coasts and reports low confidence. The
-detector re-anchors subjects; the tracker never retires one by itself.
+detector re-anchors subjects; the tracker never retires or restarts one by
+itself. The subject store restarts a tracker from a detection that disagrees
+with its box, and from the first detection after it coasted on every frame
+since the previous one. When detections (with their latency) are further
+apart than the store's `lost_after`, the subject is lost first, and the
+detection that recovers it restarts the tracker.
 
 NCC ignores contrast, so a faint template (a shadow on a wall) would also
 match a nearby high-contrast performer of the same shape, or a gentle wall
@@ -41,10 +46,13 @@ on its score alone, so a performer whose contrast a light cue changes is
 followed where they were heading, even under a followspot that lights them and
 not the backdrop and weakens their match to about 0.7. The distance widens
 with the search window after skipped frames or a late start, when the
-prediction is less certain. The check does not help when the start box already
-holds a neighbour's pixels (a head in the corner of a shadow's box): the
-template then follows that head. That case waits on measurements from the band
-clip; a false subject such as a shadow is for the operator to hide.
+prediction is less certain. Under a sustained spot the template keeps its old
+contrast, so a performer who steps farther than that distance sideways in one
+frame is held back from then on, until the store restarts the tracker as
+above. The check does not help when the start box already holds a neighbour's
+pixels (a head in the corner of a shadow's box): the template then follows
+that head. That case waits on measurements from the band clip; a false subject
+such as a shadow is for the operator to hide.
 
 Measured with `cargo run --release -p ac-vision --example track_bench` on a
 4-core 2.1 GHz Xeon VM: 16 subjects on 1080p in 7.4 ms per frame (most of it

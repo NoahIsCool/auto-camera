@@ -47,14 +47,33 @@
 //!    miss. Subjects the batch did not observe are not counted. This phase
 //!    changes no identity: it only decides which queries frame shots.
 //!
-//! A matched detection is authoritative. If it overlaps the subject's current
-//! box by less than `reseed_iou`, the fast tracker drifted: the box jumps to
-//! the detection and the tracker is restarted there. Otherwise the detection
-//! becomes the new anchor and box, unless the tracker has already reported a
-//! newer box that agrees with it, which is kept because it is more recent.
-//! Either way the subject takes the detection's extent (whole person or
-//! object), since that is what its box now stands for; a detection older
-//! than the anchor changes nothing.
+//! A matched detection is authoritative. It *re-seeds* the subject (box and
+//! anchor jump to the detection, and the tracker is restarted there) when it
+//! overlaps the subject's current box by less than `reseed_iou` (the
+//! tracker drifted), when no tracker runs (its start failed), and when the
+//! tracker coasted since the subject's previous applied detection: it
+//! reported observations, every one below `track_min_confidence`
+//! ([`crate::record`]). Otherwise the detection becomes the new anchor and
+//! box, unless the tracker has already reported a newer box that agrees with
+//! it, which is kept because it is more recent. Either way the subject takes
+//! the detection's extent (whole person or object), since that is what its
+//! box now stands for.
+//!
+//! The coasting cause is there because a tracker coasts when it cannot
+//! trust its match, and some causes last: after a sidestep under a
+//! sustained followspot, whose template keeps its old contrast, every later
+//! match is held back. A detection that only re-anchored the box would leave
+//! such a tracker coasting until the subject is lost, or for good while
+//! detections keep coming within `lost_after`. It is narrow: a subject whose
+//! tracker reported nothing since the previous detection (detection-only
+//! operation, a failed start), or anything confident, is re-anchored by an
+//! agreeing detection as before.
+//!
+//! A late detection, older than the box but not than the anchor, re-seeds at
+//! its own PTS whatever the cause: the engine seeds the tracker on that
+//! frame and the tracker catches up from there. A detection older than the
+//! anchor changes nothing, and leaves the coasting evidence for the next
+//! one.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
@@ -272,12 +291,16 @@ impl SubjectStore {
         events.push(StoreEvent::Updated { id });
         if pts < rec.motion.anchor_pts {
             // Older than the anchor we hold (out-of-order result, or from
-            // before an operator fix): it confirms the subject, nothing more.
+            // before an operator fix): it confirms the subject, nothing more,
+            // and leaves the coasting evidence to the next applied detection.
             return;
         }
         rec.subject.extent = det.extent;
         let agrees = rec.predicted(pts).iou(&det.bbox) >= reseed_iou;
-        if !agrees || !rec.tracker_running {
+        // A tracker that coasted on everything it reported since the previous
+        // applied detection will not find the subject again by itself.
+        let coasting = rec.take_coasting();
+        if !agrees || !rec.tracker_running || coasting {
             rec.reseed(det.bbox, pts);
             rec.tracker_running = true;
             events.push(StoreEvent::NeedsTrackerStart {

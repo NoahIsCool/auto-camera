@@ -4,7 +4,8 @@
 //! extent, state, pin). [`SubjectRecord`] wraps it with what only identity
 //! management needs: the alias queries, operator flags, observation times and
 //! a small motion model, plus the label evidence ([`crate::labels`]) that
-//! says which of its queries frame shots.
+//! says which of its queries frame shots and the coasting evidence (below)
+//! that says whether its tracker needs a restart.
 //!
 //! Every query in [`SubjectRecord::queries`] continues the subject; only
 //! those in [`SubjectRecord::shot_queries`] make its shots. The second list
@@ -40,6 +41,41 @@
 //! while the person stood still. Predictions are limited to one second
 //! (`MAX_PREDICTION`) either side of the box's PTS, and lost subjects do not
 //! move at all.
+//!
+//! # Coasting evidence
+//!
+//! A tracker that cannot trust its match coasts: it keeps reporting a box
+//! at a confidence below `track_min_confidence`, which the store ignores
+//! for the box. Usually that passes in a few frames. But some causes last:
+//! under a sustained followspot the template keeps its old contrast, so
+//! after one sudden sidestep every later match is held back, and a subject
+//! can stay ambiguous or occluded. A detection that agrees with the box
+//! (above `reseed_iou`) only re-anchors the box, so it would end none of
+//! them, and while detections keep coming within `lost_after` the subject
+//! is never lost either: its tracker coasts for good.
+//!
+//! So each record keeps a tracker report: what its tracker reported in the
+//! current *window*, from the subject's latest applied detection or tracker
+//! (re)start to now. Only observations the store would act on count: the
+//! subject is tracking, its tracker runs, the box is valid, the confidence
+//! is a number and `pts` is not older than the box. The report is
+//!
+//! * `Silent` until the first such observation, and again after every
+//!   applied detection, every tracker (re)start (admission, re-seed,
+//!   recovery, reacquire), a failed start and a loss;
+//! * `Coasting` from the first observation below the threshold, for as
+//!   long as no confident one follows;
+//! * `Following` from the first confident observation, whatever follows,
+//!   until the window ends.
+//!
+//! A detection applied to a subject whose report is `Coasting` restarts its
+//! tracker from the detection, as a re-seed does, even when it agrees with
+//! the box ([`crate::associate`]). The other two never do: a subject that
+//! got no observation in the window (detection-only operation, a failed
+//! start, callers that never feed tracks) or a confident one is handled as
+//! if the rule did not exist. A detection older than the anchor is not
+//! applied (it only confirms the subject), so it neither restarts the
+//! tracker nor ends the window.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -68,6 +104,21 @@ pub(crate) struct Motion {
     pub(crate) anchor_pts: Duration,
     /// Smoothed centre velocity in normalized units per second.
     pub(crate) velocity: Point,
+}
+
+/// What a subject's fast tracker reported since the subject's latest applied
+/// detection or tracker (re)start: the coasting evidence (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum TrackerReport {
+    /// No usable observation yet.
+    #[default]
+    Silent,
+    /// Usable observations, every one below `track_min_confidence`: the
+    /// tracker coasted on every frame it reported.
+    Coasting,
+    /// At least one confident observation.
+    Following,
 }
 
 /// A subject plus the store's bookkeeping about it.
@@ -112,6 +163,13 @@ pub struct SubjectRecord {
     /// [`Self::shot_queries`] and nothing else. One entry per answered query
     /// after any such pass.
     pub labels: BTreeMap<QueryId, LabelEvidence>,
+    /// What the tracker reported since the latest applied detection or
+    /// tracker (re)start: the coasting evidence. `Silent` whenever the
+    /// tracker is not running, and right after every applied detection and
+    /// every (re)start; `Coasting` only while every usable observation since
+    /// then was below `track_min_confidence`; `Following` from a confident
+    /// one until the window ends.
+    pub(crate) tracker_report: TrackerReport,
 }
 
 /// Seconds of `pts` as a float, for signed time arithmetic.
@@ -159,6 +217,7 @@ impl SubjectRecord {
             },
             shadowed_since: None,
             labels: BTreeMap::new(),
+            tracker_report: TrackerReport::Silent,
         }
     }
 
@@ -253,8 +312,9 @@ impl SubjectRecord {
         self.motion.anchor_pts = pts;
     }
 
-    /// Jumps to `bbox` at `pts`: a fresh start for the box, the anchor and
-    /// the motion estimate (tracker restart, recovery or operator fix).
+    /// Jumps to `bbox` at `pts`: a fresh start for the box, the anchor, the
+    /// motion estimate and the coasting evidence (tracker restart, recovery
+    /// or operator fix; every caller restarts the tracker there).
     pub(crate) fn reseed(&mut self, bbox: Rect, pts: Duration) {
         self.subject.bbox = bbox;
         self.motion = Motion {
@@ -263,6 +323,26 @@ impl SubjectRecord {
             anchor_pts: pts,
             velocity: Point::default(),
         };
+        self.tracker_report = TrackerReport::Silent;
+    }
+
+    /// Counts a usable track observation in the coasting evidence: a
+    /// confident one makes the report `Following` for the rest of the
+    /// window, and one below the threshold makes a `Silent` report
+    /// `Coasting`.
+    pub(crate) fn note_track(&mut self, confident: bool) {
+        self.tracker_report = match (self.tracker_report, confident) {
+            (_, true) => TrackerReport::Following,
+            (TrackerReport::Silent, false) => TrackerReport::Coasting,
+            (report, false) => report,
+        };
+    }
+
+    /// Ends the window for an applied detection: true when the tracker
+    /// coasted on every observation it reported since the previous applied
+    /// detection or (re)start, and reported at least one.
+    pub(crate) fn take_coasting(&mut self) -> bool {
+        std::mem::take(&mut self.tracker_report) == TrackerReport::Coasting
     }
 }
 
@@ -346,6 +426,33 @@ mod tests {
         r.reanchor(Rect::new(0.35, 0.4, 0.1, 0.2), at(0.7));
         let (p, a) = r.evidence(&Rect::new(0.35, 0.4, 0.1, 0.2), at(0.7));
         assert!(p > 0.99 && a > 0.99);
+    }
+
+    #[test]
+    fn coasting_evidence_needs_low_observations_only() {
+        let mut r = record(Rect::FULL);
+        // Nothing reported: no evidence.
+        assert!(!r.take_coasting());
+        r.note_track(false);
+        r.note_track(false);
+        assert_eq!(r.tracker_report, TrackerReport::Coasting);
+        assert!(r.take_coasting());
+        // Taking it ends the window.
+        assert_eq!(r.tracker_report, TrackerReport::Silent);
+        assert!(!r.take_coasting());
+        // One confident observation, before or after low ones, is enough
+        // to keep the window from counting as coasting.
+        for order in [[true, false, false], [false, false, true]] {
+            for confident in order {
+                r.note_track(confident);
+            }
+            assert_eq!(r.tracker_report, TrackerReport::Following);
+            assert!(!r.take_coasting());
+        }
+        // A fresh start ends the window too.
+        r.note_track(false);
+        r.reseed(Rect::FULL, at(1.0));
+        assert!(!r.take_coasting());
     }
 
     #[test]

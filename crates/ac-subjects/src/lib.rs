@@ -11,6 +11,11 @@
 //!   assignment against motion-predicted boxes, and re-anchor them;
 //! * track observations move subjects between detections but never create
 //!   or revive one;
+//! * a detection restarts a subject's tracker when the tracker drifted
+//!   (the detection disagrees with the box), failed to start, or coasted on
+//!   every observation it reported since the subject's previous detection
+//!   ([`record`]), so a tracker that cannot find its subject again is not
+//!   left coasting while detections keep the subject alive;
 //! * prompts that find the same entity become aliases of one subject at
 //!   once, while an alias frames shots only after it has been seen in
 //!   several detection passes and stops after several passes without it
@@ -34,7 +39,9 @@
 //! 1. Feed each detector batch with [`SubjectStore::ingest_detections`] and
 //!    each tracker step with [`SubjectStore::ingest_tracks`], using the PTS of
 //!    the frame they were computed on. PTS must not go backwards across a
-//!    source restart; start a new store instead.
+//!    source restart; start a new store instead. Pass the tracker's
+//!    low-confidence observations too: they never move a box, but they are
+//!    what tells the store that a tracker coasts and needs a restart.
 //! 2. Call [`SubjectStore::tick`] once per frame.
 //! 3. Act on tracker events: start or restart a tracker on
 //!    [`StoreEvent::NeedsTrackerStart`] and drop the previous tracker's
