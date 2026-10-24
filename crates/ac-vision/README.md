@@ -7,7 +7,7 @@ depend on a model runtime.
 |---|---|
 | `Detector` | Slow, open-vocabulary detection: `detect(&mut self, &VideoFrame, &[PromptQuery]) -> Result<Vec<Detection>, VisionError>` |
 | `Tracker` | Fast per-frame tracking of known subjects: `start`, `update`, `stop`, `tracked` |
-| `TemplateTracker` | Pure-Rust NCC template tracker (grayscale pyramid, constant-velocity prediction, local search, 0.95/1.0/1.05 scale search, ambiguity check) |
+| `TemplateTracker` | Pure-Rust NCC template tracker (grayscale pyramid, constant-velocity prediction, local search, 0.95/1.0/1.05 scale search, ambiguity and contrast checks) |
 | `ScriptedDetector` | Detections from a closure or keyframe table, for tests and demos |
 | `OnnxOwlDetector` | OWLv2 / OWL-ViT on ONNX Runtime, feature `onnx` (off by default) |
 | `owl::*` | Pure OWL pre/post-processing: letterbox, CLIP normalization, sigmoid, box decoding, token packing |
@@ -25,6 +25,19 @@ matched on the level where its box is at most 32 px, over a window of half its
 size around the constant-velocity prediction. It moves only on a strong,
 unambiguous peak; otherwise it coasts and reports low confidence. The
 detector re-anchors subjects; the tracker never retires one by itself.
+
+NCC ignores contrast, so a faint template (a shadow on a wall) would also
+match a nearby high-contrast performer of the same shape, or a gentle wall
+gradient, at 0.6 to 0.76. Each match therefore carries its contrast gain, the
+window's standard deviation over the template's on the same pixels. A match
+whose gain is outside `1 / max_contrast_gain ..= max_contrast_gain` (default
+2.5) moves the box only if it scores at least `update_score` (0.8); below
+that it coasts at the ambiguous confidence. A performer under a sudden light
+cue keeps matching strongly, so they are still followed and the template
+relearns their new contrast. The check does not help when the start box
+already holds a neighbour's pixels (a head in the corner of a shadow's box):
+the template then follows that head. That case waits on measurements from the
+band clip; a false subject such as a shadow is for the operator to hide.
 
 Measured with `cargo run --release -p ac-vision --example track_bench` on a
 4-core 2.1 GHz Xeon VM: 16 subjects on 1080p in 7.4 ms per frame (most of it

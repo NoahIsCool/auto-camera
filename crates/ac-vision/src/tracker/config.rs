@@ -32,6 +32,19 @@ pub struct TemplateTrackerConfig {
     pub ambiguity_margin: f32,
     /// Highest confidence reported for an ambiguous match.
     pub ambiguous_confidence: f32,
+    /// Largest contrast gain, either way, of a match that scores below
+    /// `update_score` and still moves the box.
+    ///
+    /// The gain is the standard deviation of the image window at the match
+    /// over the template's, on the same pixels. NCC ignores it, so a faint
+    /// template (a shadow on a wall) also scores 0.6 to 0.76 on a nearby
+    /// person of the same shape (gain about 5.5) or on a gentle wall gradient
+    /// (gain 0.2 to 0.3). Such a match outside `1 / max_contrast_gain ..=
+    /// max_contrast_gain` coasts like an ambiguous one unless it reaches
+    /// `update_score`, so a performer under a sudden light cue, who still
+    /// matches strongly, is followed and the template relearns the new
+    /// contrast. Finite and at least `1`.
+    pub max_contrast_gain: f64,
     /// Smallest confidence at which the template learns the new appearance.
     pub update_score: f32,
     /// Weight of the new appearance in a template update.
@@ -63,6 +76,7 @@ impl Default for TemplateTrackerConfig {
             accept_score: 0.5,
             ambiguity_margin: 0.05,
             ambiguous_confidence: 0.3,
+            max_contrast_gain: 2.5,
             update_score: 0.8,
             learning_rate: 0.1,
             velocity_smoothing: 0.5,
@@ -80,7 +94,7 @@ impl TemplateTrackerConfig {
     pub fn validate(&self) -> Result<(), VisionError> {
         let unit = |v: f32| (0.0..=1.0).contains(&v);
         let unit64 = |v: f64| (0.0..=1.0).contains(&v);
-        let checks: [(bool, &str); 14] = [
+        let checks: [(bool, &str); 15] = [
             (self.work_width >= 16, "work_width must be at least 16"),
             (
                 (4..=128).contains(&self.template_size),
@@ -109,6 +123,10 @@ impl TemplateTrackerConfig {
             (
                 unit(self.ambiguity_margin) && unit(self.ambiguous_confidence),
                 "ambiguity settings must be in 0..=1",
+            ),
+            (
+                self.max_contrast_gain.is_finite() && self.max_contrast_gain >= 1.0,
+                "max_contrast_gain must be finite and >= 1",
             ),
             (
                 unit(self.update_score) && unit(self.learning_rate),

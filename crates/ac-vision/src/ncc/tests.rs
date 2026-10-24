@@ -152,12 +152,12 @@ fn patch_ncc_matches_placement_ncc() {
     let img = noise(30, 30, 9);
     let block = crop(&img, 5, 6, 9, 7);
     let t = Template::new(9, 7, &block).unwrap();
-    assert!((t.ncc_patch(&block) - 1.0).abs() < 1e-5);
+    assert!((t.ncc_patch(&block).0 - 1.0).abs() < 1e-5);
     let other = crop(&img, 15, 16, 9, 7);
     let level = Level::new(img);
     let placed = t.ncc_at(&level, 15, 16, 1.0).unwrap();
-    assert!((t.ncc_patch(&other) - placed).abs() < 1e-4);
-    assert_eq!(t.ncc_patch(&[0.2; 63]), 0.0);
+    assert!((t.ncc_patch(&other).0 - placed).abs() < 1e-4);
+    assert_eq!(t.ncc_patch(&[0.2; 63]).0, 0.0);
 }
 
 #[test]
@@ -167,4 +167,60 @@ fn empty_map_has_no_peak() {
     let map = ScoreMap::compute(&level, &t, 100, 100, 2, 1.0);
     assert!(map.best().is_none());
     assert_eq!(map.get(5, 0), f32::NEG_INFINITY);
+}
+
+/// `a * img + b`, sample by sample.
+fn affine(img: &GrayImage, a: f32, b: f32) -> GrayImage {
+    GrayImage::new(
+        img.width,
+        img.height,
+        img.data.iter().map(|v| a * v + b).collect(),
+    )
+}
+
+#[test]
+fn gain_is_the_contrast_factor_of_an_affine_window() {
+    // Texture in 0.1..0.3, so that 3x it plus 0.05 stays inside 0..1.
+    let img = affine(&noise(40, 30, 13), 0.2, 0.1);
+    let block = crop(&img, 12, 8, 10, 10);
+    let t = Template::new(10, 10, &block).unwrap();
+    for a in [0.5f32, 1.0, 3.0] {
+        let level = Level::new(affine(&img, a, 0.05));
+        let at = t.contrast_at(&level, 12, 8, 1.0).unwrap();
+        assert!((at.gain() - a as f64).abs() < 1e-4, "a = {a}: {at:?}");
+        let patch = crop(&level.img, 12, 8, 10, 10);
+        let (score, on_patch) = t.ncc_patch(&patch);
+        assert!(
+            (on_patch.gain() - a as f64).abs() < 1e-4,
+            "a = {a}: {on_patch:?}"
+        );
+        assert!(score > 0.9999, "NCC ignores the gain: {score}");
+    }
+    // A flat window has no contrast; NCC scores it 0 anyway.
+    let flat = Level::new(GrayImage::new(40, 30, vec![0.3; 1200]));
+    assert_eq!(t.contrast_at(&flat, 12, 8, 1.0).unwrap().gain(), 0.0);
+    assert_eq!(t.contrast_at(&flat, 40, 8, 0.5), None);
+}
+
+#[test]
+fn gain_is_measured_on_the_visible_overlap_at_borders() {
+    // The template's 4 left columns are a strong checkerboard and its 6
+    // right columns are the image's first 6 columns; placed 4 px over the
+    // left border, only the latter are compared.
+    let img = affine(&noise(40, 30, 17), 0.2, 0.1);
+    let block = crop(&img, 0, 5, 6, 10);
+    let raw: Vec<f32> = (0..10)
+        .flat_map(|r| {
+            let mut row: Vec<f32> = (0..4).map(|c| ((r + c) % 2) as f32).collect();
+            row.extend_from_slice(&block[r * 6..r * 6 + 6]);
+            row
+        })
+        .collect();
+    let t = Template::new(10, 10, &raw).unwrap();
+    let level = Level::new(affine(&img, 2.0, 0.05));
+    let c = t.contrast_at(&level, -4, 5, 0.5).unwrap();
+    assert!((c.gain() - 2.0).abs() < 1e-4, "{c:?}");
+    // Against the whole template's variance the gain would be far lower.
+    let whole = (c.window / (t.energy / 100.0)).sqrt();
+    assert!(whole < 0.5, "{whole}");
 }

@@ -21,8 +21,8 @@
 //!    to the box size there and scored with normalized cross-correlation at
 //!    every integer offset in a window around the prediction. The window radius is `search_fraction` of the box's longer
 //!    side (clamped), widened when frames were skipped.
-//! 4. The peak is refined to sub-pixel precision. If it is strong and
-//!    unambiguous, the image is resampled around it at scales `1 - step`, `1`
+//! 4. The peak is refined to sub-pixel precision. If it is trusted (see
+//!    below), the image is resampled around it at scales `1 - step`, `1`
 //!    and `1 + step` on a 3x3 grid of centres and compared with the template;
 //!    a scale change must beat the unscaled score by `scale_penalty`, so size
 //!    does not drift on noise. Near the frame border, where the enlarged box
@@ -32,13 +32,34 @@
 //!
 //! The confidence is the peak NCC, in `0..=1`. The box moves to the peak only
 //! when the peak is at least `accept_score` *and* no separate local maximum
-//! comes within `ambiguity_margin` of it. Otherwise the subject is considered
-//! occluded or ambiguous: the box coasts on its decaying velocity instead of
-//! jumping to a distractor, and an ambiguous match reports at most
-//! `ambiguous_confidence`. The appearance template learns the new look with
-//! `learning_rate` only when the confidence reaches `update_score` and the box
-//! is fully inside the frame, so occluders and the frame border are not
-//! learned. The tracker never drops a subject by itself.
+//! comes within `ambiguity_margin` of it *and* it passes the contrast check
+//! below. Otherwise the subject is considered occluded or ambiguous: the box
+//! coasts on its decaying velocity instead of jumping to a distractor, and an
+//! ambiguous or contrast-refused match reports at most `ambiguous_confidence`.
+//! The appearance template learns the new look with `learning_rate` only when
+//! the confidence reaches `update_score` and the box is fully inside the
+//! frame, so occluders and the frame border are not learned. The tracker
+//! never drops a subject by itself.
+//!
+//! NCC is blind to contrast: it divides both patches by their own standard
+//! deviation. A faint template, such as a shadow on a wall whose box varies
+//! by seven grey levels, matches a nearby high-contrast performer of the same
+//! shape at 0.70 to 0.76 (or a gentle wall gradient at about 0.6) while its
+//! own score sinks as the performer enters its window. So each match also carries its
+//! contrast gain: the window's standard deviation over the template's, on the
+//! same visible pixels (O(1) from the integral images). A match whose gain is
+//! outside `1 / max_contrast_gain ..= max_contrast_gain` moves the box only if
+//! it reaches `update_score`; below that it coasts like an ambiguous match,
+//! without scale probes or learning. It is not refused outright, because a
+//! light cue changes a real performer's contrast three to five times in one
+//! frame: their match stays strong, is accepted and learned, and the template
+//! takes on the new contrast at `learning_rate` per frame.
+//!
+//! The check does not help when the start box already holds someone else's
+//! pixels (a neighbour's head in a corner of a shadow's box): the template
+//! then follows that head at its own contrast. That case waits on
+//! measurements from the band clip. A false subject such as a shadow is for
+//! the operator to hide (and, later, for exclusion zones).
 //!
 //! # Cost model
 //!
@@ -151,6 +172,24 @@ struct Match {
     score: f32,
     /// A separate peak came within the ambiguity margin.
     ambiguous: bool,
+    /// Contrast gain of the image window at the match over the template.
+    gain: f64,
+}
+
+impl Match {
+    /// True when the contrast check holds the box back: the window's
+    /// contrast is off the template's by more than `max_contrast_gain`
+    /// either way and the score is below `update_score`.
+    fn contrast_refused(&self, config: &TemplateTrackerConfig) -> bool {
+        let g = config.max_contrast_gain;
+        self.score < config.update_score && !(1.0 / g..=g).contains(&self.gain)
+    }
+
+    /// True when the match moves the box: a peak of at least `accept_score`,
+    /// unambiguous and not refused by the contrast check.
+    fn trusted(&self, config: &TemplateTrackerConfig) -> bool {
+        self.score >= config.accept_score && !self.ambiguous && !self.contrast_refused(config)
+    }
 }
 
 /// The pyramid of one frame, kept for reuse on that frame.
@@ -284,11 +323,14 @@ fn interval(config: &TemplateTrackerConfig, from: Duration, to: Duration) -> f64
 /// `(pcx, pcy)` on `level`.
 ///
 /// Two stages: an integer-offset search with the template at the current box
-/// size finds the peak and checks ambiguity; then, if the peak is trusted and
-/// the enlarged box fits inside the image, the image itself is resampled at
-/// scales `1 - step`, `1` and `1 + step` on a 3x3 grid of centres around the
-/// peak. Resampling the image (rather than resizing the template to whole
-/// pixels) makes the scale steps exact even for small boxes.
+/// size finds the peak and checks ambiguity and contrast; then, if the peak
+/// is trusted and the enlarged box fits inside the image, the image itself is
+/// resampled at scales `1 - step`, `1` and `1 + step` on a 3x3 grid of
+/// centres around the peak. Resampling the image (rather than resizing the
+/// template to whole pixels) makes the scale steps exact even for small
+/// boxes. The returned match carries the contrast gain at its own placement:
+/// the visible overlap for the integer peak, the resampled patch for a scale
+/// probe.
 fn match_on_level(
     config: &TemplateTrackerConfig,
     level: &Level,
@@ -316,12 +358,16 @@ fn match_on_level(
     let exclusion = (tw.min(th) / 2).max(2);
     let ambiguous = map.second_peak(peak, exclusion) > peak.score - config.ambiguity_margin;
     let (sx, sy) = map.subpixel(peak);
+    let gain = template
+        .contrast_at(level, ox + peak.dx, oy + peak.dy, config.min_visible)
+        .map_or(0.0, |c| c.gain());
     let coarse = Match {
         cx: (ox + peak.dx) as f64 + sx + tw as f64 / 2.0,
         cy: (oy + peak.dy) as f64 + sy + th as f64 / 2.0,
         scale: 1.0,
         score: peak.score,
         ambiguous,
+        gain,
     };
     let grown = (1.0 + config.scale_step) * bw.max(bh) / 2.0 + SCALE_PROBE_RADIUS as f64 + 1.0;
     let (lw, lh) = (level.img.width as f64, level.img.height as f64);
@@ -329,7 +375,7 @@ fn match_on_level(
         && coarse.cy - grown >= 0.0
         && coarse.cx + grown <= lw
         && coarse.cy + grown <= lh;
-    if ambiguous || peak.score < config.accept_score || !inside {
+    if !coarse.trusted(config) || !inside {
         return Some(coarse);
     }
     let mut best = coarse;
@@ -338,14 +384,16 @@ fn match_on_level(
     let count = if config.scale_step > 0.0 { 3 } else { 1 };
     for &s in &scales[..count] {
         let r = SCALE_PROBE_RADIUS as isize;
-        let scores: Vec<f32> = (-r..=r)
+        let probes: Vec<((isize, isize), f32, f64)> = (-r..=r)
             .flat_map(|dy| (-r..=r).map(move |dx| (dx, dy)))
             .map(|(dx, dy)| {
                 let (x, y) = (coarse.cx + dx as f64, coarse.cy + dy as f64);
-                template.ncc_patch(&level.img.sample_patch(x, y, s * bw, s * bh, tw, th))
+                let patch = level.img.sample_patch(x, y, s * bw, s * bh, tw, th);
+                let (score, contrast) = template.ncc_patch(&patch);
+                ((dx, dy), score, contrast.gain())
             })
             .collect();
-        let probe = ScoreMap::from_scores(SCALE_PROBE_RADIUS, scores);
+        let probe = ScoreMap::from_scores(SCALE_PROBE_RADIUS, probes.iter().map(|q| q.1).collect());
         let Some(p) = probe.best() else { continue };
         let adjusted = if s == 1.0 {
             p.score
@@ -361,6 +409,10 @@ fn match_on_level(
                 scale: s,
                 score: p.score,
                 ambiguous: false,
+                gain: probes
+                    .iter()
+                    .find(|q| q.0 == (p.dx, p.dy))
+                    .map_or(0.0, |q| q.2),
             };
         }
     }
@@ -394,7 +446,7 @@ fn step(
         dt,
     );
     match found {
-        Some(m) if m.score >= config.accept_score && !m.ambiguous => {
+        Some(m) if m.trusted(config) => {
             let center = Point {
                 x: (m.cx / lw).clamp(0.0, 1.0),
                 y: (m.cy / lh).clamp(0.0, 1.0),
@@ -427,7 +479,10 @@ fn step(
                 track.velocity.1 * config.velocity_decay,
             );
             track.confidence = match other {
-                Some(m) if m.ambiguous => m.score.min(config.ambiguous_confidence),
+                // Held back by its ambiguity or its contrast, not its score.
+                Some(m) if m.ambiguous || m.score >= config.accept_score => {
+                    m.score.min(config.ambiguous_confidence)
+                }
                 Some(m) => m.score,
                 None => 0.0,
             }

@@ -259,6 +259,8 @@ mod tests {
     use super::*;
     use ac_sources::SyntheticPattern;
 
+    mod light_cues;
+
     /// The test source id.
     fn source() -> SourceId {
         SourceId("cam".into())

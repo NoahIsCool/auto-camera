@@ -2,12 +2,17 @@
 //!
 //! Scenes are 640x360 RGBA frames with smooth value-noise textured squares on
 //! a flat or noisy background; the texture is attached to the square, so it
-//! moves and scales with it.
+//! moves and scales with it. The contrast check has its own tests in
+//! `contrast`, on 1280x720 frames of a lit wall with a faint shadow and
+//! textured performers built by `stage`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
+
+mod contrast;
+mod stage;
 
 const W: u32 = 640;
 const H: u32 = 360;

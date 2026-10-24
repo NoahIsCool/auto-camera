@@ -20,6 +20,14 @@
 //! images), provided at least a minimum fraction of the template is visible.
 //! This keeps subjects trackable as they leave the frame.
 //!
+//! Because NCC divides out both standard deviations, it cannot tell a faint
+//! patch from a contrasty one of the same shape: a shadow on a wall and a
+//! person in front of it correlate as well as the shadow with itself. The
+//! [`Contrast`] of a placement keeps the two variances it divided out, on the
+//! same visible pixels the score used, so a caller can ask how much stronger
+//! the window is than the template (`sqrt(var_I / var_T)`, the gain) at O(1)
+//! per placement from the same integral images.
+//!
 //! A [`ScoreMap`] evaluates every integer offset in a square window around a
 //! predicted placement. Its peak is refined to sub-pixel precision with a
 //! parabola through the peak and its neighbours on each axis, and its
@@ -162,11 +170,10 @@ impl Template {
         })
     }
 
-    /// NCC with the template's top-left corner at `(x, y)` in `level`.
-    ///
-    /// Returns `None` when less than `min_visible` of the template's area lies
-    /// inside the image.
-    pub fn ncc_at(&self, level: &Level, x: isize, y: isize, min_visible: f64) -> Option<f32> {
+    /// The part of the template placed with its top-left corner at `(x, y)`
+    /// that lies inside `level`, or `None` when less than `min_visible` of
+    /// the template's area does.
+    fn overlap(&self, level: &Level, x: isize, y: isize, min_visible: f64) -> Option<Overlap> {
         let (iw, ih) = (level.img.width as isize, level.img.height as isize);
         let (tw, th) = (self.w as isize, self.h as isize);
         let (tx0, ty0) = ((-x).max(0), (-y).max(0));
@@ -178,29 +185,49 @@ impl Template {
         if (n as f64) < min_visible * (self.w * self.h) as f64 {
             return None;
         }
-        let (tx0, ty0, tx1, ty1) = (tx0 as usize, ty0 as usize, tx1 as usize, ty1 as usize);
-        let (ix0, iy0) = ((x + tx0 as isize) as usize, (y + ty0 as isize) as usize);
-        let cols = tx1 - tx0;
-        let mut cross = 0.0f64;
-        for ty in ty0..ty1 {
-            let t = &self.data[ty * self.w + tx0..ty * self.w + tx1];
-            let row = iy0 + ty - ty0;
-            let i =
-                &level.img.data[row * level.img.width + ix0..row * level.img.width + ix0 + cols];
-            cross += dot(t, i) as f64;
-        }
-        let (st, st2) = if n == self.w * self.h {
+        Some(Overlap {
+            tx0: tx0 as usize,
+            ty0: ty0 as usize,
+            tx1: tx1 as usize,
+            ty1: ty1 as usize,
+            ix0: (x + tx0) as usize,
+            iy0: (y + ty0) as usize,
+            n,
+        })
+    }
+
+    /// `(Σ T, Σ T², Σ I, Σ I²)` over the overlap `o`, from integral images.
+    fn sums(&self, level: &Level, o: &Overlap) -> (f64, f64, f64, f64) {
+        let (st, st2) = if o.n == self.w * self.h {
             (0.0, self.energy)
         } else {
             (
-                self.sum.sum(tx0, ty0, tx1, ty1),
-                self.sq.sum(tx0, ty0, tx1, ty1),
+                self.sum.sum(o.tx0, o.ty0, o.tx1, o.ty1),
+                self.sq.sum(o.tx0, o.ty0, o.tx1, o.ty1),
             )
         };
-        let (ix1, iy1) = (ix0 + cols, iy0 + (ty1 - ty0));
-        let si = level.sum.sum(ix0, iy0, ix1, iy1);
-        let si2 = level.sq.sum(ix0, iy0, ix1, iy1);
-        let nf = n as f64;
+        let (ix1, iy1) = (o.ix0 + o.tx1 - o.tx0, o.iy0 + o.ty1 - o.ty0);
+        let si = level.sum.sum(o.ix0, o.iy0, ix1, iy1);
+        let si2 = level.sq.sum(o.ix0, o.iy0, ix1, iy1);
+        (st, st2, si, si2)
+    }
+
+    /// NCC with the template's top-left corner at `(x, y)` in `level`.
+    ///
+    /// Returns `None` when less than `min_visible` of the template's area lies
+    /// inside the image.
+    pub fn ncc_at(&self, level: &Level, x: isize, y: isize, min_visible: f64) -> Option<f32> {
+        let o = self.overlap(level, x, y, min_visible)?;
+        let cols = o.tx1 - o.tx0;
+        let mut cross = 0.0f64;
+        for ty in o.ty0..o.ty1 {
+            let t = &self.data[ty * self.w + o.tx0..ty * self.w + o.tx1];
+            let row = o.iy0 + ty - o.ty0;
+            let start = row * level.img.width + o.ix0;
+            cross += dot(t, &level.img.data[start..start + cols]) as f64;
+        }
+        let (st, st2, si, si2) = self.sums(level, &o);
+        let nf = o.n as f64;
         let var_t = st2 - st * st / nf;
         let var_i = si2 - si * si / nf;
         if var_t <= MIN_VARIANCE * nf || var_i <= MIN_VARIANCE * nf {
@@ -210,18 +237,91 @@ impl Template {
         Some(ncc.clamp(-1.0, 1.0) as f32)
     }
 
-    /// NCC with an equally sized `patch` (row-major, `w * h` samples).
-    pub fn ncc_patch(&self, patch: &[f32]) -> f32 {
+    /// Contrast of the template and the image window at the placement
+    /// `(x, y)`, both measured on the visible overlap, in O(1) from the
+    /// integral images. `None` exactly where [`Template::ncc_at`] is.
+    pub fn contrast_at(
+        &self,
+        level: &Level,
+        x: isize,
+        y: isize,
+        min_visible: f64,
+    ) -> Option<Contrast> {
+        let o = self.overlap(level, x, y, min_visible)?;
+        let (st, st2, si, si2) = self.sums(level, &o);
+        let nf = o.n as f64;
+        Some(Contrast {
+            template: (st2 - st * st / nf) / nf,
+            window: (si2 - si * si / nf) / nf,
+        })
+    }
+
+    /// NCC with an equally sized `patch` (row-major, `w * h` samples), and
+    /// the contrast of both sides, which the normalisation computes anyway.
+    pub fn ncc_patch(&self, patch: &[f32]) -> (f32, Contrast) {
         assert_eq!(patch.len(), self.data.len(), "patch size");
         let n = patch.len() as f64;
         let mean = patch.iter().map(|&v| v as f64).sum::<f64>() / n;
         let var: f64 = patch.iter().map(|&v| (v as f64 - mean).powi(2)).sum();
+        let contrast = Contrast {
+            template: self.energy / n,
+            window: var / n,
+        };
         if var <= MIN_VARIANCE * n {
-            return 0.0;
+            return (0.0, contrast);
         }
         // The template is zero-mean, so the patch mean cancels from Σ T·I.
         let cross = dot(&self.data, patch) as f64;
-        (cross / (self.energy * var).sqrt()).clamp(-1.0, 1.0) as f32
+        let ncc = (cross / (self.energy * var).sqrt()).clamp(-1.0, 1.0) as f32;
+        (ncc, contrast)
+    }
+}
+
+/// The part of a template placement that lies inside the image.
+#[derive(Debug, Clone, Copy)]
+struct Overlap {
+    /// First template column inside the image.
+    tx0: usize,
+    /// First template row inside the image.
+    ty0: usize,
+    /// End (exclusive) of the template columns inside the image.
+    tx1: usize,
+    /// End (exclusive) of the template rows inside the image.
+    ty1: usize,
+    /// Image column of template column `tx0`.
+    ix0: usize,
+    /// Image row of template row `ty0`.
+    iy0: usize,
+    /// Pixels in the overlap.
+    n: usize,
+}
+
+/// Contrast of the two sides of one placement: variances per pixel of the
+/// template and of the image window, over the same pixels.
+///
+/// NCC divides both out, so it scores a faint template against a contrasty
+/// window (or the reverse) as if they had the same contrast. The gain puts
+/// that factor back for the tracker's trust rules.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Contrast {
+    /// Variance per pixel of the template.
+    pub template: f64,
+    /// Variance per pixel of the image window.
+    pub window: f64,
+}
+
+impl Contrast {
+    /// Contrast gain `sqrt(window / template)`: how many times stronger the
+    /// window's deviations from its mean are than the template's. `0` for a
+    /// flat window and infinite for a flat template; NCC scores either `0`.
+    pub fn gain(&self) -> f64 {
+        if self.window <= MIN_VARIANCE {
+            0.0
+        } else if self.template <= MIN_VARIANCE {
+            f64::INFINITY
+        } else {
+            (self.window / self.template).sqrt()
+        }
     }
 }
 
