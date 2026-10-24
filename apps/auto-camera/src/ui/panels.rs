@@ -11,9 +11,9 @@
 
 use std::path::PathBuf;
 
-use ac_core::{Lexicon, TrackState};
+use ac_core::TrackState;
 use ac_director::{ContentProfile, DirectorMode};
-use ac_engine::{EngineCommand, EngineSnapshot, OutputState};
+use ac_engine::{EngineCommand, EngineSnapshot, OutputState, PromptReader};
 use eframe::egui::{self, Color32, RichText, Ui};
 
 use super::query_form::{self, QueryForm};
@@ -110,12 +110,12 @@ pub fn director(ui: &mut Ui, snap: &EngineSnapshot) -> Vec<EngineCommand> {
 }
 
 /// The queries panel: live queries, the add form (its prompt read with
-/// `lexicon`, the engine's) and the subjects.
+/// `prompts`, the engine's reader) and the subjects.
 pub fn queries(
     ui: &mut Ui,
     snap: &EngineSnapshot,
     form: &mut QueryForm,
-    lexicon: &Lexicon,
+    prompts: &PromptReader,
 ) -> Vec<EngineCommand> {
     let mut commands = Vec::new();
     ui.heading("Queries");
@@ -153,7 +153,7 @@ pub fn queries(
         }
     }
     ui.add_space(4.0);
-    commands.extend(query_form::show(ui, form, lexicon));
+    commands.extend(query_form::show(ui, form, prompts));
     ui.separator();
     ui.heading("Subjects");
     if snap.subjects.is_empty() {
@@ -352,11 +352,11 @@ mod tests {
         let mut q = QueryForm::default();
         let mut o = OutputForm::default();
         let mut commands = Vec::new();
-        let lexicon = Lexicon::builtin();
+        let prompts = PromptReader::new(ac_core::Lexicon::builtin(), false);
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             commands.clear();
             commands.extend(director(ui, &snap));
-            commands.extend(queries(ui, &snap, &mut q, &lexicon));
+            commands.extend(queries(ui, &snap, &mut q, &prompts));
             commands.extend(output(ui, &snap, &mut o));
             status_bar(ui, &snap, Some(("cut: no preview", true)));
         });

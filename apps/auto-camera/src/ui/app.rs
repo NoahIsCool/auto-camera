@@ -15,9 +15,10 @@
 
 use std::time::{Duration, Instant};
 
-use ac_core::{Lexicon, ShotId};
+use ac_core::ShotId;
 use ac_engine::{
-    CommandError, CommandReply, Engine, EngineCommand, EngineHandle, PendingReply, StudioConfig,
+    CommandError, CommandReply, Engine, EngineCommand, EngineHandle, PendingReply, PromptReader,
+    StudioConfig,
 };
 use eframe::egui;
 
@@ -87,9 +88,10 @@ pub struct OperatorApp {
     switch: SwitchState,
     /// The add-query form.
     query_form: QueryForm,
-    /// The prompt parser's vocabulary, built from the same config as the
-    /// engine's, so the form reads prompts exactly as the engine will.
-    lexicon: Lexicon,
+    /// How prompts are read (the lexicon and what the detector sees),
+    /// built from the same config as the engine's, so the form reads
+    /// prompts exactly as the engine will.
+    prompts: PromptReader,
     /// The output form.
     output_form: OutputForm,
     /// Replies not yet arrived, with their command names.
@@ -120,7 +122,7 @@ impl OperatorApp {
             textures: Textures::default(),
             switch: SwitchState::new(config.switcher.to_transition()),
             query_form: QueryForm::default(),
-            lexicon: config.prompt_lexicon(),
+            prompts: PromptReader::of(config),
             output_form: OutputForm::new(
                 config.output.rtmp_url.as_deref(),
                 config.output.record_path.as_deref(),
@@ -213,7 +215,7 @@ impl OperatorApp {
                         ui,
                         &snap,
                         &mut self.query_form,
-                        &self.lexicon,
+                        &self.prompts,
                     ));
                     ui.separator();
                     commands.extend(panels::output(ui, &snap, &mut self.output_form));

@@ -2,6 +2,8 @@
 //! flight for the whole studio, the source that waited longest goes next,
 //! each with its newest frame, so answers are one pass old however many
 //! sources share the process; and none of them until the process is ready.
+//! The sidecar also sees actions, so its queries carry no action-role
+//! notice.
 
 use super::*;
 use crate::config::{SidecarSettings, SourceEntry};
@@ -206,6 +208,54 @@ fn per_source_detectors_still_run_side_by_side() {
     assert!(sidecar().is_shared());
     assert!(!DetectorSettings::Synthetic { score: 0.9 }.is_shared());
     assert!(!DetectorSettings::None.is_shared());
+}
+
+#[test]
+fn queries_carry_the_action_role_notice_only_when_the_detector_cannot_see_actions() {
+    let synthetic = DetectorSettings::Synthetic { score: 0.9 };
+    for (detector, noted) in [(sidecar(), false), (synthetic, true)] {
+        let mut c = config(1);
+        c.detector = detector;
+        // One from the config, one added by command: both read the same way.
+        c.queries
+            .push(QuerySettings::new("Speaker", "speaker upper body"));
+        let info = SourceInfo {
+            id: cam(),
+            width: W,
+            height: H,
+            fps: FPS,
+            audio: None,
+        };
+        let mut core = EngineCore::new(&c, vec![info], &[true]).unwrap();
+        core.apply(&EngineCommand::AddQuery {
+            name: "Singer".into(),
+            prompt: "the singer".into(),
+            presets: None,
+            literal: false,
+        })
+        .unwrap();
+        let snap = core.snapshot(OutputView::default(), TimingView::default(), true);
+        let notes: Vec<(&str, bool)> = snap
+            .queries
+            .iter()
+            .map(|q| {
+                let action = q
+                    .parse
+                    .warnings
+                    .iter()
+                    .any(|w| matches!(w, ac_core::PromptWarning::ActionRole { .. }));
+                (q.name.as_str(), action)
+            })
+            .collect();
+        assert_eq!(
+            notes,
+            [("Person", false), ("Speaker", noted), ("Singer", noted)],
+            "{:?}",
+            c.detector
+        );
+        // The detector phrase is the same either way.
+        assert_eq!(snap.queries[1].parse.model_phrase, "a person speaking");
+    }
 }
 
 #[test]

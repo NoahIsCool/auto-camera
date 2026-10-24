@@ -180,11 +180,26 @@ fn output_text_covers_every_state_and_stat() {
     );
 }
 
-/// A live query for `prompt`, read with the built-in lexicon, framed by
-/// `sizes` (the shot words' sizes, or medium and close, when `None`).
+/// A live query for `prompt`, read with the built-in lexicon for a
+/// detector that does not see actions (OWLv2), framed by `sizes` (the shot
+/// words' sizes, or medium and close, when `None`).
 fn query(prompt: &str, literal: bool, sizes: Option<&[ac_core::ShotSize]>) -> QueryView {
-    let lexicon = ac_core::Lexicon::builtin();
-    let parse = ac_engine::read_prompt(prompt, literal, &lexicon);
+    query_for(&reader(false), prompt, literal, sizes)
+}
+
+/// The built-in lexicon, for a detector that does or does not see actions.
+fn reader(sees_actions: bool) -> ac_engine::PromptReader {
+    ac_engine::PromptReader::new(ac_core::Lexicon::builtin(), sees_actions)
+}
+
+/// [`query`], read with `reader`.
+fn query_for(
+    reader: &ac_engine::PromptReader,
+    prompt: &str,
+    literal: bool,
+    sizes: Option<&[ac_core::ShotSize]>,
+) -> QueryView {
+    let parse = ac_engine::read_prompt(prompt, literal, reader);
     let explicit = sizes.map(ac_engine::shot_presets);
     QueryView {
         id: ac_core::QueryId("q".into()),
@@ -492,6 +507,30 @@ fn an_action_role_is_noted_in_the_form_and_the_query_hover() {
     // An object role draws none.
     assert!(parse_notes(&ac_core::parse_prompt("guitarist close-up", &lexicon)).is_empty());
     assert!(!query_hover(&query("guitarist close-up", false, None)).contains("Note"));
+}
+
+#[test]
+fn an_action_role_draws_no_note_on_a_detector_that_sees_actions() {
+    // The form reads its preview, and the engine its queries, through the
+    // studio's reader: OWLv2's notes the action, the sidecar's does not.
+    let read = |sees_actions| {
+        parse_notes(&ac_engine::read_prompt(
+            "speaker upper body",
+            false,
+            &reader(sees_actions),
+        ))
+    };
+    assert_eq!(read(false).len(), 1);
+    assert!(read(true).is_empty(), "{:?}", read(true));
+    let hover = query_hover(&query_for(&reader(true), "speaker upper body", false, None));
+    assert_eq!(
+        hover,
+        "Detector sees: a person speaking · Framing: Medium, Medium close (person)"
+    );
+    // Other notes stay.
+    let notes = parse_notes(&ac_engine::read_prompt("singer wide", false, &reader(true)));
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].starts_with("Note: \"wide\""), "{notes:?}");
 }
 
 #[test]

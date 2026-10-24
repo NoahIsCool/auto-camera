@@ -193,7 +193,8 @@ operator's text, only what the parser makes of it:
   singing". Each is a hypothesis until it is benchmarked on footage.
   Speaking and singing are actions, which OWLv2 cannot see: every person
   gets such a query's shots, and the parse carries a notice saying to take
-  the speaker's shot by hand.
+  the speaker's shot by hand. The sidecar (SAM 3.1) sees actions, so on it
+  the notice is not shown.
 - **Basis.** A subject whose head noun is a person or role word is framed
   as a person: on a whole-person box, shots are cut at body lines measured
   in head heights from the crown (Close at the shoulders, Medium at the
@@ -215,8 +216,9 @@ operator's text, only what the parser makes of it:
 - **Lexicon.** The words are data. A `[lexicon]` table adds entries or
   replaces built-in ones: `roles = [{ word = "worship leader", phrase = "a
   person singing", needs = "action" }]` (`needs`, `action` or `object`, is
-  optional; an action draws the notice), `shots = [{ phrase = "upper body",
-  sizes = ["medium"] }]`, `person_words = ["organist"]`.
+  optional; an action draws the notice unless the detector sees actions),
+  `shots = [{ phrase = "upper body", sizes = ["medium"] }]`,
+  `person_words = ["organist"]`.
 
 ## The ONNX detector
 

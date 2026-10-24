@@ -126,8 +126,9 @@ impl EngineCore {
         Ok(CommandReply::Done)
     }
 
-    /// Reads the prompt once with the studio's lexicon, settles the
-    /// presets ([`crate::queries`]) and adds the query.
+    /// Reads the prompt once with the studio's reader (its lexicon and
+    /// what its detector sees), settles the presets ([`crate::queries`])
+    /// and adds the query.
     fn add_query(
         &mut self,
         name: &str,
@@ -136,7 +137,7 @@ impl EngineCore {
         literal: bool,
     ) -> Result<CommandReply, CommandError> {
         let id = ac_core::QueryId(slug(name));
-        let query = build_query(id.clone(), name, prompt, presets, literal, &self.lexicon)
+        let query = build_query(id.clone(), name, prompt, presets, literal, &self.prompts)
             .map_err(CommandError::Invalid)?;
         if self.queries.iter().any(|q| q.id == id) {
             return Err(CommandError::DuplicateQuery(id));

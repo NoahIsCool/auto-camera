@@ -1,9 +1,12 @@
 //! Headless runs on small synthetic studios (real time, about a second each).
 
+mod summary;
+
 use super::*;
 use ac_core::{ShotSize, TrackState};
 use ac_engine::{
-    DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, ShotView, TimingView,
+    DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, ShotView, SidecarSettings,
+    TimingView,
 };
 use ac_media::SourceInfo;
 use ac_sources::SourceConfig;
@@ -44,6 +47,12 @@ fn options(seconds: f64, record: Option<PathBuf>) -> HeadlessOptions {
 /// The snapshot of [`studio`] before its first tick, built by a real core:
 /// its detector is still preparing.
 fn preparing_snapshot() -> Arc<EngineSnapshot> {
+    first_snapshot(&studio())
+}
+
+/// The snapshot of `config` (one 320x180 source, "stage") before its
+/// first tick, built by a real core that starts no detector.
+fn first_snapshot(config: &StudioConfig) -> Arc<EngineSnapshot> {
     let info = SourceInfo {
         id: ac_core::SourceId("stage".into()),
         width: 320,
@@ -51,7 +60,7 @@ fn preparing_snapshot() -> Arc<EngineSnapshot> {
         fps: 30.0,
         audio: None,
     };
-    let core = EngineCore::new(&studio(), vec![info], &[true]).unwrap();
+    let core = EngineCore::new(config, vec![info], &[true]).unwrap();
     Arc::new(core.snapshot(OutputView::default(), TimingView::default(), true))
 }
 
@@ -380,79 +389,6 @@ fn moving_subjects_report_the_range_of_their_crop_sizes() {
 }
 
 #[test]
-fn a_run_that_ends_while_the_detector_loads_says_so() {
-    let mut snap = (*preparing_snapshot()).clone();
-    let summary = |snap: &EngineSnapshot| {
-        let s = summarize(
-            Path::new("x.toml"),
-            &options(1.0, None),
-            Instant::now(),
-            Some("stopped".into()),
-            Totals {
-                ticks: 0,
-                threads_joined: 0,
-            },
-            Some(snap),
-            Some(snap),
-            &Sampler::default(),
-        );
-        serde_json::to_value(&s).unwrap()
-    };
-    let v = summary(&snap);
-    assert_eq!(v["sources"][0]["discovery_preparing"], true);
-    assert!(v["sources"][0]["detector_ready_s"].is_null());
-    assert_eq!(v["sources"][0]["discovery_requests"], 0);
-    // Unsampled shots report their crop as the whole range.
-    assert_eq!(v["shots"][0]["crop_width_min"], 1.0);
-
-    let d = &mut snap.sources[0].discovery;
-    d.preparing = false;
-    d.ready_after = Some(Duration::from_millis(152_500));
-    let v = summary(&snap);
-    assert_eq!(v["sources"][0]["discovery_preparing"], false);
-    assert_eq!(v["sources"][0]["detector_ready_s"], 152.5);
-}
-
-#[test]
-fn shots_name_the_shot_they_look_the_same_as() {
-    let mut snap = (*preparing_snapshot()).clone();
-    let wide = snap.shots[0].clone();
-    let medium = ShotView {
-        id: ShotId("stage/1/medium".into()),
-        limited_by_zoom: true,
-        ..wide.clone()
-    };
-    let medium_close = ShotView {
-        id: ShotId("stage/1/medium_close".into()),
-        limited_by_zoom: true,
-        same_picture_as: Some(medium.id.clone()),
-        ..wide
-    };
-    snap.shots.extend([medium, medium_close]);
-    let s = summarize(
-        Path::new("x.toml"),
-        &options(1.0, None),
-        Instant::now(),
-        None,
-        Totals {
-            ticks: 0,
-            threads_joined: 0,
-        },
-        Some(&snap),
-        Some(&snap),
-        &Sampler::default(),
-    );
-    let v = serde_json::to_value(&s).unwrap();
-    let shots = v["shots"].as_array().unwrap();
-    assert_eq!(shots.len(), 3);
-    assert!(shots[0]["same_picture_as"].is_null());
-    assert!(shots[1]["same_picture_as"].is_null());
-    assert_eq!(shots[1]["limited_by_zoom"], true);
-    assert_eq!(shots[2]["same_picture_as"], "stage/1/medium");
-    assert_eq!(shots[2]["limited_by_zoom"], true);
-}
-
-#[test]
 fn the_detector_phase_waits_for_every_detector_and_gives_up_in_time() {
     let preparing = preparing_snapshot();
     let quit = QuitSignal::new();
@@ -596,12 +532,8 @@ fn the_sample_configs_load() {
         "the floor follows"
     );
     assert_eq!(sam.discovery.max_result_age_s, 3.0);
-    let phrases: Vec<String> = sam
-        .build_queries()
-        .unwrap()
-        .iter()
-        .map(|q| q.detector_phrase().to_owned())
-        .collect();
+    let queries = sam.build_queries().unwrap();
+    let phrases: Vec<&str> = queries.iter().map(|q| q.detector_phrase()).collect();
     assert_eq!(
         phrases,
         [
@@ -609,6 +541,12 @@ fn the_sample_configs_load() {
             "a person playing guitar",
             "a person playing drums"
         ]
+    );
+    // SAM sees actions: the speaker draws no notice, as the example says.
+    assert!(
+        queries[0].parse.warnings.is_empty(),
+        "{:?}",
+        queries[0].parse
     );
 }
 

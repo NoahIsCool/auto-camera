@@ -37,6 +37,8 @@ audio = true
 [[queries]]
 name = "Speaker"
 # SAM is asked for "a person speaking"; framed Medium and Medium close.
+# SAM sees actions, so unlike on OWLv2 the query carries no notice to take
+# the speaker's shot by hand.
 prompt = "speaker upper body"
 
 [[queries]]

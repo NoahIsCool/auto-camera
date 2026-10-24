@@ -215,6 +215,27 @@ impl DetectorSettings {
         matches!(self, DetectorSettings::Sidecar(_))
     }
 
+    /// True when the detector sees what a person is doing, not only people
+    /// and objects, so a role whose phrase names an action
+    /// ([`ac_core::RoleNeeds::Action`]) needs no notice
+    /// ([`crate::queries`]). This is the one capability of the design's
+    /// contract (Phase 2, "Capability contract"; §4.2: each role "carries a
+    /// `needs` tag ..., and the UI warns when the chosen model lacks the
+    /// capability") that the engine reads so far, and it reads it from the
+    /// detector's kind, never from a model name:
+    ///
+    /// * the sidecar runs SAM 3.1, which found the speaker for "a person
+    ///   speaking" with no false subjects (`sam31-vs-owlv2.md`); until a
+    ///   sidecar's hello declares capabilities, every sidecar is taken to
+    ///   see actions;
+    /// * OWLv2 boxes people and objects: "a person speaking" picked every
+    ///   person (benchmark B0);
+    /// * the synthetic detector gives every query every box, and no
+    ///   detector sees nothing.
+    pub fn sees_actions(&self) -> bool {
+        matches!(self, DetectorSettings::Sidecar(_))
+    }
+
     /// Checks scores and sizes.
     pub fn validate(&self) -> Result<(), String> {
         match self {

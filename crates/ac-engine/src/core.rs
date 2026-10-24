@@ -67,7 +67,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use ac_compositor::{Compositor, CompositorConfig};
-use ac_core::{Lexicon, Query, QueryId, ShotId, SourceId};
+use ac_core::{Query, QueryId, ShotId, SourceId};
 use ac_director::{Director, DirectorDecision};
 use ac_framing::FramerConfig;
 use ac_media::{SourceInfo, SourceState, VideoFrame};
@@ -76,6 +76,7 @@ use ac_switcher::Switcher;
 use crate::catalog::Catalog;
 use crate::config::{DiscoverySettings, MonitorSettings, StudioConfig};
 use crate::discovery::{DiscoveryRequest, DiscoveryResult};
+use crate::queries::PromptReader;
 use crate::schedule::RateMeter;
 use crate::snapshot::{DiscoveryStats, MatchView};
 use crate::vision::SourceVision;
@@ -214,8 +215,9 @@ pub struct EngineCore {
     /// Prompt queries in creation order, each prompt read once when the
     /// query was created ([`crate::queries`]).
     queries: Vec<Query>,
-    /// The prompt parser's vocabulary, for queries added by command.
-    lexicon: Lexicon,
+    /// How prompts of queries added by command are read: the studio's
+    /// lexicon and what its detector sees ([`crate::queries`]).
+    prompts: PromptReader,
     /// Discovery tuning.
     discovery: DiscoverySettings,
     /// One detector process serves every source, one pass at a time (the
@@ -319,7 +321,7 @@ impl EngineCore {
         let mut core = Self {
             sources,
             queries,
-            lexicon: config.prompt_lexicon(),
+            prompts: PromptReader::of(config),
             discovery: config.discovery,
             shared_detector: config.detector.is_shared(),
             framing: config.framing,

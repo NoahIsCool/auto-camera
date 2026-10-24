@@ -83,11 +83,15 @@ an object (their instrument, which people-first matching asks for). A prompt
 rewritten to an action role carries a notice: OWLv2 gives every person
 (photos on the screen included) that query's shots, so the operator takes
 the speaker's shot by hand. The design asks for the warning only when the
-chosen model lacks the capability. It is not yet conditional on the
-detector: detectors declare what they can see only with the capability
-contract (design Phase 2), which does not exist yet, so the notice is shown
-whatever the detector. A `[lexicon]` role that replaces a built-in one
-replaces its tag too; a studio's entry without `needs` draws no notice.
+chosen model lacks the capability (§4.2), read from what the detector
+declares (Phase 2, "Capability contract"). That contract is not built, so
+the engine reads the one capability it needs from the detector's kind
+(`DetectorSettings::sees_actions`): the sidecar, SAM 3.1, sees actions;
+OWLv2 and the synthetic detector do not. The parser adds the notice
+whatever the detector, and the engine drops it, for the form, the window
+and the headless summary alike, when the detector sees actions. A
+`[lexicon]` role that replaces a built-in one replaces its tag too; a
+studio's entry without `needs` draws no notice.
 
 ### Grammar
 
@@ -179,10 +183,11 @@ subject (design §4.2), which is later work.
 
 The operator window shows a live parse line under the prompt ("Detector
 sees: a person speaking · Framing: Medium, Medium close (person)") with the
-parser's notices (an action role's among them), and its size checkboxes
-follow the parse until the operator touches one. Each live query shows what
-its detector is asked for, with the notices in its hover text. The headless
-summary reports the parse of every query, notices included.
+parser's notices (an action role's among them, unless the detector sees
+actions), and its size checkboxes follow the parse until the operator
+touches one. Each live query shows what its detector is asked for, with the
+notices in its hover text. The headless summary reports the parse of every
+query, notices included.
 
 ## Consequences
 
@@ -231,8 +236,8 @@ summary reports the parse of every query, notices included.
 2. The role lexicon, each entry a hypothesis until benchmarked, and each
    tagged with what it needs. OWLv2 cannot carry the Speaker (B0: "a person
    speaking" picks every person), so an action role's notice tells the
-   operator to take the speaker's shot by hand, whatever the detector, until
-   detectors declare their capabilities.
+   operator to take the speaker's shot by hand, on every detector but the
+   sidecar (SAM 3.1), which sees actions.
 3. Explicit presets winning over shot words.
 4. "wide" giving a Full shot until the kit-inclusive version exists.
 5. Adding shot words in prompts to spec M2 and cut lines from the head to

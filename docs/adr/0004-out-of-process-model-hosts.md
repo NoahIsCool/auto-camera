@@ -78,8 +78,11 @@ knows where a model runs.
   skipped without a pass.
 - **Studio level first** (design §5, Phase 2): `[detector] kind =
   "sidecar"` makes the sidecar the one detector of the studio, and every
-  query goes to it (`config/sam3-sidecar.example.toml`). Per-query models,
-  lanes and paired passes with OWLv2 are Phase 3.
+  query goes to it (`config/sam3-sidecar.example.toml`). SAM 3.1 sees
+  actions, so a role such as "speaker" draws no notice to take its shot by
+  hand on the sidecar, as it does on OWLv2 (ADR 0003;
+  `DetectorSettings::sees_actions`). Per-query models, lanes and paired
+  passes with OWLv2 are Phase 3.
 - **The first sidecar** is `sidecars/sam3-mlx/server.py`: SAM 3.1 image
   detection through mlx-vlm at revision `5b22c24`, boxes only, no masks,
   parts or video tracker. Its fake backend needs only the Python standard
@@ -140,4 +143,5 @@ B8 fails, the sidecar stays. CLAUDE.md's decision line is Noah's to update.
   its restarts, its process and what its hello named are not
   (`ac_sidecar::HostStatus` has them, but Phase 2's "0 sidecar restarts"
   can only be inferred from discovery errors and timeouts today),
-  per-query thresholds, and TCP.
+  capabilities declared in the hello (the engine takes every sidecar to
+  see actions, from its kind), per-query thresholds, and TCP.

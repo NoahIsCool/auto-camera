@@ -180,8 +180,8 @@ model-picker design measured "a person speaking" in Rust on CoreML, through
 the described-person route at the 0.15 person threshold, on the 40 labelled
 frames below: it found the speaker in 20 of 20 frames, with 300 false boxes.
 It picks everyone, because OWLv2 sees people and objects, not actions, so
-the parser adds a notice to every prompt rewritten to an action role
-("speaker", "singer"). "a person playing drums", an object prompt, found
+a prompt rewritten to an action role ("speaker", "singer") carries a notice
+on OWLv2 (the sidecar's SAM 3.1 sees actions, and draws none). "a person playing drums", an object prompt, found
 the drummer in 20 of 20 frames with no false boxes. See
 [ADR 0003](../../docs/adr/0003-shot-words-in-prompts.md).
 

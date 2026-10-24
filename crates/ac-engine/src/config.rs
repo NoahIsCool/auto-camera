@@ -26,7 +26,9 @@
 //! the config's `lexicon` additions ([`StudioConfig::prompt_lexicon`]):
 //! shot words pick its presets when it lists none, role words become the
 //! detector phrase, and `literal = true` sends the text as typed. Explicit
-//! `presets` always win over shot words; see [`crate::queries`].
+//! `presets` always win over shot words. A role that names an action draws
+//! a notice unless the `detector` sees actions
+//! ([`DetectorSettings::sees_actions`]); see [`crate::queries`].
 //!
 //! The `detector` table picks one detector `kind` for the whole studio:
 //! `"none"`, `"synthetic"` (ground truth of synthetic sources), `"owl"`
@@ -53,6 +55,8 @@ use ac_vision::TemplateTrackerConfig;
 use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
+
+use crate::queries::PromptReader;
 
 mod settings;
 mod sidecar;
@@ -192,15 +196,15 @@ impl QuerySettings {
             .map(|specs| specs.iter().map(PresetSpec::to_preset).collect())
     }
 
-    /// The query, its prompt read with `lexicon`; see [`crate::queries`].
-    pub fn build(&self, lexicon: &Lexicon) -> Result<Query, String> {
+    /// The query, its prompt read with `reader`; see [`crate::queries`].
+    pub fn build(&self, reader: &PromptReader) -> Result<Query, String> {
         crate::queries::build_query(
             self.query_id(),
             &self.name,
             &self.prompt,
             self.explicit_presets(),
             self.literal,
-            lexicon,
+            reader,
         )
     }
 }
@@ -449,11 +453,11 @@ impl StudioConfig {
         lexicon
     }
 
-    /// The queries in config order, each prompt read once with
-    /// [`Self::prompt_lexicon`]; fails on the first invalid or duplicate
-    /// query.
+    /// The queries in config order, each prompt read once with the
+    /// studio's [`PromptReader`] (its lexicon and its detector); fails on
+    /// the first invalid or duplicate query.
     pub fn build_queries(&self) -> Result<Vec<Query>, ConfigError> {
-        let lexicon = self.prompt_lexicon();
+        let reader = PromptReader::of(self);
         let mut ids = HashSet::new();
         let mut out = Vec::new();
         for q in &self.queries {
@@ -464,7 +468,7 @@ impl StudioConfig {
                     id.0
                 )));
             }
-            let query = q.build(&lexicon).map_err(ConfigError::Invalid)?;
+            let query = q.build(&reader).map_err(ConfigError::Invalid)?;
             if !ids.insert(id.0.clone()) {
                 return Err(ConfigError::Invalid(format!(
                     "duplicate query id {:?}",

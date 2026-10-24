@@ -35,10 +35,11 @@
 //! boxes on 40 labelled frames), photos on the projection screen included.
 //! So a role tagged [`RoleNeeds::Action`] draws a
 //! [`PromptWarning::ActionRole`] notice, telling the operator to take that
-//! person's shot by hand. It does not yet depend on the detector: a model
-//! that sees actions declares it through the capability contract (design
-//! Phase 2), which does not exist yet. An untagged role, such as a studio's
-//! own entry without `needs`, draws none.
+//! person's shot by hand. The parser adds it whatever the detector, since
+//! it does not know which one will answer; the engine drops it when the
+//! studio's detector sees actions, the one capability of the design's
+//! contract (Phase 2) it reads so far (`ac_engine::queries`). An untagged
+//! role, such as a studio's own entry without `needs`, draws none.
 //!
 //! # Invariants
 //!

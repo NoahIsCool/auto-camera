@@ -39,7 +39,8 @@ pub enum EngineCommand {
         transition: Transition,
     },
     /// Add a prompt query; its id is a slug of `name`. The prompt is read
-    /// once, with the studio's lexicon ([`crate::queries`]).
+    /// once, with the studio's lexicon and what its detector sees
+    /// ([`crate::queries`]).
     AddQuery {
         /// Operator-facing name.
         name: String,

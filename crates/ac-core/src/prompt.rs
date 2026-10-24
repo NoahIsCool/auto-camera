@@ -69,8 +69,9 @@
 //! guitarist" is sent as typed. A role whose phrase names an action
 //! ([`crate::RoleNeeds::Action`]: speaker, pastor, preacher, singer) adds a
 //! [`PromptWarning::ActionRole`] notice, because OWLv2 sees people and
-//! objects, not actions, and gives such a query every person. The notice is
-//! the same whatever the detector until detectors declare what they can see.
+//! objects, not actions, and gives such a query every person. The parser
+//! does not know the detector, so it always adds the notice; the engine
+//! drops it when the studio's detector sees actions (`ac_engine::queries`).
 //!
 //! **Basis**: [`Basis::Person`] when the subject's head noun is a person or
 //! role word, else [`Basis::Object`]. The head noun is the last word before
@@ -192,7 +193,8 @@ pub enum PromptWarning {
         words: String,
     },
     /// The subject is a role whose detector phrase names an action
-    /// ([`crate::RoleNeeds::Action`]), which OWLv2 cannot see.
+    /// ([`crate::RoleNeeds::Action`]), which OWLv2 cannot see. The engine
+    /// drops it for a detector that sees actions.
     ActionRole {
         /// The role, as the lexicon spells it ("speaker").
         role: String,

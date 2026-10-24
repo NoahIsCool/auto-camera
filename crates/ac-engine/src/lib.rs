@@ -66,7 +66,7 @@ pub use config::{
     QuerySettings, SidecarSettings, SourceEntry, StudioConfig, preset_for,
 };
 pub use core::{EngineCore, SourceFeed, TickOutput};
-pub use queries::{build_query, default_presets, read_prompt, shot_presets};
+pub use queries::{PromptReader, build_query, default_presets, read_prompt, shot_presets};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};
 pub use snapshot::{
     DirectorView, EngineSnapshot, MatchView, OutputState, OutputView, PassOutcome, QueryView,
