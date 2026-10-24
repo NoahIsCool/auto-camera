@@ -211,8 +211,11 @@ operator's text, only what the parser makes of it:
   same thing ("speaker close-up" and "speaker wide" both ask for "a person
   speaking") find the same person, who becomes one subject answering both
   queries and gets the shots of both, each named after its query ("Speaker
-  tight 1 Close"). A shot on air keeps how it is framed when its query is
-  removed or replaced.
+  tight 1 Close"). The shots of a query other than the one that first
+  found the subject (an alias) appear once 2 detector passes over the
+  subject have seen it, and go after 8 such passes in a row without it,
+  except while the subject is on program or preview. A shot on air keeps
+  how it is framed when its query is removed or replaced.
 - **Lexicon.** The words are data. A `[lexicon]` table adds entries or
   replaces built-in ones: `roles = [{ word = "worship leader", phrase = "a
   person singing", needs = "action" }]` (`needs`, `action` or `object`, is

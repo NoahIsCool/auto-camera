@@ -316,3 +316,16 @@ query, notices included.
    feet stay within the 3% band is still read as crown to waist and its
    Full falls to the fill rule; and a head raised while the person was cut
    stays raised until a box ends above 0.97.
+10. The shot-label rule for aliases and its inferred constants: an alias
+    frames shots once 2 detection passes that observed the subject have
+    seen it (`alias_confirm_passes`), and stops after 8 such passes in a
+    row without it (`alias_stale_passes`). Also open: that pinned and
+    on-air subjects follow the evidence like any other rather than being
+    exempt (the engine only keeps the shots an on-air subject already
+    holds); that confirmation counts sightings within the stale window
+    rather than in consecutive passes, so two sightings 7 missed passes
+    apart confirm; that the primary query chosen at admission is outside
+    the rule and always frames, and whether a stale primary should yield
+    to a confirmed alias; and that a protected subject keeps every shot it
+    holds, not only the shots on program and preview, until it leaves the
+    air.
