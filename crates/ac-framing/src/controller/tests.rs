@@ -1,12 +1,14 @@
 //! Tests for the per-shot framing controller: dead zone, springs, loss,
 //! head memory and the zoom-limit verdict; shots of a person cut off by the
-//! bottom of the picture are in [`bottom_cut`].
+//! bottom of the picture are in [`bottom_cut`], and a person stepping clear
+//! of the release band and back in [`release_band`].
 
 use ac_core::ShotSize;
 
 use super::*;
 
 mod bottom_cut;
+mod release_band;
 
 /// 16:9, in and out.
 const A: f64 = 16.0 / 9.0;

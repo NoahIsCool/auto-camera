@@ -7,17 +7,19 @@
 //!
 //! * **Head memory.** The framer owns its shot's [`HeadMemory`] and is its
 //!   only writer: every person box passed to `aim` is folded in (smoothed
-//!   with [`FramerConfig::head_half_life`]; a truncated box can only raise
-//!   it, toward what the box shows). An untruncated box is framed on its own
-//!   proportions, so Full is always the whole box; the memory sizes only
-//!   truncated boxes, so a person whose legs go behind a lectern keeps their
-//!   zoom instead of falling back to the fill rule (see [`crate::person`]).
-//!   In a separate slot it smooths, with the same half-life, how many head
-//!   heights a box cut by the bottom of the picture is assumed to show: a
-//!   speaker never seen whole is framed down from the crown on that
-//!   bounded guess, steady through gestures, a walk to the side of the
-//!   picture and boxes that end just above the bottom edge. The guess never
-//!   becomes a remembered head. The memory lives and dies with the shot.
+//!   with [`FramerConfig::head_half_life`]; a box not measured on the canon
+//!   can only raise it, toward what the box shows). A measured box is framed
+//!   on its own proportions, so its Full is the whole box; the memory sizes
+//!   only the other boxes, so a person whose legs go behind a lectern keeps
+//!   their zoom instead of falling back to the fill rule (see
+//!   [`crate::person`]). In a separate slot it smooths, with the same
+//!   half-life, how many head heights a box cut by the bottom of the picture
+//!   is assumed to show: a speaker never seen whole is framed down from the
+//!   crown on that bounded guess, steady through gestures, a walk to the side
+//!   of the picture and boxes that end just above the bottom edge, until a
+//!   box ends clear of the release band
+//!   ([`HeadMemory::assumed_heads_in_force`]). The guess never becomes a
+//!   remembered head. The memory lives and dies with the shot.
 //! * **Dead zone with hysteresis.** The camera starts moving only when the
 //!   ideal centre leaves an engage band (a fraction of the current crop size)
 //!   and stops once the error is below a quarter of that band. Small sway gives
@@ -196,15 +198,17 @@ impl ShotFramer {
     /// aspect ratios.
     ///
     /// A person box first updates the shot's head memory, which then sizes
-    /// the shot only if the box looks truncated ([`compose_subject`]): the
-    /// remembered head first, then the assumed head count for a box cut by
-    /// the bottom. Objects never touch the memory.
+    /// the shot only if the box is not measured on the canon
+    /// ([`compose_subject`]): the remembered head first, then, for a box cut
+    /// by the bottom or read as cut by it, the assumed head count in force
+    /// ([`HeadMemory::assumed_heads_in_force`]). Objects never touch the
+    /// memory.
     pub fn aim(&mut self, bbox: &Rect, extent: Extent, preset: &Preset, dt: f64) -> Composition {
         let (remembered_head, assumed_heads) = match extent {
             Extent::Person => {
                 let half_life = self.config.head_half_life;
                 let head = self.head.observe(bbox, self.source_aspect, half_life, dt);
-                (head, self.head.assumed_heads())
+                (head, self.head.assumed_heads_in_force())
             }
             Extent::Object => (None, None),
         };

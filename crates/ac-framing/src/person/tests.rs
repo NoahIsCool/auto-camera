@@ -1,7 +1,8 @@
 //! Tests for person-basis composition, built around the worked example of
 //! the model-picker design (section 4.5): a whole person half the frame
 //! high, 16:9 in and out.
-//! Boxes cut by the bottom of the picture are in [`bottom_cut`].
+//! Boxes cut by the bottom of the picture are in [`bottom_cut`], and the
+//! release band's hysteresis on the bottom edge in [`release_band`].
 
 use ac_core::{Extent, Preset, Rect, ShotSize};
 
@@ -9,6 +10,7 @@ use super::*;
 use crate::compose::{SubjectGeometry, compose_subject};
 
 mod bottom_cut;
+mod release_band;
 
 /// 16:9.
 const HD: f64 = 16.0 / 9.0;

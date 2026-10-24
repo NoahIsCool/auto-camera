@@ -154,17 +154,19 @@ crown = box top        cut = crown + heads(size) * head        heads: Close 1.6,
 h = (cut - crown) / (1 - headroom)                             top = crown - headroom * h
 ```
 
-An untruncated box is always measured on its own proportions, so Full is
-the whole box. A box that touches the top or bottom edge of the source, or
-is too squat in pixels for a standing body, uses a head height the shot
-remembers from an earlier untruncated box: the larger of the remembered one
-and the box height over 7.5, because the visible part of a body bounds the
-whole from below. Each shot's framer owns that memory and is its only
-writer: smoothed with a 5 s half-life over untruncated boxes, raised (never
-lowered) toward the visible bound by truncated ones. A lectern hiding the
-legs therefore keeps the zoom, and a person who walks toward the camera
-until their feet leave the picture is not sized by the smaller head they had
-further away.
+A box is measured on its own proportions, so that its Full is the whole
+box, when it is untruncated and, while its shot reads the person as cut by
+the bottom on a stored count (below), ends clear of the release band. Any
+other box (one that touches the top or bottom edge of the source, is too
+squat in pixels for a standing body, or is read as cut by the bottom) uses
+a head height the shot remembers from an earlier measured box: the larger
+of the remembered one and the box height over 7.5, because the visible part
+of a body bounds the whole from below. Each shot's framer owns that memory
+and is its only writer: smoothed with a 5 s half-life over measured boxes,
+raised (never lowered) toward the visible bound by the others. A lectern
+hiding the legs therefore keeps the zoom, and a person who walks toward the
+camera until their feet leave the picture is not sized by the smaller head
+they had further away.
 
 With nothing remembered, a box cut by the bottom edge with its crown in the
 picture (a speaker framed from the knees up) is cut from the crown on a
@@ -179,11 +181,12 @@ less (a chest-up in profile) comes out tighter. The width term only keeps
 same 5 s half-life in a slot of its own that never becomes a remembered
 head; it seeds it only from boxes clear of the side edges, then frames every
 box cut by the bottom on it (also at a side edge or with the crown at the
-frame top) and, as hysteresis, still reads a box ending within 3% of the
-bottom as cut off. Full, boxes clear of the bottom (cut by the top or too
-squat), and, until the shot holds a `V`, boxes cut by the bottom that touch
-a side edge or the frame top keep the fill rule. Every other subject keeps
-the fill rule, unchanged.
+frame top) and reads the bottom edge with hysteresis: after a box at the
+edge, a box ending within 3% of the bottom is still read as cut off, until
+a box ends above that band. Full, boxes clear of the bottom (cut by the top
+or too squat), and, until the shot holds a `V`, boxes cut by the bottom
+that touch a side edge or the frame top keep the fill rule. Every other
+subject keeps the fill rule, unchanged.
 
 A shot the preset's zoom ceiling keeps from its size is drawn at the
 ceiling and marked: a LIMITED badge on its multiview tile (never in the
@@ -302,4 +305,10 @@ query, notices included.
    mid-distance person cut by the bottom (a box about 0.25 high) has Close
    and Medium close both drawn at the ceiling and marked as the same
    picture; a shot whose very first box ends just above the edge (bottom
-   0.97 to 0.99) still measures a whole body.
+   0.97 to 0.99) still measures a whole body, and so can an alias shot
+   made again after its label went stale (shot labels drop an alias's
+   shots after missed passes, and the new shot starts with an empty head
+   memory and no stored `V`); after a box at the edge, a whole body whose
+   feet stay within the 3% band is still read as crown to waist and its
+   Full falls to the fill rule; and a head raised while the person was cut
+   stays raised until a box ends above 0.97.

@@ -58,15 +58,16 @@
 //! pixel width, `b.h / (b.w * source_aspect)`, below [`MIN_STANDING_ASPECT`]
 //! (1.6, an inferred threshold: seated, behind a lectern or a drum kit).
 //!
-//! An untruncated box is always measured on its own proportions, so Full is
-//! always the whole box, crown to feet. A truncated box is sized by the
-//! first of these that applies:
+//! A box is measured on its own proportions, so that its Full is the whole
+//! box, crown to feet, when it is untruncated and, while its shot reads the
+//! person as cut by the bottom on a stored count (below), ends clear of the
+//! release band. Any other box is sized by the first of these that applies:
 //!
-//! 1. a head the shot remembers from an earlier untruncated box (below);
-//! 2. for a box cut by the bottom edge, an assumed head, at every size but
-//!    Full (below);
+//! 1. a head the shot remembers from an earlier measured box (below);
+//! 2. for a box cut by the bottom edge, or read as cut by it, an assumed
+//!    head, at every size but Full (below);
 //! 3. the fill rule: boxes cut by the top or too squat, and the Full of a
-//!    box cut by the bottom.
+//!    box cut by the bottom or read as cut by it.
 //!
 //! With a remembered head the crown is still the box top and the scale
 //! comes from
@@ -126,18 +127,18 @@
 //! # Head memory
 //!
 //! [`HeadMemory`] is where a remembered head height comes from. It holds one
-//! value, seeded by the first untruncated box and then smoothed over every
-//! later untruncated box with a long half-life
+//! value, seeded by the first box measured on the canon ([`measured_head`])
+//! and then smoothed over every later measured box with a long half-life
 //! ([`FramerConfig::head_half_life`](crate::FramerConfig::head_half_life)).
-//! While boxes look truncated it never falls (the box says nothing about how
-//! tall the hidden body is) but rises toward the visible lower bound with
-//! the same half-life, so it does not stay stuck below what the picture
-//! shows. The memory is per shot: each shot's
-//! [`ShotFramer`](crate::ShotFramer) owns one and is its only writer, and it
-//! lives and dies with the shot. Shots of one subject made together see the
-//! same boxes and remember the same value; a shot made later starts from the
-//! boxes it sees. The long half-life keeps a raised hand or a box spike just
-//! before the legs disappear from setting the scale.
+//! Any other box never lowers it (the box says nothing about how tall the
+//! hidden body is) but raises it toward the visible lower bound with the
+//! same half-life, so it does not stay stuck below what the picture shows.
+//! The memory is per shot: each shot's [`ShotFramer`](crate::ShotFramer)
+//! owns one and is its only writer, and it lives and dies with the shot.
+//! Shots of one subject made together see the same boxes and remember the
+//! same value; a shot made later starts from the boxes it sees. The long
+//! half-life keeps a raised hand or a box spike just before the legs
+//! disappear from setting the scale.
 //!
 //! It holds a second value in a separate slot: the assumed visible head
 //! count `V` ([`HeadMemory::assumed_heads`]), seeded by the first box that is
@@ -149,7 +150,12 @@
 //! lowers it and never takes part in `max(remembered, b.h / 7.5)`.
 //!
 //! Once a shot holds `V` it reads the bottom edge with hysteresis, as the
-//! framer reads the zoom ceiling:
+//! framer reads the zoom ceiling: a box that reaches the bottom edge (within
+//! [`EDGE_MARGIN`]) puts the shot in the cut state, a box that ends above the
+//! release band, more than [`RELEASE_MARGIN`] (0.03, about 22 px at 720p,
+//! inferred) above the source bottom, takes it out, and a box ending in
+//! between keeps the last state. In the cut state the stored `V` is in force
+//! ([`HeadMemory::assumed_heads_in_force`]):
 //!
 //! * every box cut by the bottom is framed on the stored `V`, also one that
 //!   touches a side edge (its width is cut, so it cannot update `V`) and one
@@ -157,12 +163,16 @@
 //!   frame clamps). Without a stored `V` such boxes keep the fill rule, so
 //!   the rule never switches back and forth while a speaker paces to the
 //!   edge of the picture;
-//! * a box whose bottom is within [`RELEASE_MARGIN`] (0.03, about 22 px at
-//!   720p, inferred) of the source bottom still reads as cut by the bottom
+//! * a box in the release band still reads as cut by the bottom
 //!   ([`measured_head`]): it is not measured on the canon and does not seed
 //!   or update the measured head. One box that ends at 0.985 therefore
 //!   cannot seed `b.h / 7.5`, the scale of a whole body, and collapse Medium
 //!   close and Medium onto the Close.
+//!
+//! Out of the cut state an untruncated box in the band is measured again, so
+//! a person who steps clear of the band and then back to feet at 0.98 is
+//! framed as a whole body, and a head raised while they were cut comes back
+//! down.
 //!
 //! # Limits
 //!
@@ -182,7 +192,14 @@
 //! picture. The release band needs a stored `V`, so a shot whose very first
 //! box ends just clear of the edge band (bottom between 0.97 and 0.99) is
 //! measured on the canon before any `V` exists, and that memory then wins.
-//! All of these wait for a head source (a head detector, masks or pose).
+//! The race can recur for an alias shot: shot labels drop an alias's shots
+//! after missed passes, and a shot made again starts with an empty head
+//! memory and no stored `V`. The band follows the edge, not the body: after
+//! a box at the edge, a whole body whose feet stay in the band still reads
+//! as cut by the bottom, so with no head remembered it is framed crown to
+//! waist and its Full falls to the fill rule, and a head raised while the
+//! person was cut stays raised until a box ends above 0.97. All of these
+//! wait for a head source (a head detector, masks or pose).
 
 use ac_core::{Preset, Rect, ShotSize};
 
@@ -229,9 +246,10 @@ pub const MAX_ASSUMED_HEADS: f64 = MEDIUM_CUT;
 pub const SHOULDER_HEADS: f64 = MAX_ASSUMED_HEADS / MIN_STANDING_ASPECT;
 
 /// Distance from the bottom of the source, as a fraction of its height,
-/// within which a box still reads as cut by the bottom once its shot holds
-/// an assumed head count (hysteresis on [`EDGE_MARGIN`]; about 22 px at
-/// 720p, inferred). See the module docs.
+/// within which a box still reads as cut by the bottom while its shot's
+/// assumed head count is in force: from a box at the edge until a box ends
+/// above this band (hysteresis on [`EDGE_MARGIN`]; about 22 px at 720p,
+/// inferred). See the module docs.
 pub const RELEASE_MARGIN: f64 = 0.03;
 
 /// The lower cut line of `size`, in head heights below the crown; see the
@@ -271,10 +289,10 @@ pub fn head_height(bbox: &Rect, source_aspect: f64) -> Option<f64> {
 }
 
 /// The head height measured on the canon for `bbox`, as [`head_height`],
-/// for a shot holding the assumed head count `assumed`
-/// ([`HeadMemory::assumed_heads`]): when it holds one, a box within
-/// [`RELEASE_MARGIN`] of the source bottom reads as cut by the bottom and
-/// is not measured. See the module docs.
+/// for a shot whose assumed head count in force is `assumed`
+/// ([`HeadMemory::assumed_heads_in_force`]): when there is one, a box
+/// within [`RELEASE_MARGIN`] of the source bottom reads as cut by the bottom
+/// and is not measured. See the module docs.
 pub fn measured_head(bbox: &Rect, source_aspect: f64, assumed: Option<f64>) -> Option<f64> {
     let released = assumed.is_some_and(usable_heads) && in_release_band(bbox);
     head_height(bbox, source_aspect).filter(|_| !released)
@@ -287,10 +305,22 @@ pub fn visible_head(bbox: &Rect) -> Option<f64> {
     (is_finite(bbox) && bbox.h > 0.0).then(|| bbox.h / HEADS_PER_BODY)
 }
 
+/// True when `bbox` is finite and not empty.
+fn is_box(bbox: &Rect) -> bool {
+    is_finite(bbox) && bbox.w > 0.0 && bbox.h > 0.0
+}
+
 /// True when `bbox` is finite, not empty, and its bottom is within
 /// `margin` of the bottom of the source.
 fn reaches_bottom(bbox: &Rect, margin: f64) -> bool {
-    is_finite(bbox) && bbox.w > 0.0 && bbox.h > 0.0 && bbox.bottom() >= 1.0 - margin
+    is_box(bbox) && bbox.bottom() >= 1.0 - margin
+}
+
+/// True when `bbox` is finite, not empty, and ends above the release band
+/// (more than [`RELEASE_MARGIN`] above the source bottom): it takes a shot
+/// out of the cut state. See the module docs.
+fn ends_above_release_band(bbox: &Rect) -> bool {
+    is_box(bbox) && !reaches_bottom(bbox, RELEASE_MARGIN)
 }
 
 /// True when `bbox` touches the left or right edge of the source.
@@ -299,8 +329,8 @@ fn touches_a_side(bbox: &Rect) -> bool {
 }
 
 /// True when `bbox` (finite and not empty) ends within [`RELEASE_MARGIN`]
-/// of the source bottom: cut by the bottom, for a shot that already holds
-/// an assumed head count. See the module docs.
+/// of the source bottom: cut by the bottom, while its shot's assumed head
+/// count is in force. See the module docs.
 pub fn in_release_band(bbox: &Rect) -> bool {
     reaches_bottom(bbox, RELEASE_MARGIN)
 }
@@ -392,7 +422,8 @@ pub fn compose_assumed(
 }
 
 /// A shot's memory of its person's head height, and, kept apart, of how
-/// many head heights its boxes cut by the bottom show; see the module docs.
+/// many head heights its boxes cut by the bottom show and whether that
+/// count is in force; see the module docs.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct HeadMemory {
     /// The remembered head height measured on the canon, as a fraction of
@@ -401,6 +432,13 @@ pub struct HeadMemory {
     /// The smoothed assumed visible head count of boxes cut by the bottom
     /// ([`assumed_visible_heads`]). A guess: it never feeds `head`.
     assumed_heads: Option<f64>,
+    /// The cut state: the shot reads its person as cut by the bottom, so
+    /// `assumed_heads` is in force. Set by a box that reaches the bottom
+    /// edge (within [`EDGE_MARGIN`]) once a count is stored, cleared by a
+    /// box that ends above the release band, kept by any other box. Never
+    /// true without a stored count: until one is stored there is nothing in
+    /// force.
+    cut_by_bottom: bool,
 }
 
 impl HeadMemory {
@@ -409,7 +447,7 @@ impl HeadMemory {
         Self::default()
     }
 
-    /// The remembered head height, if any untruncated box was seen.
+    /// The remembered head height, if any box was measured on the canon.
     pub fn get(&self) -> Option<f64> {
         self.head
     }
@@ -422,19 +460,34 @@ impl HeadMemory {
         self.assumed_heads
     }
 
+    /// The assumed head count the shot frames on now: the stored count
+    /// ([`Self::assumed_heads`]) while the shot is in the cut state (since
+    /// the last box at the bottom edge, no box has ended above the release
+    /// band), `None` otherwise. This is the count [`measured_head`] and
+    /// [`compose_subject`](crate::compose_subject) take. See the module docs.
+    pub fn assumed_heads_in_force(&self) -> Option<f64> {
+        self.assumed_heads
+            .filter(|v| self.cut_by_bottom && usable_heads(*v))
+    }
+
     /// Folds in `bbox` (a person box in a source of `source_aspect`) `dt`
     /// seconds after the previous call, and returns the remembered head.
     ///
-    /// The head: the first box measured on the canon ([`measured_head`])
-    /// seeds the memory; later ones move it by `1 - 2^(-dt / half_life)` of
-    /// the difference. Any other box cannot seed it nor lower it, but moves
-    /// it the same way toward the box's [`visible_head`] when that is
-    /// larger. Once an assumed count is held, a box within
-    /// [`RELEASE_MARGIN`] of the bottom is not measured.
-    ///
     /// The assumed count ([`Self::assumed_heads`]): the first box with an
-    /// [`assumed_visible_heads`] seeds it and later ones move it the same
-    /// way; no other box touches it, and it never touches the head.
+    /// [`assumed_visible_heads`] seeds it and later ones move it by
+    /// `1 - 2^(-dt / half_life)` of the difference; no other box touches it,
+    /// and it never touches the head.
+    ///
+    /// The cut state ([`Self::assumed_heads_in_force`]): with a count
+    /// stored, a box that reaches the bottom edge enters it; a box that
+    /// ends above the release band leaves it; any other box keeps it.
+    ///
+    /// The head: the first box measured on the canon ([`measured_head`],
+    /// given the count in force) seeds the memory; later ones move it the
+    /// same way. Any other box cannot seed it nor lower it, but moves it the
+    /// same way toward the box's [`visible_head`] when that is larger. In
+    /// the cut state a box within [`RELEASE_MARGIN`] of the bottom is
+    /// therefore not measured; out of it, an untruncated one is.
     ///
     /// A `dt` that is not positive moves nothing, and a `half_life` that is
     /// not positive follows each box at once.
@@ -452,8 +505,13 @@ impl HeadMemory {
                 Some(m) => m + alpha * (assumed - m),
             });
         }
+        if reaches_bottom(bbox, EDGE_MARGIN) {
+            self.cut_by_bottom = self.assumed_heads.is_some();
+        } else if ends_above_release_band(bbox) {
+            self.cut_by_bottom = false;
+        }
         match (
-            measured_head(bbox, source_aspect, self.assumed_heads),
+            measured_head(bbox, source_aspect, self.assumed_heads_in_force()),
             self.head,
         ) {
             (Some(measured), None) => self.head = Some(measured),
