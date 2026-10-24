@@ -10,7 +10,7 @@ answers every query on every source.
 | Item | What it does |
 |---|---|
 | `protocol` | Pure codec for protocol v1: frames, `hello` / `detect` / `result` / `error`, strict validation |
-| `prep` | Pure frame preparation: RGBA to RGB8, box-filtered so the longer side is at most `send_side` (default 1008 px); never enlarges |
+| `prep` | Pure frame preparation: RGBA to RGB8, box-filtered so the longer side is at most `send_side` (default 1008 px), but never so far that the shorter side drops below the hello's `input_side` (a 1280x720 frame goes out at 1195x672 for SAM 3.1's 672); never enlarges |
 | `SamHost` | Single owner of one sidecar process: spawn, pipe threads, deadlines, stale-reply dropping, expired-frame skipping, kill/reap, restart backoff |
 | `SidecarService` | Puts a `SamHost` on its own thread so every source's detector shares one process; skips a frame that waited too long |
 | `SidecarClient` | Cheap, non-owning handle to the service; makes detectors |
@@ -49,7 +49,7 @@ nested objects.
 
 // host -> child (payload: width*height*3 bytes, RGB8, row-major, top row first)
 {"type":"detect","id":7,"source":"pulpit-cam","seq":41,"pts_ns":1366666666,
- "width":1008,"height":567,"format":"rgb8",
+ "width":1195,"height":672,"format":"rgb8",
  "phrases":[{"text":"a person speaking","threshold":0.3}],"want_masks":false}
 
 // child -> host (payload empty; masks are reserved for a later version)
@@ -194,7 +194,7 @@ with the reason.
 | `startup_timeout_s` | `HostConfig::startup_timeout` | 60 | Wait for `hello` |
 | `request_timeout_s` | `DetectorConfig::request_timeout` | 5 | Must be below `discovery.timeout_s` (checked) |
 | `score_threshold` | `DetectorConfig::threshold` | 0.5 | Every query; the subject store's floor follows it when lower than 0.35 |
-| `send_side` | `DetectorConfig::send_side` | 1008 | Longest side of the image sent, `1..=4096` |
+| `send_side` | `DetectorConfig::send_side` | 1008 | Longest side of the image sent, `1..=4096`, unless the shorter side would drop below the hello's `input_side` |
 | `discovery.max_result_age_s` | `DetectorConfig::max_age` | 2 | A frame older than this when the sidecar is free is skipped (`expired`) |
 | — | `DetectorConfig::lexicon` | | Always the studio's prompt lexicon (`StudioConfig::prompt_lexicon()`), so person words added in the config also mark sidecar boxes as whole people |
 

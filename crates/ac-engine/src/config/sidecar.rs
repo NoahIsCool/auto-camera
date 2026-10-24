@@ -88,7 +88,8 @@ pub struct SidecarSettings {
     /// "../sidecars/sam3-mlx/server.py", "--model", "../models/sam31-mlx"]`.
     pub command: Vec<String>,
     /// Longest side of the image sent, in pixels (`1..=4096`); frames are
-    /// shrunk to it, never enlarged.
+    /// shrunk to it, but not so far that their shorter side drops below
+    /// the model's input side, and never enlarged (`ac_sidecar::prep`).
     #[serde(default = "default_send_side")]
     pub send_side: u32,
     /// Longest wait for the sidecar's hello after it is started, in seconds.

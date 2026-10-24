@@ -2,7 +2,7 @@
 //! misbehaves on demand.
 //!
 //! ```text
-//! ac-fake-sidecar <mode> [--delay-ms N] [--hello-delay-ms N] [--marker PATH] [--grandchild]
+//! ac-fake-sidecar <mode> [--delay-ms N] [--hello-delay-ms N] [--input-side N] [--marker PATH] [--grandchild]
 //! ```
 //!
 //! | Mode | Behaviour |
@@ -21,7 +21,8 @@
 //! | `fatal-error` | hello, then a fatal `error` (id null) on the first request, and exits with status 4 |
 //!
 //! `--hello-delay-ms` waits that long before saying hello, like a model
-//! loading. `--grandchild` first starts `sleep 3600` sharing the fake's
+//! loading. `--input-side` is the input side the hello reports (default
+//! 672, SAM 3.1's). `--grandchild` first starts `sleep 3600` sharing the fake's
 //! pipes and logs its pid, so tests can check that killing the sidecar's
 //! process group reaches helpers too.
 //!
@@ -105,6 +106,8 @@ struct Args {
     delay: Duration,
     /// Wait before hello.
     hello_delay: Duration,
+    /// The input side the hello reports.
+    input_side: u32,
     /// Marker file of `crash-once`.
     marker: Option<PathBuf>,
     /// Start a `sleep` helper first.
@@ -119,6 +122,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         mode,
         delay: Duration::from_millis(1500),
         hello_delay: Duration::ZERO,
+        input_side: 672,
         marker: None,
         grandchild: false,
     };
@@ -135,6 +139,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                     .parse()
                     .map_err(|_| format!("bad --hello-delay-ms {v:?}"))?;
                 parsed.hello_delay = Duration::from_millis(ms);
+            }
+            "--input-side" => {
+                let v = args.next().ok_or("--input-side needs a value")?;
+                parsed.input_side = match v.parse() {
+                    Ok(side) if side > 0 => side,
+                    _ => return Err(format!("bad --input-side {v:?}")),
+                };
             }
             "--marker" => parsed.marker = Some(args.next().ok_or("--marker needs a path")?.into()),
             "--grandchild" => parsed.grandchild = true,
@@ -232,7 +243,7 @@ fn run(args: Args) -> io::Result<ExitCode> {
             protocol: PROTOCOL_VERSION,
             model: "fake-sam".into(),
             weights_sha256: None,
-            input_side: 672,
+            input_side: args.input_side,
             capabilities: Capabilities::default(),
         }),
     )?;

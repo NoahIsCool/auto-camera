@@ -17,7 +17,13 @@
 //!    a phrase is sent with the lowest threshold of its queries. Queries
 //!    with an empty phrase are not sent.
 //! 2. **Prepare.** The frame becomes RGB8 with its longer side at most
-//!    [`DetectorConfig::send_side`] ([`crate::prep`]).
+//!    [`DetectorConfig::send_side`], but its shorter side not below the
+//!    model's input side, so the model's own resize never stretches an
+//!    axis the host shrank ([`crate::prep`]). The input side comes from
+//!    the hello the detector was made after, and then from each answer
+//!    (the host reports its process's hello with it), so a detector made
+//!    while the first start failed learns it from its first answer and
+//!    until then limits by the send side only.
 //! 3. **Send and wait,** under [`DetectorConfig::request_timeout`]. The
 //!    request carries the frame's [`Freshness`]: taken when `detect` was
 //!    called, worth a pass for [`DetectorConfig::max_age`]. A request that
@@ -78,8 +84,9 @@ pub struct DetectorConfig {
     pub threshold: f32,
     /// Per-query scores that replace `threshold`, each in `0..=1`.
     pub thresholds: HashMap<QueryId, f32>,
-    /// Longest side of the image sent, in pixels (`1..=4096`); frames are
-    /// never enlarged.
+    /// Longest side of the image sent, in pixels (`1..=4096`), unless that
+    /// would take the shorter side below the model's input side; frames
+    /// are never enlarged (see [`crate::prep`]).
     pub send_side: u32,
     /// Deadline of one pass, from when it reaches the sidecar.
     pub request_timeout: Duration,
@@ -267,6 +274,9 @@ impl From<HostError> for VisionError {
 pub struct SidecarDetector {
     /// The model's name, from its hello.
     name: String,
+    /// The model's input side, from the newest hello seen (see the module
+    /// docs); `None` before one.
+    input_side: Option<u32>,
     /// The service.
     client: SidecarClient,
     /// How detections are asked for and filtered.
@@ -274,11 +284,18 @@ pub struct SidecarDetector {
 }
 
 impl SidecarDetector {
-    /// A detector named `name` on `client`; made by
-    /// [`SidecarClient::detector`] once the model has loaded.
-    pub(crate) fn new(name: String, client: SidecarClient, config: DetectorConfig) -> Self {
+    /// A detector named `name` on `client`, for a model whose input side
+    /// is `input_side`; made by [`SidecarClient::detector`] once the model
+    /// has loaded (or its first start failed: then both are unknown).
+    pub(crate) fn new(
+        name: String,
+        input_side: Option<u32>,
+        client: SidecarClient,
+        config: DetectorConfig,
+    ) -> Self {
         Self {
             name,
+            input_side,
             client,
             config,
         }
@@ -305,7 +322,7 @@ impl Detector for SidecarDetector {
         if plan.is_empty() {
             return Ok(Vec::new());
         }
-        let image = prepare(frame, self.config.send_side).ok_or_else(|| {
+        let image = prepare(frame, self.config.send_side, self.input_side).ok_or_else(|| {
             VisionError::InvalidConfig(format!(
                 "frame data of {} bytes does not match {}x{} RGBA",
                 frame.data.len(),
@@ -322,6 +339,7 @@ impl Detector for SidecarDetector {
             freshness,
         };
         let reply = self.client.detect(request, self.config.request_timeout)?;
+        self.input_side = reply.input_side.or(self.input_side);
         Ok(plan.detections(&reply.detections, queries))
     }
 }

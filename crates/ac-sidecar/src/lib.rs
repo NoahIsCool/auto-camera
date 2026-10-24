@@ -19,7 +19,8 @@
 //!   binary payload over the child's stdin and stdout; `hello`, `detect`,
 //!   `result`, `error`; strict validation.
 //! * [`prep`] (pure): a frame's RGBA to RGB8, box-filtered down to a
-//!   configurable longest side (1008 px by default).
+//!   configurable longest side (1008 px by default), but never with its
+//!   shorter side below the model's input side from its hello.
 //! * [`host`]: [`SamHost`], the single owner of one child process, its pipe
 //!   threads, its deadlines (60 s for the hello, one per request), its
 //!   stale-reply filter and its restart backoff.

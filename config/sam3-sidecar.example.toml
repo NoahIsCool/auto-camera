@@ -71,7 +71,10 @@ command = [
 # floor follows a threshold below its own 0.35, so these boxes are kept.
 score_threshold = 0.3
 # Longest side of the frame sent, in pixels; frames are shrunk to it, never
-# enlarged, and the sidecar squashes them to --side.
+# enlarged, and the sidecar squashes them to --side. The shrink stops early
+# when the shorter side reaches --side (as the hello reports it), so the
+# squash never stretches an axis: a 1280x720 or 4K frame goes out at
+# 1195x672, a 4:3 one at 1008x756.
 send_side = 1008
 # The sidecar says hello once the model is loaded (4.6 s measured on Noah's
 # M3 Max) and one warm-up pass ran; the first run also compiles kernels.

@@ -107,8 +107,9 @@ fn the_fake_backend_answers_through_the_rust_detector() {
         PromptQuery::new("pastor", "a person speaking"),
         PromptQuery::new("drums", "a drum kit"),
     ];
-    // A full-HD frame goes out at 1008x567: the server checks that the
-    // payload is width * height * 3 bytes.
+    // A full-HD frame goes out at 1195x672 (its shorter side at the
+    // hello's input side): the server checks that the payload is width *
+    // height * 3 bytes.
     let out = detector.detect(&frame(1920, 1080, 3), &queries).unwrap();
     let got: Vec<(&str, f32, Extent)> = out
         .iter()

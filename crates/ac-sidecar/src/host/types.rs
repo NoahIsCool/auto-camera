@@ -143,6 +143,9 @@ pub struct DetectReply {
     pub latency: Duration,
     /// Time from handing the request to the writer to the answer.
     pub round_trip: Duration,
+    /// The input side of the answering process's hello, so a detector
+    /// made before any hello learns how to prepare its frames.
+    pub input_side: Option<u32>,
 }
 
 /// Why the host could not answer.

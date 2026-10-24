@@ -11,8 +11,10 @@ the venv's Python so MLX is importable::
 decoded with Pillow (from the venv). Without it only a grey frame is sent.
 The picture is sent as the Rust host sends a frame: turned upright by its
 EXIF orientation and shrunk so its longer side is at most 1008 px (the
-host's ``DEFAULT_SEND_SIDE``), so a 24 MP phone photo fits the protocol's
-64 MiB payload limit and a portrait shot is not sent sideways.
+host's ``DEFAULT_SEND_SIDE``), but never so far that its shorter side drops
+below the model's 672 px input side (the host's ``send_size``), so a 24 MP
+phone photo fits the protocol's 64 MiB payload limit, a portrait shot is
+not sent sideways, and the model's squash stretches neither axis.
 """
 
 from __future__ import annotations
@@ -40,6 +42,9 @@ TIMEOUT_S = 300.0
 #: Longest side of a picture sent, as the Rust host's ``DEFAULT_SEND_SIDE``.
 SEND_SIDE = 1008
 
+#: The model's input side the smoke test runs at (``--side``).
+INPUT_SIDE = 672
+
 try:
     import PIL  # noqa: F401
 
@@ -48,14 +53,35 @@ except ImportError:
     HAVE_PIL = False
 
 
+def send_size(width: int, height: int) -> tuple[int, int]:
+    """Return the size the Rust host's ``send_size`` gives, for the defaults here.
+
+    The longer side is limited to ``SEND_SIDE`` unless that takes the
+    shorter one below ``INPUT_SIDE``; nothing is enlarged. Integer rounding
+    as in the host.
+    """
+    longer, shorter = max(width, height), min(width, height)
+    if longer <= SEND_SIDE:
+        return width, height
+    if shorter * SEND_SIDE < INPUT_SIDE * longer:
+        if INPUT_SIDE >= shorter:
+            return width, height
+        long, short = (longer * INPUT_SIDE + shorter // 2) // shorter, INPUT_SIDE
+    else:
+        long, short = SEND_SIDE, max(1, (shorter * SEND_SIDE + longer // 2) // longer)
+    return (long, short) if width >= height else (short, long)
+
+
 def prepare_picture(path: str | Path) -> Any:
-    """Open ``path`` as the host would send it: upright, RGB, longer side <= 1008."""
+    """Open ``path`` as the host would send it: upright, RGB, at ``send_size``."""
     from PIL import Image, ImageOps
 
     with Image.open(Path(path).expanduser()) as picture:
         upright = ImageOps.exif_transpose(picture)
         rgb = upright.convert("RGB")
-    rgb.thumbnail((SEND_SIDE, SEND_SIDE))
+    size = send_size(rgb.width, rgb.height)
+    if size != rgb.size:
+        rgb = rgb.resize(size, Image.Resampling.BOX)
     return rgb
 
 
@@ -90,6 +116,18 @@ class PicturePrepTests(unittest.TestCase):
         self.assertEqual(prepared.mode, "RGB")
         request = _image_request_from(prepared)
         self.assertLess(len(request), 64 * 1024 * 1024)
+
+    def test_wide_pictures_keep_their_shorter_side_at_the_input_side(self) -> None:
+        """A 16:9 picture goes out at 1195x672, not 1008x567."""
+        from PIL import Image
+
+        self.assertEqual(send_size(1280, 720), (1195, 672))
+        self.assertEqual(send_size(3840, 2160), (1195, 672))
+        self.assertEqual(send_size(1600, 1200), (1008, 756))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "wide.png"
+            Image.new("RGB", (1920, 1080)).save(path)
+            self.assertEqual(prepare_picture(path).size, (1195, 672))
 
     def test_small_pictures_are_not_enlarged(self) -> None:
         """A picture already within 1008 px keeps its size."""

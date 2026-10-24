@@ -253,7 +253,7 @@ kind = "sidecar"
 command = ["../models/sam3/.venv/bin/python", "../sidecars/sam3-mlx/server.py",
            "--backend", "mlx", "--model", "../models/sam31-mlx", "--side", "672"]
 score_threshold = 0.3        # default 0.5; SAM's scores are not OWLv2's
-# send_side = 1008           # longest side of the frame sent, in pixels
+# send_side = 1008           # longest side sent, unless the shorter would go below --side
 # startup_timeout_s = 60     # wait for the model to load
 # request_timeout_s = 5      # one pass; must be below discovery.timeout_s
 

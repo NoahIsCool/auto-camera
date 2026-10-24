@@ -69,7 +69,7 @@ fn detections_follow_the_detector_contract() {
         eventually(PROMPT, || service
             .logs()
             .iter()
-            .any(|l| l == "fake: detect id=1 1008x567 phrases=3")),
+            .any(|l| l == "fake: detect id=1 1195x672 phrases=3")),
         "{:?}",
         service.logs()
     );
@@ -81,9 +81,22 @@ fn detections_follow_the_detector_contract() {
     assert_reaped(pid);
 }
 
+/// Asserts the fake logged a request of `size` ("WxH"), in order after
+/// the request numbered `id`.
+fn assert_sent(service: &SidecarService, id: u32, size: &str) {
+    let line = format!("fake: detect id={id} {size} phrases=1");
+    // Logged on stderr, which may lag the answers on stdout.
+    assert!(
+        eventually(PROMPT, || service.logs().contains(&line)),
+        "{line}: {:?}",
+        service.logs()
+    );
+}
+
 #[test]
 fn the_send_side_limits_the_image() {
-    let service = SidecarService::start(fake("ok", &[])).unwrap();
+    // A model with a small input side: the send side binds first.
+    let service = SidecarService::start(fake("ok", &["--input-side", "336"])).unwrap();
     let config = DetectorConfig {
         send_side: 640,
         ..DetectorConfig::default()
@@ -93,16 +106,62 @@ fn the_send_side_limits_the_image() {
     let queries = [PromptQuery::new("a", "a person")];
     detector.detect(&frame(1280, 720, 1), &queries).unwrap();
     detector.detect(&frame(320, 180, 2), &queries).unwrap();
-    // Logged on stderr, which may lag the answers on stdout.
-    for size in [" 640x360 phrases=1", " 320x180 phrases=1"] {
-        assert!(
-            eventually(PROMPT, || service.logs().iter().any(|l| l.ends_with(size))),
-            "{size}: {:?}",
-            service.logs()
-        );
+    assert_sent(&service, 1, "640x360");
+    assert_sent(&service, 2, "320x180");
+    drop(service);
+    assert_reaped(pid);
+}
+
+#[test]
+fn the_image_sent_keeps_the_input_side_the_hello_names() {
+    // The fake says its model's input side is 700: limiting the longer
+    // side to 1008 would give 1008x567, below it.
+    let service = SidecarService::start(fake("ok", &["--input-side", "700"])).unwrap();
+    let mut detector = service.detector(DetectorConfig::default()).unwrap();
+    let pid = pid_of(&service);
+    let queries = [PromptQuery::new("a", "a person")];
+    for (seq, (w, h)) in [
+        (1280, 720),
+        (1920, 1080),
+        (720, 1280),
+        (1600, 1200),
+        (640, 360),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        detector.detect(&frame(w, h, seq as u64), &queries).unwrap();
+    }
+    for (id, size) in ["1244x700", "1244x700", "700x1244", "1008x756", "640x360"]
+        .into_iter()
+        .enumerate()
+    {
+        assert_sent(&service, id as u32 + 1, size);
     }
     drop(service);
     assert_reaped(pid);
+
+    // A detector made while the first start failed knows no input side
+    // until an answer brings the restarted process's.
+    let marker = common::temp_path("fail-load-once-side");
+    let _ = std::fs::remove_file(&marker);
+    let service = SidecarService::start(backing_off(
+        "fail-load-once",
+        &["--marker", marker.to_str().unwrap(), "--input-side", "700"],
+    ))
+    .unwrap();
+    let mut detector = service.detector(DetectorConfig::default()).unwrap();
+    assert_eq!(detector.name(), UNNAMED);
+    assert!(detector.detect(&frame(8, 8, 0), &queries).is_err());
+    thread::sleep(WINDOW);
+    detector.detect(&frame(1280, 720, 1), &queries).unwrap();
+    detector.detect(&frame(1280, 720, 2), &queries).unwrap();
+    assert_sent(&service, 1, "1008x567");
+    assert_sent(&service, 2, "1244x700");
+    let pid = pid_of(&service);
+    drop(service);
+    assert_reaped(pid);
+    let _ = std::fs::remove_file(&marker);
 }
 
 #[test]

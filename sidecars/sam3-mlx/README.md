@@ -84,7 +84,8 @@ models/sam3/.venv/bin/python sidecars/sam3-mlx/server.py --model models/sam31-ml
 The real-model smoke test sends a grey 1280x720 frame, and optionally a
 picture with a person in it, through the real server. The picture is
 turned upright by its EXIF orientation and shrunk to at most 1008 px on its
-longer side, as the Rust host does, so a full-size phone photo works:
+longer side, but never with its shorter side below the 672 px input side,
+as the Rust host does, so a full-size phone photo works:
 
 ```sh
 cd ~/repos/auto-camera/sidecars/sam3-mlx

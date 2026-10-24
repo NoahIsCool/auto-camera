@@ -38,7 +38,7 @@
 //! wrong command fails here, at engine start), so the model loads while the
 //! rest of the engine starts. [`SidecarClient::detector`] waits for the
 //! first hello, so a detector made after a good start is named after its
-//! model. A first start that fails (a missed startup deadline, an exit
+//! model and knows its input side. A first start that fails (a missed startup deadline, an exit
 //! before hello, a refused restart) does not fail it: the host restarts
 //! the process under its backoff, so a cold first load or one crash during
 //! load does not turn detection off for the session. The detector is
@@ -221,8 +221,8 @@ impl SidecarClient {
     /// still yields one.
     pub fn detector(&self, config: DetectorConfig) -> Result<SidecarDetector, VisionError> {
         config.validate()?;
-        let name = match self.ready() {
-            Ok(hello) => hello.model,
+        let (name, input_side) = match self.ready() {
+            Ok(hello) => (hello.model, Some(hello.input_side)),
             Err(e @ (HostError::Config(_) | HostError::Invalid(_) | HostError::Stopped)) => {
                 return Err(e.into());
             }
@@ -230,9 +230,9 @@ impl SidecarClient {
             | Err(HostError::Timeout { .. })
             | Err(HostError::Unavailable { .. })
             | Err(HostError::Rejected(_))
-            | Err(HostError::Expired { .. }) => UNNAMED.to_owned(),
+            | Err(HostError::Expired { .. }) => (UNNAMED.to_owned(), None),
         };
-        Ok(SidecarDetector::new(name, self.clone(), config))
+        Ok(SidecarDetector::new(name, input_side, self.clone(), config))
     }
 }
 

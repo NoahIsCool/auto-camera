@@ -98,6 +98,7 @@ impl SamHost {
                         detections,
                         latency,
                         round_trip,
+                        input_side: self.hello.as_ref().map(|h| h.input_side),
                     });
                 }
                 Event::Message(Message::Error(ErrorReply {
