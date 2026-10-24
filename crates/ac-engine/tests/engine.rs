@@ -276,4 +276,22 @@ fn start_reports_unusable_setups() {
         Engine::start_with(owl, fast_time()),
         Err(EngineError::Detector { .. })
     ));
+    // A sidecar whose program or model folder is missing fails at start,
+    // with the reason, before anything is spawned.
+    for command in [
+        [
+            "/nonexistent/venv/bin/python",
+            "server.py",
+            "--backend",
+            "fake",
+        ],
+        ["sh", "-c", "--model", "/nonexistent/models/sam31-mlx"],
+    ] {
+        let mut sidecar = studio(1);
+        sidecar.detector = DetectorSettings::Sidecar(ac_engine::SidecarSettings::new(command));
+        match Engine::start_with(sidecar, fast_time()) {
+            Err(EngineError::Sidecar(m)) => assert!(m.contains("/nonexistent/"), "{m}"),
+            other => panic!("{command:?}: {other:?}"),
+        }
+    }
 }

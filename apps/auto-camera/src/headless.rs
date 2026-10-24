@@ -19,8 +19,10 @@
 //! The summary is always produced; `ok` is false and `error` says why when a
 //! phase failed. It reports how each query's prompt was read (what the
 //! detector was asked for, the shot words' sizes, the basis and any
-//! notices), so a prompt that does not mean what the operator thought shows
-//! up in a headless run too. Program changes are logged from samples taken every
+//! notices) and what the newest detector pass on each source found for it
+//! (the match count and best score, spec M2), so a prompt that does not
+//! mean what the operator thought, or that the detector does not
+//! understand, shows up in a headless run too. Program changes are logged from samples taken every
 //! [`SAMPLE`], so two changes closer together than that show as one.
 
 use std::path::{Path, PathBuf};
@@ -149,6 +151,24 @@ pub struct QuerySummary {
     pub parse: String,
     /// The parse's notices, one sentence each.
     pub notes: Vec<String>,
+    /// What the newest applied detector pass of each source found for it,
+    /// in source order; sources without such a pass are left out.
+    pub matches: Vec<MatchSummary>,
+}
+
+/// Prompt feedback in the summary: one source's newest applied pass.
+#[derive(Debug, Clone, Serialize)]
+pub struct MatchSummary {
+    /// Source id.
+    pub source: String,
+    /// Detections returned for the query.
+    pub count: usize,
+    /// Their best score, to two decimals; `null` when there were none.
+    pub best: Option<f64>,
+    /// Sequence number of the frame the pass looked at.
+    pub seq: u64,
+    /// That frame's PTS, in seconds.
+    pub pts_seconds: f64,
 }
 
 /// One shot in the summary.
@@ -474,6 +494,17 @@ fn summarize(
                         .iter()
                         .filter(|w| !w.is_error())
                         .map(ToString::to_string)
+                        .collect(),
+                    matches: q
+                        .matches
+                        .iter()
+                        .map(|m| MatchSummary {
+                            source: m.source.0.clone(),
+                            count: m.count,
+                            best: m.best.map(|b| round(f64::from(b), 2)),
+                            seq: m.seq,
+                            pts_seconds: round(m.pts.as_secs_f64(), 3),
+                        })
                         .collect(),
                 })
                 .collect()

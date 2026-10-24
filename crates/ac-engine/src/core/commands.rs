@@ -65,6 +65,7 @@ impl EngineCore {
                 self.queries.remove(pos);
                 for s in &mut self.sources {
                     s.vision.remove_query(query);
+                    s.discovery.matches.remove(query);
                 }
             }
             C::Pin {

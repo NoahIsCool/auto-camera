@@ -66,8 +66,9 @@ models/sam3/.venv/bin/python -c "import mlx.core as mx, mlx_vlm.version as v, tr
 models/sam3/.venv/bin/pip freeze | grep -i -e mlx -e transformers
 ```
 
-The host spawns (paths relative to `~/repos/auto-camera`; the host's config
-resolves them):
+The host spawns (paths relative to `~/repos/auto-camera`; a studio config
+writes them relative to itself, as `config/sam3-sidecar.example.toml` does
+with `[detector] kind = "sidecar"`):
 
 ```sh
 models/sam3/.venv/bin/python sidecars/sam3-mlx/server.py --backend mlx --model models/sam31-mlx --side 672

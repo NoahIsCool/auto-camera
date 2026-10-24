@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod sidecar;
+
 /// The smallest valid config.
 const MINIMAL: &str = r#"
 [[sources]]

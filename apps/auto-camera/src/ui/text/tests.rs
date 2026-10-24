@@ -164,7 +164,69 @@ fn query(prompt: &str, literal: bool, sizes: Option<&[ac_core::ShotSize]>) -> Qu
         prompt: prompt.into(),
         presets: ac_engine::queries::settle_presets(explicit, &parse),
         parse,
+        matches: Vec::new(),
     }
+}
+
+/// A pass on `source` that found `count` boxes, the best at `best`.
+fn found(source: &str, count: usize, best: Option<f32>) -> MatchView {
+    MatchView {
+        source: ac_core::SourceId(source.into()),
+        seq: 41,
+        pts: Duration::from_secs(75),
+        count,
+        best,
+    }
+}
+
+#[test]
+fn prompt_feedback_counts_matches_and_rounds_the_best_score() {
+    assert_eq!(
+        match_text(&found("s", 3, Some(0.7149))),
+        "3 matches · best 0.71"
+    );
+    assert_eq!(
+        match_text(&found("s", 1, Some(0.42))),
+        "1 match · best 0.42"
+    );
+    assert_eq!(match_text(&found("s", 0, None)), NO_MATCHES);
+    // A count without a score cannot happen; it reads as nothing found.
+    assert_eq!(match_text(&found("s", 2, None)), NO_MATCHES);
+}
+
+#[test]
+fn prompt_feedback_lines_name_sources_only_when_there_are_several() {
+    let mut snap = snapshot();
+    let mut q = snap.queries[0].clone();
+    assert!(q.matches.is_empty());
+    assert!(match_lines(&snap, &q).is_empty(), "discovery is off");
+    snap.sources[0].discovery_enabled = true;
+    assert_eq!(
+        match_lines(&snap, &q),
+        [(NO_PASS_YET.to_string(), Tone::Weak, String::new())]
+    );
+    q.matches = vec![found("stage", 2, Some(0.9))];
+    let lines = match_lines(&snap, &q);
+    assert_eq!(lines[0].0, "2 matches · best 0.90");
+    assert_eq!(lines[0].1, Tone::Plain);
+    assert_eq!(
+        lines[0].2,
+        "newest detector pass on stage: frame 41 at 1:15"
+    );
+    let mut second = snap.sources[0].clone();
+    second.id = ac_core::SourceId("pulpit".into());
+    second.name = "Pulpit".into();
+    snap.sources.push(second);
+    q.matches.push(found("pulpit", 0, None));
+    let lines = match_lines(&snap, &q);
+    let texts: Vec<(&str, Tone)> = lines.iter().map(|l| (l.0.as_str(), l.1)).collect();
+    assert_eq!(
+        texts,
+        [
+            ("stage: 2 matches · best 0.90", Tone::Plain),
+            ("Pulpit: no matches", Tone::Warning),
+        ]
+    );
 }
 
 #[test]

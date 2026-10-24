@@ -41,6 +41,7 @@ dependencies = [
  "ac-framing",
  "ac-media",
  "ac-output",
+ "ac-sidecar",
  "ac-sources",
  "ac-subjects",
  "ac-switcher",

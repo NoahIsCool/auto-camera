@@ -79,6 +79,16 @@ fn a_run_without_a_director_puts_the_wide_on_program() {
     assert_eq!(s.threads_joined, 1, "the discovery worker");
     assert_eq!(s.director.mode, DirectorMode::Off);
     assert!((s.timing.budget_ms - 33.33).abs() < 0.01);
+    // Prompt feedback: the ground truth finds both subjects at 0.9.
+    let m = &s.queries[0].matches;
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert_eq!(
+        (m[0].source.as_str(), m[0].count, m[0].best),
+        ("stage", 2, Some(0.9))
+    );
+    let json = serde_json::to_value(&s.queries[0]).unwrap();
+    assert_eq!(json["matches"][0]["count"], 2);
+    assert_eq!(json["matches"][0]["best"], 0.9);
 }
 
 #[test]
@@ -276,4 +286,47 @@ fn the_sample_configs_load() {
         panic!("a file source");
     };
     assert!(path.is_absolute() && path.ends_with("media/rehearsal.mp4"));
+    let sam = StudioConfig::load(&root.join("sam3-sidecar.example.toml")).unwrap();
+    let DetectorSettings::Sidecar(sidecar) = &sam.detector else {
+        panic!("a sidecar detector: {:?}", sam.detector);
+    };
+    // The venv, the server and the weights resolve against the config;
+    // flags and numbers stay as written.
+    let command: Vec<&str> = sidecar.command.iter().map(String::as_str).collect();
+    let resolved =
+        |i: usize, tail: &str| Path::new(command[i]).is_absolute() && command[i].ends_with(tail);
+    assert!(resolved(0, "models/sam3/.venv/bin/python"), "{command:?}");
+    assert!(resolved(1, "sidecars/sam3-mlx/server.py"), "{command:?}");
+    assert!(resolved(5, "models/sam31-mlx"), "{command:?}");
+    assert_eq!(
+        [command[2], command[3], command[6], command[7]],
+        ["--backend", "mlx", "--side", "672"]
+    );
+    let server = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sidecars/sam3-mlx/server.py");
+    assert_eq!(
+        Path::new(command[1]).canonicalize().unwrap(),
+        server.canonicalize().unwrap(),
+        "the example points at the real server"
+    );
+    assert_eq!(sidecar.score_threshold, 0.3);
+    assert_eq!(
+        sam.store_config().unwrap().min_score,
+        0.3,
+        "the floor follows"
+    );
+    assert_eq!(sam.discovery.max_result_age_s, 3.0);
+    let phrases: Vec<String> = sam
+        .build_queries()
+        .unwrap()
+        .iter()
+        .map(|q| q.detector_phrase().to_owned())
+        .collect();
+    assert_eq!(
+        phrases,
+        [
+            "a person speaking",
+            "a person playing guitar",
+            "a person playing drums"
+        ]
+    );
 }

@@ -16,6 +16,7 @@ use ac_switcher::{Transition, TransitionKind};
 use serde::{Deserialize, Serialize};
 
 use super::ConfigError;
+use super::sidecar::SidecarSettings;
 
 /// Which H.264 encoder to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -178,14 +179,20 @@ pub enum DetectorSettings {
         #[serde(default)]
         person_threshold: Option<f32>,
     },
+    /// A detector in its own process (SAM 3.1 on MLX first), started once
+    /// and shared by every source; see [`SidecarSettings`].
+    Sidecar(SidecarSettings),
 }
 
 impl DetectorSettings {
-    /// The lowest score this detector's detections can carry, when it is
-    /// below the subject store's default: OWL matching people first scores
-    /// everyone and described-person prompts on the person scale (default
-    /// 0.15; see `ac_vision::matching`), and a store floor above that would
-    /// silently drop them.
+    /// The lowest score this detector's detections can carry, for the
+    /// subject store's floor to follow when it is below the store's
+    /// default, which would otherwise silently drop them:
+    ///
+    /// * OWL matching people first scores everyone and described-person
+    ///   prompts on the person scale (default 0.15; see
+    ///   `ac_vision::matching`);
+    /// * the sidecar returns boxes down to its `score_threshold`.
     pub fn score_floor(&self) -> Option<f32> {
         match self {
             DetectorSettings::Owl {
@@ -196,6 +203,7 @@ impl DetectorSettings {
                 person_threshold
                     .unwrap_or(ac_vision::matching::MatchParams::default().person_threshold),
             ),
+            DetectorSettings::Sidecar(s) => Some(s.score_threshold),
             _ => None,
         }
     }
@@ -228,6 +236,7 @@ impl DetectorSettings {
                 }
                 Ok(())
             }
+            DetectorSettings::Sidecar(s) => s.validate(),
         }
     }
 }

@@ -28,10 +28,17 @@
 //! detector phrase, and `literal = true` sends the text as typed. Explicit
 //! `presets` always win over shot words; see [`crate::queries`].
 //!
+//! The `detector` table picks one detector `kind` for the whole studio:
+//! `"none"`, `"synthetic"` (ground truth of synthetic sources), `"owl"`
+//! (OWLv2 through ONNX Runtime, one instance per source) or `"sidecar"` (a
+//! detector in its own process, SAM 3.1 on MLX first, started once and
+//! shared by every source; [`SidecarSettings`]). Every query goes to it.
+//!
 //! The `tracker` and `framing` tables are partial: keys given override the
 //! crate defaults and unknown keys are rejected. Relative file paths
-//! (`sources[].path` and detector model paths) are resolved against the
-//! directory of the config file.
+//! (`sources[].path`, detector model paths and the path-like elements of a
+//! sidecar's `command`) are resolved against the directory of the config
+//! file.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -48,11 +55,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 mod settings;
+mod sidecar;
 
 pub use settings::{
     DetectorSettings, DirectorSettings, DiscoverySettings, EncoderSetting, MonitorSettings,
     OutputSettings, SubjectSettings, SwitcherSettings,
 };
+pub use sidecar::SidecarSettings;
 
 /// Errors from loading or validating a [`StudioConfig`].
 #[derive(Debug, Error)]
@@ -335,7 +344,8 @@ impl StudioConfig {
         }
     }
 
-    /// Makes relative source and model paths relative to `dir`.
+    /// Makes relative source, model and sidecar command paths relative to
+    /// `dir`.
     pub fn resolve_paths(&mut self, dir: &Path) {
         let fix = |p: &mut PathBuf| {
             if p.is_relative() {
@@ -347,18 +357,21 @@ impl StudioConfig {
                 fix(path);
             }
         }
-        if let DetectorSettings::Owl {
-            model,
-            text_encoder,
-            tokenizer,
-            ..
-        } = &mut self.detector
-        {
-            fix(model);
-            fix(tokenizer);
-            if let Some(t) = text_encoder {
-                fix(t);
+        match &mut self.detector {
+            DetectorSettings::Owl {
+                model,
+                text_encoder,
+                tokenizer,
+                ..
+            } => {
+                fix(model);
+                fix(tokenizer);
+                if let Some(t) = text_encoder {
+                    fix(t);
+                }
             }
+            DetectorSettings::Sidecar(sidecar) => sidecar.resolve_paths(dir),
+            DetectorSettings::None | DetectorSettings::Synthetic { .. } => {}
         }
     }
 
@@ -394,6 +407,15 @@ impl StudioConfig {
         self.build_queries()?;
         self.detector.validate().map_err(ConfigError::Invalid)?;
         self.discovery.validate().map_err(ConfigError::Invalid)?;
+        if let DetectorSettings::Sidecar(sidecar) = &self.detector
+            && sidecar.request_timeout_s >= self.discovery.timeout_s
+        {
+            return bad(format!(
+                "detector.request_timeout_s ({} s) must be below discovery.timeout_s ({} s), \
+                 after which the engine abandons a request",
+                sidecar.request_timeout_s, self.discovery.timeout_s
+            ));
+        }
         self.tracker
             .validate()
             .map_err(|e| ConfigError::Invalid(format!("tracker: {e}")))?;

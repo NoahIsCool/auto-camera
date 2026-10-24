@@ -21,6 +21,7 @@ fn stale_discovery_results_are_dropped() {
         rig.pending.push(DiscoveryResult {
             source: 0,
             frame,
+            queries: vec![QueryId("person".into())],
             outcome: Ok(dets.clone()),
             latency: Duration::ZERO,
         });
@@ -28,6 +29,7 @@ fn stale_discovery_results_are_dropped() {
     rig.pending.push(DiscoveryResult {
         source: 0,
         frame: old,
+        queries: vec![QueryId("person".into())],
         outcome: Err("model crashed".into()),
         latency: Duration::ZERO,
     });

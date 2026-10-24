@@ -12,6 +12,8 @@
 //!     │                        │  snapshot ─► Latest<Arc<EngineSnapshot>> ─► UI, headless
 //!     │                        ▼
 //!     └──────────────► discovery worker per source (detector at ~1 Hz, newest frame only)
+//!                              └─ kind = "sidecar": every worker's detector is a client of
+//!                                 one shared detector process (ac-sidecar, ADR 0004)
 //! ```
 //!
 //! * [`EngineCore`] is the deterministic heart: given frames, discovery
@@ -47,6 +49,7 @@ pub mod catalog;
 pub mod command;
 pub mod config;
 pub mod core;
+pub mod detectors;
 pub mod discovery;
 pub mod mailbox;
 pub mod output;
@@ -60,12 +63,12 @@ pub use catalog::{ShotStatus, subject_shot_id, wide_shot_id};
 pub use command::{CommandError, CommandReply, EngineCommand};
 pub use config::{
     ConfigError, DetectorSettings, EncoderSetting, MonitorSettings, OutputSettings, PresetSpec,
-    QuerySettings, SourceEntry, StudioConfig, preset_for,
+    QuerySettings, SidecarSettings, SourceEntry, StudioConfig, preset_for,
 };
 pub use core::{EngineCore, SourceFeed, TickOutput};
 pub use queries::{build_query, default_presets, read_prompt, shot_presets};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};
 pub use snapshot::{
-    DirectorView, EngineSnapshot, OutputState, OutputView, QueryView, ShotView, SourceView,
-    SubjectView, SwitcherView, Tally, TimingView,
+    DirectorView, EngineSnapshot, MatchView, OutputState, OutputView, QueryView, ShotView,
+    SourceView, SubjectView, SwitcherView, Tally, TimingView,
 };

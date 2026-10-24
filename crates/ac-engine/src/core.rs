@@ -13,7 +13,11 @@
 //! 1. **Protection.** The subjects of the program and preview shots are
 //!    pushed to their stores, so on-air subjects are never retired.
 //! 2. **Discovery results** are applied unless stale
-//!    ([`crate::discovery::staleness`]).
+//!    ([`crate::discovery::staleness`]). Each applied result also becomes
+//!    the prompt feedback of every live query it looked for on that source
+//!    (spec M2): how many detections it returned and the best score
+//!    ([`crate::snapshot::MatchView`]), tagged with the frame's sequence
+//!    number and PTS. Stale and failed results change no feedback.
 //! 3. **Frames.** Each source's newest frame, if new, advances its tracker
 //!    and store (media time = the frame's PTS).
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
@@ -45,7 +49,7 @@ use crate::catalog::Catalog;
 use crate::config::{DiscoverySettings, MonitorSettings, StudioConfig};
 use crate::discovery::{DiscoveryRequest, DiscoveryResult, staleness};
 use crate::schedule::RateMeter;
-use crate::snapshot::DiscoveryStats;
+use crate::snapshot::{DiscoveryStats, MatchView};
 use crate::vision::SourceVision;
 
 mod commands;
@@ -90,6 +94,9 @@ struct DiscoveryState {
     last_requested: Option<u64>,
     /// Sequence number of the newest frame whose results were applied.
     last_applied: Option<u64>,
+    /// Prompt feedback: per live query, what the newest applied result
+    /// that looked for it found.
+    matches: HashMap<QueryId, MatchView>,
     /// Counters.
     stats: DiscoveryStats,
 }
@@ -381,6 +388,20 @@ impl EngineCore {
         }
         d.last_applied = Some(r.frame.seq);
         d.stats.applied += 1;
+        for id in r.queries.iter().filter(|id| live.contains(id)) {
+            let scores = detections.iter().filter(|det| &det.query == id);
+            let (count, best) = scores.fold((0, None), |(n, best): (usize, Option<f32>), det| {
+                (n + 1, Some(best.map_or(det.score, |b| b.max(det.score))))
+            });
+            let feedback = MatchView {
+                source: s.id.clone(),
+                seq: r.frame.seq,
+                pts: r.frame.pts,
+                count,
+                best,
+            };
+            d.matches.insert(id.clone(), feedback);
+        }
         s.vision
             .on_detections(&r.frame, s.frame.as_ref(), &detections, &live);
     }

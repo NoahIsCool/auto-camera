@@ -126,7 +126,11 @@ discovery thread ──detect──▶ SidecarDetector ──job──▶ ac-sam
   processes it started too. After a clean exit the group is signalled as
   well, so no helper outlives the host.
 
-## Using it (for the engine integration)
+## In the engine
+
+`ac-engine` builds this from `[detector] kind = "sidecar"`
+(`crates/ac-engine/src/config/sidecar.rs`, `crates/ac-engine/src/detectors.rs`;
+example: `config/sam3-sidecar.example.toml`):
 
 ```rust
 use ac_sidecar::{DetectorConfig, HostConfig, SidecarService};
@@ -141,30 +145,38 @@ let loader: DetectorLoader = Box::new(move || {
     let detector = client.detector(DetectorConfig::default()).map_err(|e| e.to_string())?;
     Ok(Box::new(detector) as Box<dyn Detector>)
 });
-// At shutdown, after the discovery workers stopped: closes stdin, 2 s grace, kill, reap.
+// At shutdown, before joining the discovery workers: interrupts a pass or a
+// load in progress, closes stdin, 2 s grace, kill, reap.
 drop(service);
 ```
 
-The service, not the detectors, owns the process. Keep the
-`SidecarService` in the engine and drop it after the workers. Detectors that
-outlive it, and loaders still waiting for `hello`, get `Unavailable`.
+The service, not the detectors, owns the process, and the engine thread
+owns the service. The engine drops it *before* it joins the discovery
+workers, so a worker blocked in a pass or waiting for `hello` gets
+`Unavailable` at once and quitting never waits out a request deadline.
+Detectors that outlive the service, and loaders still waiting for `hello`,
+get `Unavailable`.
 
-Settings an integrator exposes:
+Before spawning, the engine checks that the program exists (a path, or a
+name found on `PATH`) and that every path-like element of the command
+exists, so a wrong venv or model folder stops the studio from starting
+with the reason.
 
-| Setting | Type | Default | Notes |
+| Config key (`[detector]`) | Here | Default | Notes |
 |---|---|---|---|
-| `command` | `[String]` | — (required) | Program and arguments; resolve relative paths against the config file |
-| `current_dir` | path, optional | host's | Working directory of the child |
-| `startup_timeout_s` | seconds | 60 | Wait for `hello` |
-| `request_timeout_s` | seconds | 5 | Keep it below `discovery.timeout_s`; with N sources sharing, a request may also queue behind N-1 others |
-| `threshold` | `0..=1` | 0.5 | Default score; the example config uses 0.3 for the speaker |
-| per-query `threshold` | `0..=1` | — | `DetectorConfig::thresholds`, keyed by `QueryId` |
-| `send_side` | px, `1..=4096` | 1008 | Longest side of the image sent |
-| `exit_grace_s`, `restart_backoff_s`, `max_restart_backoff_s`, `log_lines` | | 2, 1, 30, 200 | Rarely changed |
+| `command` | `HostConfig::command` | — (required) | An argv list; elements with a `/` that do not start with `-` or `~` are paths, resolved against the config file |
+| `startup_timeout_s` | `HostConfig::startup_timeout` | 60 | Wait for `hello` |
+| `request_timeout_s` | `DetectorConfig::request_timeout` | 5 | Must be below `discovery.timeout_s` (checked); with N sources sharing, a request may also queue behind N-1 others |
+| `score_threshold` | `DetectorConfig::threshold` | 0.5 | Every query; the subject store's floor follows it when lower than 0.35 |
+| `send_side` | `DetectorConfig::send_side` | 1008 | Longest side of the image sent, `1..=4096` |
+| — | `DetectorConfig::lexicon` | | Always the studio's prompt lexicon (`StudioConfig::prompt_lexicon()`), so person words added in the config also mark sidecar boxes as whole people |
 
-`DetectorConfig::lexicon` should be the studio's prompt lexicon
-(`StudioConfig::prompt_lexicon()`), so person words added in the config also
-mark sidecar boxes as whole people.
+Not exposed in the config yet: `DetectorConfig::thresholds` (per-query
+thresholds; the studio config has no per-query detector settings to hang
+them on before the per-query model picker), `HostConfig::current_dir` (the
+child runs in the app's directory; `server.py` finds its package by its own
+path), and the rarely changed `exit_grace` (2 s), `restart_backoff` (1 s),
+`max_restart_backoff` (30 s) and `log_lines` (200).
 
 ## Status
 
@@ -181,7 +193,9 @@ every job:
 `logs()` returns the recent stderr lines, with the host's own `[host]` notes
 on starts, `hello`s and exits. Phase 2's exit criterion of "0 sidecar
 restarts" in a 30-minute run reads as `failures == 0` (equivalently
-`spawns == 1`).
+`spawns == 1`). The engine does not publish this status yet: in the window
+and the headless summary, a restart shows only as a discovery error or
+timeout on the source whose request failed.
 
 ## Tests
 
@@ -189,9 +203,14 @@ restarts" in a 30-minute run reads as `failures == 0` (equivalently
 cargo test -p ac-sidecar
 ```
 
-No test needs a GPU, a camera, the network or Python. The integration tests
-drive the host, the service and the detector through every mode of
-`ac-fake-sidecar`: `ok`, `slow`, `hang`, `crash-after-hello`,
+No test needs a GPU, a camera or the network. `tests/python.rs` drives the
+real `sidecars/sam3-mlx/server.py` on its fake backend through the service,
+the detector and the host, so the Rust and Python sides of protocol v1 are
+checked against each other (hello, boxes, thresholds at the boundary,
+error replies, fatal errors at startup, clean exit on end of input); it
+skips itself when `python3` 3.10 or newer is not on `PATH`. The other
+integration tests need no Python; they drive the host, the service and the
+detector through every mode of `ac-fake-sidecar`: `ok`, `slow`, `hang`, `crash-after-hello`,
 `crash-before-hello`, `crash-once`, `garbage`, `wrong-seq`, `never-ready`,
 `error-reply`, `fatal-error`, and `--grandchild` for helper processes (see
 `src/bin/ac-fake-sidecar.rs`).

@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use ac_core::{ParsedPrompt, PromptWarning, ShotId};
 use ac_engine::{
-    EngineSnapshot, OutputState, OutputView, QueryView, ShotStatus, ShotView, SourceView,
-    TimingView,
+    EngineSnapshot, MatchView, OutputState, OutputView, QueryView, ShotStatus, ShotView,
+    SourceView, TimingView,
 };
 use ac_output::EncoderStats;
 
@@ -145,6 +145,73 @@ pub fn query_hover(q: &QueryView) -> String {
     }
     lines.extend(parse_notes(&q.parse));
     lines.join("\n")
+}
+
+/// Prompt feedback for a pass that found nothing.
+pub const NO_MATCHES: &str = "no matches";
+
+/// Prompt feedback for a query no applied pass has looked for yet.
+pub const NO_PASS_YET: &str = "no detector pass yet";
+
+/// How a prompt feedback line is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Matches were found.
+    Plain,
+    /// Nothing was found: the prompt may need other words (amber).
+    Warning,
+    /// No pass has looked for the query yet.
+    Weak,
+}
+
+/// What one pass found for a query (spec M2): "3 matches · best 0.71",
+/// "1 match · best 0.42", or [`NO_MATCHES`].
+pub fn match_text(m: &MatchView) -> String {
+    match (m.count, m.best) {
+        (0, _) | (_, None) => NO_MATCHES.into(),
+        (1, Some(best)) => format!("1 match · best {best:.2}"),
+        (n, Some(best)) => format!("{n} matches · best {best:.2}"),
+    }
+}
+
+/// A query row's prompt feedback: one line per source whose newest pass
+/// looked for it, named after the source when the studio has several, with
+/// how to draw it and its hover text (the frame the pass looked at). When
+/// discovery runs but no pass has looked for the query yet, a single
+/// [`NO_PASS_YET`] line; when discovery is off everywhere, nothing.
+pub fn match_lines(snap: &EngineSnapshot, q: &QueryView) -> Vec<(String, Tone, String)> {
+    if q.matches.is_empty() {
+        let discovering = snap.sources.iter().any(|s| s.discovery_enabled);
+        return if discovering {
+            vec![(NO_PASS_YET.into(), Tone::Weak, String::new())]
+        } else {
+            Vec::new()
+        };
+    }
+    let several = snap.sources.len() > 1;
+    q.matches
+        .iter()
+        .map(|m| {
+            let name = snap
+                .source(&m.source)
+                .map_or(m.source.0.as_str(), |s| &s.name);
+            let mut text = match_text(m);
+            if several {
+                text = format!("{name}: {text}");
+            }
+            let tone = if m.count == 0 {
+                Tone::Warning
+            } else {
+                Tone::Plain
+            };
+            let hover = format!(
+                "newest detector pass on {name}: frame {} at {}",
+                m.seq,
+                clock(m.pts)
+            );
+            (text, tone, hover)
+        })
+        .collect()
 }
 
 /// One source's health for the status bar.

@@ -1,0 +1,118 @@
+# A studio whose detector is SAM 3.1, run in its own process: the sidecar
+# (docs/adr/0004-out-of-process-model-hosts.md). One file source, and every
+# query goes to SAM.
+#
+# On an Apple Silicon Mac, from the repository root (no `onnx` feature is
+# needed):
+#
+#   cargo run -p auto-camera -- --config config/sam3-sidecar.example.toml
+#
+# Copy this file, then point `path` at a video and `command` at the venv and
+# weights described in sidecars/sam3-mlx/README.md. The paths below are
+# placeholders laid out as on Noah's Mac: the venv in models/sam3/.venv and
+# the MLX weights in models/sam31-mlx (a link to the old prototype's folder),
+# both under the repository root. Relative paths are resolved against this
+# file's directory.
+#
+# This is Phase 2 of the model-picker design: one detector for the whole
+# studio. SAM finds the right person for role phrases that OWLv2 misses
+# ("a person speaking": 10 of 20 labelled frames at a 0.5 threshold, 14 of
+# 20 at 0.3, against OWLv2's 1 of 20; measured on Noah's footage), but every
+# prompt gets SAM's false hits too. It is a studio for trying prompts, not a
+# show setup.
+
+[[sources]]
+id = "cam-1"
+name = "Rehearsal"
+kind = "file"
+path = "../media/rehearsal.mp4"
+loop_playback = true
+# Decode at most 1280 pixels wide; the tracker and compositor work on this.
+max_width = 1280
+audio = true
+
+# Each query's row in the window says what the newest SAM pass found for it,
+# "3 matches · best 0.71", or "no matches" in amber when the prompt found
+# nothing; a headless run reports the same under "matches".
+[[queries]]
+name = "Speaker"
+# SAM is asked for "a person speaking"; framed Medium and Medium close.
+prompt = "speaker upper body"
+
+[[queries]]
+name = "Guitarist"
+# "a person playing guitar", framed Close.
+prompt = "guitarist close-up"
+
+[[queries]]
+name = "Drummer"
+# "a person playing drums", framed Full.
+prompt = "drummer wide"
+
+[detector]
+kind = "sidecar"
+# The program and its arguments, as a list (no shell is involved). Elements
+# with a "/" that do not start with "-" or "~" are paths, resolved against
+# this file; "python3" alone would be looked up on PATH. The program and
+# every path must exist when the studio starts, or it does not start and
+# says which is missing. --model is required for the mlx backend; --side is
+# the square SAM runs at: keep 672, since at 1008 px "a person speaking"
+# found the speaker in only 1 of 20 frames and each pass took 2.7 to 3.9 times
+# as long (measured; why recall drops there is not yet known).
+command = [
+  "../models/sam3/.venv/bin/python",
+  "../sidecars/sam3-mlx/server.py",
+  "--backend", "mlx",
+  "--model", "../models/sam31-mlx",
+  "--side", "672",
+]
+# Every query's detections need this score. SAM's usual cut-off is 0.5 (the
+# default); the speaker was found far more often at 0.3. The subject store's
+# floor follows a threshold below its own 0.35, so these boxes are kept.
+score_threshold = 0.3
+# Longest side of the frame sent, in pixels; frames are shrunk to it, never
+# enlarged, and the sidecar squashes them to --side.
+send_side = 1008
+# The sidecar says hello once the model is loaded (4.6 s measured on Noah's
+# M3 Max) and one warm-up pass ran; the first run also compiles kernels.
+# Sources play meanwhile; their detector waits.
+startup_timeout_s = 60
+# One pass, once the sidecar has it. Measured at 672 px: 0.48 s for 1
+# prompt, 0.64 s for 3, 1.05 s for 9; 5 s is about five times the slowest.
+# A missed deadline kills the process and restarts it after a backoff of
+# 1 s, doubling up to 30 s while it keeps failing.
+request_timeout_s = 5
+
+[discovery]
+# Passes per second on each source. Here 3 prompts take about 0.64 s, so
+# SAM is busy about 65% of the time; passes never queue up beyond one per
+# source, so a slower pass only lowers the rate. Every source shares the one
+# sidecar process: with N sources, about 0.6 / (N x pass time) keeps it
+# from running flat out.
+rate_hz = 1.0
+# A result is applied only if its frame is at most this much older than the
+# source's newest frame. One pass here takes 0.5 to 1.1 s, plus the pipe
+# transfer; 3 s also leaves room for waiting behind another source's pass.
+# With N sources, allow about (N + 1) x the pass time. The 2 s default
+# would drop results whenever a pass waited.
+max_result_age_s = 3.0
+# The engine gives up on a request after this long, counted from when the
+# source's worker got it; it must exceed request_timeout_s (checked).
+timeout_s = 10.0
+# Track observations keep a subject alive only while SAM saw it within this
+# long: three passes at 1 Hz. Raise it if a speaker SAM misses now and then
+# keeps going lost.
+max_undetected_s = 3.0
+
+[director]
+mode = "suggest"
+profile = "talk"
+
+[output]
+width = 1280
+height = 720
+fps = 30
+# Program audio comes from this source's embedded audio track.
+audio_source = "cam-1"
+# rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
+record_path = "../recordings/sam3-sidecar.mp4"

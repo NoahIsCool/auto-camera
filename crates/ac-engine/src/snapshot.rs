@@ -113,6 +113,28 @@ pub struct QueryView {
     pub parse: ParsedPrompt,
     /// Framings.
     pub presets: Vec<Preset>,
+    /// Prompt feedback (spec M2): what the newest applied discovery pass
+    /// of each source found for this query, in source order. A source is
+    /// missing until a pass that looked for this query has been applied
+    /// there.
+    pub matches: Vec<MatchView>,
+}
+
+/// What one source's newest applied discovery pass found for one query, so
+/// a prompt the detector does not understand shows up as "no matches" (or
+/// a low best score) instead of silently framing nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchView {
+    /// The source the pass ran on.
+    pub source: SourceId,
+    /// Sequence number of the frame the pass looked at.
+    pub seq: u64,
+    /// PTS of that frame.
+    pub pts: Duration,
+    /// Detections the detector returned for the query.
+    pub count: usize,
+    /// Highest score among them; `None` when there were none.
+    pub best: Option<f32>,
 }
 
 impl QueryView {
