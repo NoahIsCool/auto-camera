@@ -102,7 +102,9 @@ fn shot_ids(snap: &EngineSnapshot) -> Vec<String> {
 #[test]
 fn an_on_air_shot_survives_its_query_being_replaced_by_an_alias() {
     let mut rig = Rig::new(two_queries());
-    rig.run(31);
+    // Two passes (applied on ticks 1 and 31): an alias frames shots once
+    // two observing passes have seen it.
+    rig.run(32);
     let snap = rig.snapshot();
     // Admission is fair across prompts: "body" sorts first, so it is the
     // primary query and "person" an alias. Both queries' presets make

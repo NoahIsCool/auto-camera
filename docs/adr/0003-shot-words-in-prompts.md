@@ -131,7 +131,15 @@ speaking"), two queries often find the same person, and the subject store
 makes them one subject answering both (an alias). That subject gets the
 shots of every query it answers, the primary query's first, de-duplicated by
 preset id (design §4.4, rule 7), each named after its own query ("Speaker
-tight 1 Close"), so typing one query per shot works.
+tight 1 Close"), so typing one query per shot works. An alias's shots
+appear once the store has seen it in `alias_confirm_passes` (2) detection
+passes that observed the subject, and stop after `alias_stale_passes` (8)
+such passes without it; passes, not seconds, so the rule is the same on a
+1 Hz OWLv2 and on a shared sidecar that visits each camera every few
+seconds. Identity is unchanged: the alias continues the subject from its
+first sighting, so one stray box (a guitar handed to whoever stands in
+front of it) makes no shot and no twin. A subject on program or preview
+keeps the shots it holds, with their names, until it leaves the air.
 
 ### Framing
 

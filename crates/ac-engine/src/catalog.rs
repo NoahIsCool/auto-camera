@@ -7,8 +7,9 @@
 //! * one wide shot per source, then
 //! * for every subject of that source (ascending id) that is visible or on
 //!   air, one shot per [`ShotPlan`] the engine core gives it: the presets of
-//!   every query the subject answers (its primary query first, then its
-//!   aliases, de-duplicated by preset id), and for an on-air subject also
+//!   every query whose shots the subject should have (its primary query
+//!   first, then the aliases whose labels frame shots, de-duplicated by
+//!   preset id; see `ac_subjects::labels`), and for an on-air subject also
 //!   those of the shots it already has (kept until it leaves the air).
 //!
 //! Shot ids are derived from what they frame, `"<source>/wide"` and
@@ -16,7 +17,9 @@
 //! subject, and an entry that survives a sync keeps its framing state. A
 //! subject id is never reused within a source, so an id never silently
 //! changes meaning. A subject shot is named after the query whose preset
-//! made it: "Speaker 1 Close".
+//! made it, "Speaker 1 Close", and remembers that query's name
+//! ([`ShotEntry::query_name`]) so that the engine core can keep the name of
+//! a shot on air.
 //!
 //! Each subject shot owns a [`ShotFramer`] and has a [`Basis`], that of the
 //! query its plan came from (the engine core keeps the basis of an on-air
@@ -102,6 +105,9 @@ pub struct ShotSpec {
     pub initial: Rect,
     /// What the detector says `initial` covers.
     pub extent: Extent,
+    /// The name of the query whose plan made a subject shot
+    /// ([`ShotPlan::query_name`]); `None` for wides.
+    pub query_name: Option<String>,
 }
 
 /// One shot a subject should have: a preset and the query that asks for it.
@@ -166,6 +172,7 @@ pub fn desired_shots(sources: &[SourceShots<'_>]) -> Vec<ShotSpec> {
             basis: Basis::Object,
             initial: Rect::FULL,
             extent: Extent::Object,
+            query_name: None,
         });
         for subject in &s.subjects {
             for plan in &subject.plans {
@@ -191,6 +198,7 @@ pub fn desired_shots(sources: &[SourceShots<'_>]) -> Vec<ShotSpec> {
                     basis: plan.basis,
                     initial: subject.bbox,
                     extent: subject.extent,
+                    query_name: Some(plan.query_name.clone()),
                 });
             }
         }
@@ -235,6 +243,8 @@ pub struct ShotEntry {
     /// How the shot measures sizes, from the query that asked for it;
     /// [`Basis::Object`] for wides. See the module docs.
     pub basis: Basis,
+    /// The name of the query the shot is named after; `None` for wides.
+    pub query_name: Option<String>,
     /// Smooth framing state, for subject shots.
     framer: Option<ShotFramer>,
     /// Current crop in normalized source coordinates.
@@ -367,6 +377,7 @@ impl Catalog {
                     e.shot = spec.shot;
                     e.preset = spec.preset;
                     e.basis = spec.basis;
+                    e.query_name = spec.query_name;
                     e
                 }
                 None => {
@@ -487,6 +498,7 @@ fn new_entry(
         subject,
         preset: spec.preset,
         basis: spec.basis,
+        query_name: spec.query_name,
         framer,
         crop,
         settled: 1.0,

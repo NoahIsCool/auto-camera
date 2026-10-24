@@ -23,6 +23,7 @@ mod feedback;
 mod framing;
 mod protection;
 mod shared;
+mod shot_labels;
 mod switching;
 mod vision;
 
