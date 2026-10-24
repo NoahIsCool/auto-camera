@@ -262,10 +262,13 @@ impl SubjectStore {
     /// The operator removed `query`.
     ///
     /// The query is dropped from every alias list, with its label evidence. A
-    /// subject whose primary query it was is promoted to its first alias when
-    /// it has one, kept as an orphan while it is protected, and retired
-    /// otherwise (pinned and hidden subjects included: this is an operator
-    /// action, not automatic).
+    /// subject whose primary query it was is promoted to an alias when it has
+    /// one, kept as an orphan while it is protected, and retired otherwise
+    /// (pinned and hidden subjects included: this is an operator action, not
+    /// automatic). The alias promoted is the first whose label frames shots
+    /// ([`crate::labels`]), or the first alias when none does: the primary
+    /// frames shots whatever its evidence, so promoting an alias from one
+    /// stray box while a confirmed one waits would frame the stray at once.
     pub fn remove_query(&mut self, query: &QueryId) -> Vec<StoreEvent> {
         let mut events = Vec::new();
         let ids: Vec<SubjectId> = self.subjects.keys().copied().collect();
@@ -276,8 +279,17 @@ impl SubjectStore {
             let mut changed = rec.aliases.remove(query);
             rec.labels.remove(query);
             if rec.subject.query == *query && !rec.orphaned {
-                if let Some(first) = rec.aliases.pop_first() {
-                    rec.subject.query = first;
+                let framing = rec
+                    .aliases
+                    .iter()
+                    .find(|a| rec.labels.get(*a).is_some_and(|e| e.frames))
+                    .cloned();
+                let next = match framing {
+                    Some(a) => rec.aliases.take(&a),
+                    None => rec.aliases.pop_first(),
+                };
+                if let Some(next) = next {
+                    rec.subject.query = next;
                     changed = true;
                 } else if rec.protected {
                     rec.orphaned = true;

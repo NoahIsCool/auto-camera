@@ -286,6 +286,38 @@ fn remove_query_clears_label_evidence() {
     assert_eq!(shots(&s, id), ["guitarist"]);
 }
 
+/// Removing the primary promotes the first alias whose label frames shots,
+/// not a stray alias that sorts before it: the primary frames whatever its
+/// evidence, so the stray would frame at once. Only when no alias frames is
+/// the first one promoted, and then it frames at once.
+#[test]
+fn removing_the_primary_promotes_a_framing_alias_over_a_stray_one() {
+    let a = person(0.4, 0.5);
+    let mut s = store();
+    let id = SubjectId(1);
+    pass(&mut s, 0.0, &[det("speaker", a)]);
+    for time in [0.5, 1.0] {
+        pass(&mut s, time, &[det("speaker", a), det("singer", a)]);
+    }
+    // One stray pass: "guitarist", sorting before "singer", aliases on.
+    let stray = [det("speaker", a), det("singer", a), det("guitarist", a)];
+    pass(&mut s, 1.5, &stray);
+    assert_eq!(shots(&s, id), ["speaker", "singer"]);
+    let singer = evidence(&s, id, "singer");
+    let ev = s.remove_query(&q("speaker"));
+    assert_eq!(ev, vec![StoreEvent::QueriesChanged { id }]);
+    let rec = s.record(id).unwrap();
+    assert_eq!(rec.subject.query, q("singer"));
+    assert_eq!(rec.aliases.iter().collect::<Vec<_>>(), [&q("guitarist")]);
+    assert_eq!(evidence(&s, id, "singer"), singer);
+    assert_eq!(shots(&s, id), ["singer"]);
+    // With no framing alias left, the stray one is promoted and frames.
+    s.remove_query(&q("singer"));
+    assert_eq!(s.record(id).unwrap().subject.query, q("guitarist"));
+    assert_eq!(shots(&s, id), ["guitarist"]);
+    assert!(!evidence(&s, id, "guitarist").unwrap().frames);
+}
+
 /// On program, preview or pinned, a subject's labels still follow the
 /// evidence; the engine keeps the shots an on-air subject already holds.
 #[test]

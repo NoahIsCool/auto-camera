@@ -138,8 +138,12 @@ such passes without it; passes, not seconds, so the rule is the same on a
 1 Hz OWLv2 and on a shared sidecar that visits each camera every few
 seconds. Identity is unchanged: the alias continues the subject from its
 first sighting, so one stray box (a guitar handed to whoever stands in
-front of it) makes no shot and no twin. A subject on program or preview
-keeps the shots it holds, with their names, until it leaves the air.
+front of it) makes no shot and no twin. The primary query, chosen at
+admission, is outside this rule and always frames. When the operator
+removes it, the store promotes the first alias that frames; only when none
+does is an unconfirmed alias promoted, and that one frames at once. A
+subject on program or preview keeps the shots it holds, with their names,
+until it leaves the air.
 
 ### Framing
 

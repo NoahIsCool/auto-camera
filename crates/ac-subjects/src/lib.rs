@@ -14,7 +14,10 @@
 //! * prompts that find the same entity become aliases of one subject at
 //!   once, while an alias frames shots only after it has been seen in
 //!   several detection passes and stops after several passes without it
-//!   ([`labels`]), so one stray box never makes a lasting shot;
+//!   ([`labels`]), so one stray box never makes a lasting alias shot. The
+//!   primary query, chosen at admission, is outside that rule and always
+//!   frames; removing it promotes an alias that frames, and only when none
+//!   does an unconfirmed one, which then frames at once;
 //! * admission is fair across prompts and bounded by a soft cap (hard cap
 //!   [`HARD_CAP`]);
 //! * operator intent wins: pinned, hidden and on-air (protected) subjects are
