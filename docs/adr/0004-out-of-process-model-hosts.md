@@ -69,10 +69,12 @@ knows where a model runs.
   age limit, so every answer would be thrown away), so the engine keeps
   **one request in flight for the whole studio** when its detector is
   shared, and gives the turn to the source that has waited longest, with
-  its newest frame. The turns start once the process has said its first
-  hello: until then the shared detector is preparing for every source, so
-  nothing is sent and no timeout is counted. Answers are then about one pass old whatever the
-  number of sources, and each source gets a pass about every N × the pass
+  its newest frame. The turns start once the process's first start has
+  ended, with its hello or with a failure: until then the shared detector
+  is preparing for every source, so nothing is sent and no timeout is
+  counted, and after a failed first start the passes fail with the reason
+  until a restart says hello. Answers are then about one pass old whatever
+  the number of sources, and each source gets a pass about every N × the pass
   time. A frame that still waited longer than `max_result_age_s` for the
   process (behind a restart, or behind a request the engine gave up on) is
   skipped without a pass.
@@ -127,7 +129,9 @@ B8 fails, the sidecar stays. CLAUDE.md's decision line is Noah's to update.
   attempt every 30 s. While the first start loads the model, the window
   says "preparing the detector" (dimmed, not amber) and the status bar
   how long it has been preparing; a headless run waits for it, and its
-  summary says whether each source's detector was ready and when. The
+  summary says whether each source's detector is still preparing and when
+  its first start ended (a failed start then shows as discovery errors,
+  with the reason). The
   window marks a source whose newest pass failed, went stale or timed out
   in amber, with the reason on hover, and counts errors, stale results and
   timeouts in the status bar. Sources, tracking,

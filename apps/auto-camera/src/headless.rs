@@ -12,11 +12,13 @@
 //! 3. **Detector**: when a source has discovery, wait until no source's
 //!    detector is preparing, for at most [`DETECTOR_TIMEOUT`] (a cold
 //!    CoreML compile of OWLv2 takes two to three minutes, and every new
-//!    build pays CoreML's own part of it again). Timing the run from the
-//!    first wide would spend a short run on the load, and ending the
-//!    process mid-compile would throw the compile away, since CoreML keeps
-//!    only a compile that finished; so the run waits, and fails with
-//!    "still loading" rather than reporting a detector that never ran.
+//!    build pays CoreML's own part of it again), or, on a sidecar, for at
+//!    least its `startup_timeout_s` ([`detector_limit`]), since the window
+//!    would keep preparing that long too. Timing the run from the first
+//!    wide would spend a short run on the load, and ending the process
+//!    mid-compile would throw the compile away, since CoreML keeps only a
+//!    compile that finished; so the run waits, and fails with "still
+//!    loading" rather than reporting a detector that never ran.
 //! 4. **Output**: with `--record`, start the program output and wait until
 //!    ffmpeg runs. The output also streams when the config sets an RTMP URL.
 //! 5. **Run** for the requested time, sampling snapshots to log program
@@ -49,8 +51,8 @@ use crate::signals::QuitSignal;
 use ac_core::{Rect, ShotId};
 use ac_director::{CandidateKind, ContentProfile, DirectorMode};
 use ac_engine::{
-    Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot, MonitorSettings,
-    OutputState, StudioConfig,
+    DetectorSettings, Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot,
+    MonitorSettings, OutputState, StudioConfig,
 };
 
 mod summary;
@@ -64,7 +66,8 @@ pub use summary::{
 const SAMPLE: Duration = Duration::from_millis(20);
 /// Longest wait for a source to deliver its first frames.
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(15);
-/// Longest wait for the detectors to load: a cold CoreML compile of OWLv2
+/// Longest wait for the detectors to load, unless a sidecar's own startup
+/// deadline is longer ([`detector_limit`]): a cold CoreML compile of OWLv2
 /// took 140 to 176 s on an M3 Max, so this leaves room for a slower Mac.
 const DETECTOR_TIMEOUT: Duration = Duration::from_secs(300);
 /// Longest wait for ffmpeg to start.
@@ -104,12 +107,13 @@ pub fn run_with(
 ) -> Summary {
     let started = Instant::now();
     config.monitors = MonitorSettings::disabled();
+    let limit = detector_limit(&config.detector);
     let engine = match Engine::start_with(config, engine_options) {
         Ok(e) => e,
         Err(e) => return failed_to_start(path, options, started, e.to_string()),
     };
     let mut sampler = Sampler::default();
-    let error = drive(&engine, options, &mut sampler, quit).err();
+    let error = drive(&engine, options, limit, &mut sampler, quit).err();
     let (ticks, threads_joined, final_snapshot, error) = match engine.shutdown() {
         Ok(r) => (r.ticks, r.threads_joined, Some(r.final_snapshot), error),
         Err(e) => (0, 0, None, error.or(Some(e.to_string()))),
@@ -147,12 +151,28 @@ fn failure_in(snap: &EngineSnapshot, why: &str) -> String {
 /// Why a run that a termination signal cut short failed.
 pub const INTERRUPTED: &str = "interrupted by a termination signal";
 
-/// Phases 2 to 6; returns why the run failed. A termination signal
-/// (`quit`) ends any phase early, and the caller shuts the engine down as
-/// after a normal run.
+/// How long phase 3 may wait for the detectors of `detector`: the fixed
+/// [`DETECTOR_TIMEOUT`], or for a sidecar its `startup_timeout_s` plus
+/// [`SIGNAL_TIMEOUT`] when that is longer. The sidecar's deadline counts
+/// from its spawn at engine start, before phase 2, so this covers it with
+/// room for the loaders to hand over to the core.
+fn detector_limit(detector: &DetectorSettings) -> Duration {
+    match detector {
+        DetectorSettings::Sidecar(s) => {
+            DETECTOR_TIMEOUT.max(Duration::from_secs_f64(s.startup_timeout_s) + SIGNAL_TIMEOUT)
+        }
+        _ => DETECTOR_TIMEOUT,
+    }
+}
+
+/// Phases 2 to 6; returns why the run failed. Phase 3 waits for the
+/// detectors for at most `detector_limit`. A termination signal (`quit`)
+/// ends any phase early, and the caller shuts the engine down as after a
+/// normal run.
 fn drive(
     engine: &Engine,
     options: &HeadlessOptions,
+    detector_limit: Duration,
     sampler: &mut Sampler,
     quit: &QuitSignal,
 ) -> Result<(), String> {
@@ -172,7 +192,7 @@ fn drive(
             .and_then(|_| h.send(EngineCommand::Cut))
             .map_err(|e| format!("cannot put a wide on program: {e}"))?;
     }
-    await_detectors(|| h.snapshot(), sampler, DETECTOR_TIMEOUT, quit)?;
+    await_detectors(|| h.snapshot(), sampler, detector_limit, quit)?;
     if let Some(record) = &options.record {
         h.send(EngineCommand::StartOutput {
             rtmp_url: None,

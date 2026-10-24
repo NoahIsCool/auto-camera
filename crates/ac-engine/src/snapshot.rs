@@ -356,6 +356,10 @@ pub struct EngineSnapshot {
     pub render_issues: Vec<String>,
     /// Times the program shot changed.
     pub program_changes: u64,
+    /// One detector process serves every source, one pass at a time (the
+    /// sidecar), so a source's request can wait behind another source's
+    /// pass or a restart of that process.
+    pub shared_detector: bool,
 }
 
 impl EngineSnapshot {

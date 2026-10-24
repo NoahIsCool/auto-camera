@@ -471,6 +471,20 @@ fn the_detector_phase_waits_for_every_detector_and_gives_up_in_time() {
 }
 
 #[test]
+fn the_detector_wait_covers_a_sidecars_startup_deadline() {
+    let sidecar = |startup_timeout_s| {
+        DetectorSettings::Sidecar(SidecarSettings {
+            startup_timeout_s,
+            ..SidecarSettings::new(["python3"])
+        })
+    };
+    assert_eq!(detector_limit(&sidecar(60.0)), DETECTOR_TIMEOUT);
+    assert!(detector_limit(&sidecar(600.0)) >= Duration::from_secs(600) + SIGNAL_TIMEOUT);
+    assert_eq!(detector_limit(&studio().detector), DETECTOR_TIMEOUT);
+    assert_eq!(detector_limit(&DetectorSettings::None), DETECTOR_TIMEOUT);
+}
+
+#[test]
 fn rounding_keeps_the_requested_digits() {
     assert_eq!(round(1.23456, 2), 1.23);
     assert_eq!(round(-0.005, 2), -0.01);

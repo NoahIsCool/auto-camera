@@ -53,10 +53,12 @@
 //! time as [`DiscoveryStats::ready_after`]. A source starts preparing when
 //! it has a detector, so the snapshot taken before the first tick already
 //! says so. A shared detector is one detector for the whole studio: while
-//! the sidecar is still starting (any source's loader still waits for its
-//! hello), every source is preparing, and they all become ready on the
-//! same tick, so the sources start taking turns only once the process is
-//! ready, the first source first. The loading state is tick input like the
+//! the sidecar's first start is still running (any source's loader still
+//! waits for its hello or its failure), every source is preparing, and they
+//! all become ready on the same tick, so the sources start taking turns
+//! only once that start has ended, the first source first; after a failed
+//! start each turn's pass fails with the reason. The loading state is tick
+//! input like the
 //! frames, so the core stays a deterministic function of its inputs.
 //!
 //! Given the same configuration, frames, results and commands, the core

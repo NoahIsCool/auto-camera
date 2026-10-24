@@ -157,6 +157,7 @@ impl EngineCore {
             preview_monitor: self.preview_monitor.clone(),
             render_issues: self.render_issues.clone(),
             program_changes: self.program_changes,
+            shared_detector: self.shared_detector,
         }
     }
 }

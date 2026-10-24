@@ -233,8 +233,15 @@ fn last_pass(m: Option<&MatchView>) -> String {
 /// (dimmed: a load is not a failure, and no request goes out until it
 /// ends). When the source's newest request failed, came back too late or
 /// got no answer, that is what the line says (amber, with the reason on
-/// hover), since the last applied pass's numbers would look current.
-fn source_feedback(source: &SourceView, m: Option<&MatchView>) -> (String, Tone, String) {
+/// hover), since the last applied pass's numbers would look current. A
+/// request with no answer is blamed on a restarting sidecar only when
+/// `shared` (one detector process serves every source); otherwise the
+/// detector is slower than the timeout or stuck.
+fn source_feedback(
+    source: &SourceView,
+    m: Option<&MatchView>,
+    shared: bool,
+) -> (String, Tone, String) {
     let d = &source.discovery;
     if d.preparing {
         return (PREPARING.into(), Tone::Weak, PREPARING_HOVER.into());
@@ -252,9 +259,14 @@ fn source_feedback(source: &SourceView, m: Option<&MatchView>) -> (String, Tone,
         )),
         Some(PassOutcome::TimedOut) => Some((
             format!("{NOT_ANSWERING} ({} timed out)", d.timeouts),
-            "no answer within discovery.timeout_s (a restarted sidecar may still be loading \
-             its model)"
-                .to_owned(),
+            if shared {
+                "no answer within discovery.timeout_s (a restarted sidecar may still be \
+                 loading its model)"
+            } else {
+                "no answer within discovery.timeout_s (the detector is slower than that, \
+                 or stuck)"
+            }
+            .to_owned(),
         )),
         Some(PassOutcome::Applied) | None => None,
     };
@@ -290,7 +302,7 @@ pub fn match_lines(snap: &EngineSnapshot, q: &QueryView) -> Vec<(String, Tone, S
         .filter(|s| s.discovery_enabled)
         .map(|s| {
             let m = q.matches.iter().find(|m| m.source == s.id);
-            (s, source_feedback(s, m))
+            (s, source_feedback(s, m, snap.shared_detector))
         })
         .collect();
     if let Some((_, first)) = lines.first()

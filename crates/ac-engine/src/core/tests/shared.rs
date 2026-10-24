@@ -205,6 +205,14 @@ fn per_source_detectors_still_run_side_by_side() {
     let mut studio = Studio::new(2, DetectorSettings::Synthetic { score: 0.9 });
     studio.run_secs(4.0);
     assert_eq!(studio.most_in_flight, 2, "each source has its own detector");
+    let shared = |studio: &Studio| {
+        studio
+            .core
+            .snapshot(OutputView::default(), TimingView::default(), true)
+            .shared_detector
+    };
+    assert!(!shared(&studio));
+    assert!(shared(&Studio::new(2, sidecar())));
     assert!(sidecar().is_shared());
     assert!(!DetectorSettings::Synthetic { score: 0.9 }.is_shared());
     assert!(!DetectorSettings::None.is_shared());

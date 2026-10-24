@@ -83,8 +83,9 @@ pub struct SourceSummary {
     /// The run ended while the source's detector was still loading, so the
     /// discovery counters say nothing about the detector.
     pub discovery_preparing: bool,
-    /// Master-clock seconds at which the detector was ready (`null` while
-    /// it loaded, and without a detector).
+    /// Master-clock seconds at which the detector's load ended (`null`
+    /// while it loaded, and without a detector). The load may have failed:
+    /// then `discovery_errors` and `discovery_last_error` say why.
     pub detector_ready_s: Option<f64>,
     /// Discovery requests sent.
     pub discovery_requests: u64,

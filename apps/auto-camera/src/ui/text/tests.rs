@@ -316,10 +316,15 @@ fn a_failing_detector_replaces_the_old_feedback_with_its_reason() {
     let d = &mut snap.sources[0].discovery;
     d.timeouts = 1;
     d.last_outcome = Some(PassOutcome::TimedOut);
-    assert_eq!(
-        match_lines(&snap, &q)[0].0,
-        "detector not answering (1 timed out)"
-    );
+    let line = match_lines(&snap, &q).remove(0);
+    assert_eq!(line.0, "detector not answering (1 timed out)");
+    // Only a shared detector process is blamed on a restart.
+    assert!(!snap.shared_detector);
+    assert!(line.2.contains("slower than that, or stuck"), "{}", line.2);
+    assert!(!line.2.contains("sidecar"), "{}", line.2);
+    snap.shared_detector = true;
+    let hover = match_lines(&snap, &q).remove(0).2;
+    assert!(hover.contains("restarted sidecar"), "{hover}");
     snap.sources[0].discovery.last_outcome = Some(PassOutcome::Applied);
     assert_eq!(match_lines(&snap, &q)[0].0, "3 matches · best 0.71");
 }
