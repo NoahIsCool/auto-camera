@@ -24,7 +24,10 @@
 //!   renamed on air when the label evidence changes (a stale label, or a
 //!   newly framing alias that sorts first). Only when the operator removed
 //!   that query does the shot take the name and preset of the query that
-//!   now asks for its preset id, or the primary query's name.
+//!   now asks for its preset id, or the primary query's name. The query is
+//!   found by id ([`ShotEntry::query`]), never by display name, so another
+//!   query that happens to share the removed one's name never keeps the
+//!   removed query's preset on air.
 //! * **Basis.** Each shot is measured on the basis of the query that asked
 //!   for it ([`ac_core::Basis::framing_extent`]): cut at body lines only
 //!   when that query's basis is a person and the detector marked the box a
@@ -77,6 +80,7 @@ impl EngineCore {
                     plans.push(ShotPlan {
                         preset: p.clone(),
                         basis: q.basis(),
+                        query: q.id.clone(),
                         query_name: q.name.clone(),
                     });
                 }
@@ -93,14 +97,15 @@ impl EngineCore {
         for e in held {
             let Some(preset) = &e.preset else { continue };
             // The query the shot is named after, while the subject answers it.
-            let namer = e.query_name.as_deref().and_then(|name| {
+            let namer = e.query.as_ref().and_then(|id| {
                 self.queries
                     .iter()
-                    .find(|q| q.name == name && r.answers(&q.id))
+                    .find(|q| q.id == *id && r.answers(&q.id))
             });
             let kept = ShotPlan {
                 preset: preset.clone(),
                 basis: e.basis,
+                query: namer.map_or(&r.subject.query, |q| &q.id).clone(),
                 query_name: namer.map_or(primary, |q| q.name.as_str()).to_string(),
             };
             match plans.iter_mut().find(|x| x.preset.id == preset.id) {
