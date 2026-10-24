@@ -1,8 +1,9 @@
 //! Headless runs on small synthetic studios (real time, about a second each).
 
 use super::*;
-use ac_core::ShotSize;
-use ac_engine::{DetectorSettings, PresetSpec, QuerySettings};
+use ac_core::{ShotSize, TrackState};
+use ac_engine::{DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, TimingView};
+use ac_media::SourceInfo;
 use ac_sources::SourceConfig;
 
 /// A small synthetic studio with ground-truth discovery and no director.
@@ -35,6 +36,20 @@ fn studio() -> StudioConfig {
 /// Run options.
 fn options(seconds: f64, record: Option<PathBuf>) -> HeadlessOptions {
     HeadlessOptions { seconds, record }
+}
+
+/// The snapshot of [`studio`] before its first tick, built by a real core:
+/// its detector is still preparing.
+fn preparing_snapshot() -> Arc<EngineSnapshot> {
+    let info = SourceInfo {
+        id: ac_core::SourceId("stage".into()),
+        width: 320,
+        height: 180,
+        fps: 30.0,
+        audio: None,
+    };
+    let core = EngineCore::new(&studio(), vec![info], &[true]).unwrap();
+    Arc::new(core.snapshot(OutputView::default(), TimingView::default(), true))
 }
 
 /// True when `tool -version` succeeds. When it does not and
@@ -74,6 +89,24 @@ fn a_run_without_a_director_puts_the_wide_on_program() {
     assert_eq!(s.max_subjects, 2);
     assert_eq!(s.sources[0].size, [320, 180]);
     assert!(s.sources[0].discovery_applied > 0);
+    assert!(!s.sources[0].discovery_preparing);
+    let ready = s.sources[0]
+        .detector_ready_s
+        .expect("the detector was ready");
+    assert!((0.0..s.media_seconds).contains(&ready), "{ready}");
+    assert_eq!(s.subjects.len(), 2);
+    for (subject, id) in s.subjects.iter().zip([1, 2]) {
+        assert_eq!((subject.id, subject.source.as_str()), (id, "stage"));
+        assert_eq!(
+            (subject.query.as_str(), subject.state),
+            ("person", TrackState::Tracking)
+        );
+        assert!(subject.aliases.is_empty());
+        assert!(
+            subject.bbox[2] > 0.0 && subject.bbox[3] > 0.0,
+            "{subject:?}"
+        );
+    }
     assert!(s.output.is_none());
     assert_eq!(s.threads_joined, 1, "the discovery worker");
     assert_eq!(s.director.mode, DirectorMode::Off);
@@ -203,16 +236,161 @@ fn a_recording_run_finalizes_the_file() {
 
 #[test]
 fn the_summary_is_json() {
-    let s = run(studio(), Path::new("studio.toml"), &options(0.2, None));
+    let s = run(studio(), Path::new("studio.toml"), &options(0.5, None));
     let v: serde_json::Value = serde_json::to_value(&s).unwrap();
     for key in [
-        "ok", "ticks", "sources", "shots", "program", "director", "timing", "output",
+        "ok", "ticks", "sources", "shots", "subjects", "program", "director", "timing", "output",
     ] {
         assert!(v.get(key).is_some(), "{key}");
     }
     assert_eq!(v["director"]["mode"], "off");
     assert_eq!(v["shots"][0]["status"], "wide");
     assert!(v["output"].is_null());
+    let source = &v["sources"][0];
+    assert_eq!(source["discovery_preparing"], false);
+    assert!(source["detector_ready_s"].is_number());
+    let wide = &v["shots"][0];
+    for key in [
+        "crop_width_min",
+        "crop_width_max",
+        "crop_height_min",
+        "crop_height_max",
+    ] {
+        assert_eq!(wide[key], 1.0, "{key}");
+    }
+    let subject = &v["subjects"][0];
+    assert_eq!(subject["id"], 1);
+    assert_eq!(subject["source"], "stage");
+    assert_eq!(subject["query"], "person");
+    assert_eq!(subject["aliases"], serde_json::json!([]));
+    assert_eq!(subject["state"], "tracking");
+    assert_eq!(subject["bbox"].as_array().map(Vec::len), Some(4));
+}
+
+/// The synthetic movers keep their size, but the tracker's scale search
+/// lets a tracked box grow or shrink against the detector's (one of the two
+/// grows by about 15% within half a second), and its crops follow: the
+/// drift the crop ranges are there to show.
+#[test]
+fn moving_subjects_report_the_range_of_their_crop_sizes() {
+    let s = run(studio(), Path::new("studio.toml"), &options(2.0, None));
+    assert!(s.ok, "{:?}", s.error);
+    let subject_shots: Vec<&ShotSummary> =
+        s.shots.iter().filter(|v| v.id != "stage/wide").collect();
+    assert_eq!(subject_shots.len(), 2, "{:?}", s.shots);
+    for v in &subject_shots {
+        assert!(
+            0.0 < v.crop_width_min && v.crop_width_min <= v.crop_width_max,
+            "{v:?}"
+        );
+        assert!(
+            0.0 < v.crop_height_min && v.crop_height_min <= v.crop_height_max,
+            "{v:?}"
+        );
+        assert!(v.crop_width_max <= 1.0 && v.crop_height_max <= 1.0, "{v:?}");
+    }
+    assert!(
+        subject_shots
+            .iter()
+            .any(|v| v.crop_width_max > v.crop_width_min && v.crop_height_max > v.crop_height_min),
+        "a tracked box drifts in size and its crop follows: {subject_shots:?}"
+    );
+}
+
+#[test]
+fn a_run_that_ends_while_the_detector_loads_says_so() {
+    let mut snap = (*preparing_snapshot()).clone();
+    let summary = |snap: &EngineSnapshot| {
+        let s = summarize(
+            Path::new("x.toml"),
+            &options(1.0, None),
+            Instant::now(),
+            Some("stopped".into()),
+            Totals {
+                ticks: 0,
+                threads_joined: 0,
+            },
+            Some(snap),
+            Some(snap),
+            &Sampler::default(),
+        );
+        serde_json::to_value(&s).unwrap()
+    };
+    let v = summary(&snap);
+    assert_eq!(v["sources"][0]["discovery_preparing"], true);
+    assert!(v["sources"][0]["detector_ready_s"].is_null());
+    assert_eq!(v["sources"][0]["discovery_requests"], 0);
+    // Unsampled shots report their crop as the whole range.
+    assert_eq!(v["shots"][0]["crop_width_min"], 1.0);
+
+    let d = &mut snap.sources[0].discovery;
+    d.preparing = false;
+    d.ready_after = Some(Duration::from_millis(152_500));
+    let v = summary(&snap);
+    assert_eq!(v["sources"][0]["discovery_preparing"], false);
+    assert_eq!(v["sources"][0]["detector_ready_s"], 152.5);
+}
+
+#[test]
+fn the_detector_phase_waits_for_every_detector_and_gives_up_in_time() {
+    let preparing = preparing_snapshot();
+    let mut ready = (*preparing).clone();
+    ready.sources[0].discovery.preparing = false;
+    let ready = Arc::new(ready);
+
+    // Ready on the fourth look.
+    let mut looks = 0;
+    let mut sampler = Sampler::default();
+    let next = || {
+        looks += 1;
+        if looks < 4 {
+            preparing.clone()
+        } else {
+            ready.clone()
+        }
+    };
+    assert_eq!(
+        await_detectors(next, &mut sampler, Duration::from_secs(10)),
+        Ok(())
+    );
+    assert_eq!(looks, 4);
+    assert!(sampler.last.is_some(), "the wait samples");
+
+    // Never ready.
+    let started = Instant::now();
+    let error = await_detectors(
+        || preparing.clone(),
+        &mut Sampler::default(),
+        Duration::from_millis(100),
+    )
+    .unwrap_err();
+    assert_eq!(error, "the detector was still loading after 0.1 s");
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // The engine died while the detector loaded.
+    let mut dead = (*preparing).clone();
+    dead.running = false;
+    dead.fatal = Some("the engine thread panicked: boom".into());
+    let error = await_detectors(
+        || Arc::new(dead.clone()),
+        &mut Sampler::default(),
+        Duration::from_secs(10),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("stopped early") && error.contains("boom"),
+        "{error}"
+    );
+
+    // Without discovery nothing prepares, so there is nothing to wait for.
+    let mut none = (*preparing).clone();
+    none.sources[0].discovery_enabled = false;
+    none.sources[0].discovery.preparing = false;
+    let none = Arc::new(none);
+    assert_eq!(
+        await_detectors(|| none.clone(), &mut Sampler::default(), Duration::ZERO),
+        Ok(())
+    );
 }
 
 #[test]
