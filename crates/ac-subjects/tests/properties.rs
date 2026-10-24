@@ -31,7 +31,10 @@
 //! misses, so every alias in `shot_queries` must have been seen this way
 //! in at least `alias_confirm_passes` observing batches with fewer than
 //! `alias_stale_passes` misses since; and `shot_queries` is always the
-//! primary query followed by a subsequence of the aliases.
+//! primary query followed by a subsequence of the aliases. Each case draws
+//! both bounds from 1 to 3: under this generator a framing alias seldom
+//! has more than two model misses, so at the default stale bound of 8 that
+//! half of the check could never fail.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
@@ -243,6 +246,16 @@ fn fresh() -> SubjectStore {
     SubjectStore::new(SourceId("cam".into()), config).expect("valid config")
 }
 
+/// [`fresh`] with the shot-label bounds `confirm` and `stale`.
+fn labelled(confirm: u8, stale: u8) -> SubjectStore {
+    let config = StoreConfig {
+        alias_confirm_passes: confirm,
+        alias_stale_passes: stale,
+        ..*fresh().config()
+    };
+    SubjectStore::new(SourceId("cam".into()), config).expect("valid config")
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
@@ -440,11 +453,16 @@ fn check_labels(
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
-    /// Every alias that frames shots was seen often and recently enough;
-    /// see the module docs.
+    /// Every alias that frames shots was seen often and recently enough,
+    /// with small label bounds so that both are reached; see the module
+    /// docs.
     #[test]
-    fn shot_queries_follow_observing_passes(ops in prop::collection::vec(op(), 1..80)) {
-        let mut store = fresh();
+    fn shot_queries_follow_observing_passes(
+        ops in prop::collection::vec(op(), 1..80),
+        confirm in 1u8..=3,
+        stale in 1u8..=3,
+    ) {
+        let mut store = labelled(confirm, stale);
         let mut model = Model::default();
         let mut bounds = Bounds::new();
         for op in &ops {
