@@ -31,6 +31,7 @@ fn subjects_are_discovered_and_shots_appear() {
     assert!(snap.shot(&shot("stage/2/close")).is_some());
     let src = &snap.sources[0];
     assert!(src.discovery_enabled && src.discovery.applied > 0);
+    assert!(!src.discovery.preparing && src.discovery.ready_after.is_some());
     assert!(snap.tick > 0);
     let report = engine.shutdown().unwrap();
     assert!(!report.final_snapshot.running);

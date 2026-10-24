@@ -290,10 +290,14 @@ pub fn match_lines(snap: &EngineSnapshot, q: &QueryView) -> Vec<(String, Tone, S
     lines
 }
 
-/// One source's health for the status bar: frames, the newest successful
-/// detector pass's time, and how many requests failed, came back too late
-/// or got no answer.
-pub fn source_line(source: &SourceView) -> String {
+/// One source's health for the status bar at master-clock `media_time`:
+/// frames, the newest successful detector pass's time, and how many
+/// requests failed, came back too late or got no answer.
+///
+/// While the source's detector is still loading the line says so, with how
+/// long it has been loading: a detector prepares from the engine's start,
+/// at media time zero, so that is `media_time` itself.
+pub fn source_line(source: &SourceView, media_time: Duration) -> String {
     let fps = if source.frames == 0 {
         NONE.to_owned()
     } else {
@@ -315,6 +319,9 @@ pub fn source_line(source: &SourceView) -> String {
         if n > 0 {
             line.push_str(&format!(" · {n} {what}"));
         }
+    }
+    if d.preparing {
+        line.push_str(&format!(" · preparing detector {}", clock(media_time)));
     }
     if !source.available {
         line.push_str(" · NO SIGNAL");

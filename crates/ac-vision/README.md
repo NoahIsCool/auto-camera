@@ -57,17 +57,35 @@ CoreML cannot run fall back to the CPU. Only nodes with static input shapes
 go to CoreML: given the dynamic query axis, MPSGraph aborts the process while
 compiling the text encoder. The first load compiles the graphs for CoreML,
 which takes two to three minutes and about 7 GB of memory. Two caches keep
-later loads short (26–29 s): ONNX Runtime's, in `coreml-cache/` next to each
-graph (about 1.6 GB for OWLv2 base, reused until the graph file changes),
-and CoreML's own, which macOS keeps per executable in
-`~/Library/Caches/<executable name>/com.apple.e5rt.e5bundlecache`. The second
-is written only when a compile finishes, so the first run of a new
-executable (`auto-camera`, or the `owl_detect` example) must stay up until
-detections start. The engine loads the detector on its discovery thread, so
-the window and program run while it compiles; discovery requests time out
-until it is ready. To build against a local ONNX Runtime
-(1.27 or newer) instead, for example the `libonnxruntime` inside the
-`onnxruntime` Python wheel:
+later loads short (26–29 s):
+
+- ONNX Runtime's, in `coreml-cache/` next to each graph (about 1.6 GB for
+  OWLv2 base). ONNX Runtime keys it on the graph's path and the provider
+  options, and the folder name adds the graph file's size and modification
+  time, so it is reused until the graph file changes and survives
+  rebuilding the app.
+- CoreML's own specialization of the compiled model for this Mac, which
+  macOS keeps per executable in
+  `~/Library/Caches/<executable name>/com.apple.e5rt.e5bundlecache`. This is
+  what each new build of `auto-camera` (or of the `owl_detect` example) pays
+  again, about 110 s in the app, and neither `ort` nor ONNX Runtime has an
+  option to move it. CoreML writes it only when the compile finishes, so
+  quitting during it loses it: after a build, keep the first run up until
+  the detector is ready.
+
+The engine loads the detector on its discovery thread, so the window and
+program run while it compiles. Meanwhile the window's status bar says
+`preparing detector m:ss`, no discovery requests are sent and no timeouts
+counted, and a headless run waits for the detector (up to five minutes)
+before it starts timing, so a short run neither spends itself on the load
+nor ends the process mid-compile. If a load fails with "Error compiling
+model", the error names the graph's `coreml-cache/` folder: a first compile
+that was interrupted can leave a folder that ONNX Runtime takes for a
+finished one, so delete it and restart. The app never deletes it by itself,
+since another loader may be writing it.
+
+To build against a local ONNX Runtime (1.27 or newer) instead, for example
+the `libonnxruntime` inside the `onnxruntime` Python wheel:
 
 ```sh
 export ORT_LIB_LOCATION=/path/to/dir/with/libonnxruntime   # .so or .dylib
@@ -157,9 +175,15 @@ prompt once, when the query is created, with `ac_core::parse_prompt`, and
 sends the parsed phrase (`PromptQuery::prompt`): shot words are cut off and
 whole role words rewritten, so "speaker upper body" arrives here as "a
 person speaking", a described person, and "guitarist close-up" as "a person
-playing guitar", an object prompt for "a guitar". How well OWLv2 finds "a
-person speaking" is unmeasured (benchmark B0 in the model-picker design).
-See [ADR 0003](../../docs/adr/0003-shot-words-in-prompts.md).
+playing guitar", an object prompt for "a guitar". Benchmark B0 of the
+model-picker design measured "a person speaking" in Rust on CoreML, through
+the described-person route at the 0.15 person threshold, on the 40 labelled
+frames below: it found the speaker in 20 of 20 frames, with 300 false boxes.
+It picks everyone, because OWLv2 sees people and objects, not actions, so
+the parser adds a notice to every prompt rewritten to an action role
+("speaker", "singer"). "a person playing drums", an object prompt, found
+the drummer in 20 of 20 frames with no false boxes. See
+[ADR 0003](../../docs/adr/0003-shot-words-in-prompts.md).
 
 Every detection says what its box covers (`Detection::extent`). People-first
 detections are `Extent::Person`, whole bodies, and framing cuts their shots
@@ -206,6 +230,10 @@ labelled one (Python reference on CPU, best thresholds for each):
 | Object attached, with 60% of it inside instead of 45% | 45 | 22 | not measured |
 | Both attached | 60 | 2 | 1 |
 | Object attached, in Rust on CoreML, with the group rule | 59 | 2 | 1 |
+
+The Speaker column scores the example config's "a person speaking at a
+lectern" (an object prompt for "a lectern" where objects are attached), not
+"a person speaking", whose B0 result is above.
 
 The two remaining false subjects are the speaker walking right in front of a
 guitar on a stand. The speaker is found once: OWLv2 sees objects, not

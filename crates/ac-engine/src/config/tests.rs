@@ -464,7 +464,59 @@ fn prompts_and_lexicons_that_cannot_work_are_rejected() {
     // Unknown keys in the lexicon are typos, not ignored.
     let text = format!("{MINIMAL}[lexicon]\nrole = []\n");
     assert!(StudioConfig::parse(&text, false).is_err());
-    let text =
-        format!("{MINIMAL}[lexicon]\nroles = [{{ word = \"x\", phrase = \"y\", needs = 1 }}]\n");
-    assert!(StudioConfig::parse(&text, false).is_err());
+    for role in [
+        r#"{ word = "x", phrase = "y", note = "z" }"#,
+        r#"{ word = "x", phrase = "y", needs = "pose" }"#,
+        r#"{ word = "x", phrase = "y", needs = 1 }"#,
+    ] {
+        let text = format!("{MINIMAL}[lexicon]\nroles = [{role}]\n");
+        assert!(StudioConfig::parse(&text, false).is_err(), "{role}");
+    }
+}
+
+#[test]
+fn a_lexicon_role_may_say_what_it_needs() {
+    let c = with(
+        r#"
+[[queries]]
+name = "Speaker"
+prompt = "speaker close-up"
+
+[[queries]]
+name = "Leader"
+prompt = "worship leader"
+
+[[queries]]
+name = "Bassist"
+prompt = "bass player"
+
+[lexicon]
+roles = [
+    { word = "speaker", phrase = "a person at a lectern" },
+    { word = "worship leader", phrase = "a person singing", needs = "action" },
+    { word = "bass player", phrase = "a person playing bass", needs = "object" },
+]
+"#,
+    );
+    c.validate().unwrap();
+    assert_eq!(
+        c.lexicon.roles.iter().map(|r| r.needs).collect::<Vec<_>>(),
+        [
+            None,
+            Some(ac_core::RoleNeeds::Action),
+            Some(ac_core::RoleNeeds::Object)
+        ]
+    );
+    let q = c.build_queries().unwrap();
+    let action = |q: &Query| {
+        q.parse
+            .warnings
+            .iter()
+            .any(|w| matches!(w, ac_core::PromptWarning::ActionRole { .. }))
+    };
+    // The override without `needs` drops the built-in action tag.
+    assert_eq!(q[0].detector_phrase(), "a person at a lectern");
+    assert!(!action(&q[0]));
+    assert!(action(&q[1]));
+    assert!(!action(&q[2]));
 }

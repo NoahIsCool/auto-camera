@@ -23,6 +23,14 @@ fn assert_parse(text: &str, model_phrase: &str, shots: &[ShotSize], basis: Basis
     assert!(!p.literal, "{text:?}");
 }
 
+/// The notice for `role`, whose phrase "a person speaking" is an action.
+fn speaking(role: &str) -> PromptWarning {
+    PromptWarning::ActionRole {
+        role: role.into(),
+        phrase: "a person speaking".into(),
+    }
+}
+
 /// The shot-word table of design §4.2, written out independently of the
 /// lexicon so a change to either is caught.
 const TABLE: &[(&str, &[ShotSize])] = &[
@@ -92,11 +100,68 @@ fn the_noahs_example_splits_who_from_what_shot() {
     assert_eq!(p.model_phrase, "a person speaking");
     assert_eq!(p.shots, [Medium, MediumClose]);
     assert_eq!(p.basis, Basis::Person);
-    assert!(p.warnings.is_empty());
+    assert_eq!(p.warnings, [speaking("speaker")]);
     assert_eq!(
         p.summary(),
         "Detector sees: a person speaking · Framing: Medium, Medium close (person)"
     );
+}
+
+#[test]
+fn action_roles_carry_one_notice_that_changes_nothing_else() {
+    for (text, role, phrase, shots) in [
+        (
+            "the pastor's upper body",
+            "pastor",
+            "a person speaking",
+            &[Medium, MediumClose][..],
+        ),
+        (
+            "speakers close-up",
+            "speaker",
+            "a person speaking",
+            &[Close],
+        ),
+        ("singer close-up", "singer", "a person singing", &[Close]),
+        ("The Preacher", "preacher", "a person speaking", &[]),
+    ] {
+        let p = parse(text);
+        let notice = PromptWarning::ActionRole {
+            role: role.into(),
+            phrase: phrase.into(),
+        };
+        assert_eq!(p.warnings, [notice], "{text}");
+        assert!(!p.warnings[0].is_error(), "{text}");
+        // Phrase, shots and basis are what they would be without it.
+        assert_parse(text, phrase, shots, Basis::Person);
+    }
+    assert_eq!(
+        speaking("speaker").to_string(),
+        "\"speaker\" asks the detector for \"a person speaking\", an action: OWLv2 sees \
+         people and objects, not actions, so every person (photos on the screen included) gets \
+         this query's shots; take the speaker's shot by hand"
+    );
+}
+
+#[test]
+fn object_roles_and_other_prompts_carry_no_role_notice() {
+    for text in [
+        "guitarist close-up",
+        "bass guitarist",
+        "lead singer",
+        "a person speaking",
+        "the speaker's upper body at the lectern",
+        "the speaker's microphone",
+    ] {
+        assert_eq!(parse(text).warnings, [], "{text}");
+    }
+    let p = parse("drummer wide");
+    assert!(
+        matches!(&p.warnings[..], [PromptWarning::Note { phrase, .. }] if phrase == "wide"),
+        "{:?}",
+        p.warnings
+    );
+    assert_eq!(literal_prompt("speaker", &Lexicon::builtin()).warnings, []);
 }
 
 #[test]
@@ -232,7 +297,7 @@ fn typographic_apostrophes_mark_possessives() {
         let p = parse(text);
         assert_eq!(p.model_phrase, "a person speaking", "{text}");
         assert_eq!(p.shots, [Medium, MediumClose], "{text}");
-        assert!(p.warnings.is_empty(), "{text}: {:?}", p.warnings);
+        assert_eq!(p.warnings, [speaking("speaker")], "{text}");
     }
     assert_eq!(parse("Speaker\u{2019}s close-up").subject, "Speaker");
 }
@@ -411,7 +476,7 @@ fn quotes_and_brackets_around_cut_shot_words_never_reach_the_detector() {
 fn plural_shot_words_count() {
     for text in ["speaker close-ups", "speaker closeups", "speaker headshots"] {
         assert_parse(text, "a person speaking", &[Close], Basis::Person);
-        assert!(parse(text).warnings.is_empty(), "{text}");
+        assert_eq!(parse(text).warnings, [speaking("speaker")], "{text}");
     }
     assert_parse("guitar CUs", "guitar", &[Close], Basis::Object);
     assert_parse(

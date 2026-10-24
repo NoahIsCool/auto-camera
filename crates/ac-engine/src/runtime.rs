@@ -21,6 +21,7 @@
 //! | source → engine | [`ac_media::LatestFrame`] inside the source | newest frame only |
 //! | engine → worker | [`Slot`](crate::mailbox::Slot) per worker | newest request only |
 //! | worker → engine | `mpsc` channel | drained every tick; stale results dropped |
+//! | worker → engine | `mpsc` channel per worker | one "loaded" message, read every tick |
 //! | caller → engine | `mpsc` channel of [`EngineCommand`] + reply channel | applied in order at tick start |
 //! | engine → callers | [`Latest`]`<Arc<EngineSnapshot>>` | newest snapshot only |
 //! | engine → encoder | bounded queues inside [`ac_output::ProgramEncoder`] | drop and repay |
@@ -448,9 +449,11 @@ impl Runtime {
         let feeds: Vec<SourceFeed> = self
             .sources
             .iter()
-            .map(|s| SourceFeed {
+            .zip(&mut self.workers)
+            .map(|(s, w)| SourceFeed {
                 state: s.state(),
                 frame: s.latest(),
+                detector_loading: w.as_mut().is_some_and(DiscoveryWorker::is_loading),
             })
             .collect();
         let reference = feeds

@@ -265,9 +265,10 @@ pub fn output(ui: &mut Ui, snap: &EngineSnapshot, form: &mut OutputForm) -> Vec<
 pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, notice: Option<(&str, bool)>) {
     ui.horizontal_wrapped(|ui| {
         for s in &snap.sources {
+            let line = source_line(s, snap.media_time);
             let text = match source_tone(s) {
-                Tone::Warning => RichText::new(source_line(s)).color(AMBER),
-                Tone::Plain | Tone::Weak => RichText::new(source_line(s)),
+                Tone::Warning => RichText::new(line).color(AMBER),
+                Tone::Plain | Tone::Weak => RichText::new(line),
             };
             let label = ui.label(text);
             let hover = source_hover(s);

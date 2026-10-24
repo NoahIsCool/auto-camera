@@ -66,7 +66,11 @@
 //! **Roles** are rewritten only when the role word is the whole subject,
 //! after any articles ("the pastor", "guitarists"): the measured phrases are
 //! whole phrases, and splicing them into longer text is untested. "bass
-//! guitarist" is sent as typed.
+//! guitarist" is sent as typed. A role whose phrase names an action
+//! ([`crate::RoleNeeds::Action`]: speaker, pastor, preacher, singer) adds a
+//! [`PromptWarning::ActionRole`] notice, because OWLv2 sees people and
+//! objects, not actions, and gives such a query every person. The notice is
+//! the same whatever the detector until detectors declare what they can see.
 //!
 //! **Basis**: [`Basis::Person`] when the subject's head noun is a person or
 //! role word, else [`Basis::Object`]. The head noun is the last word before
@@ -111,7 +115,7 @@ mod trim;
 pub(crate) mod words;
 
 use head::{basis_of, role_of};
-use notices::{misreads, shot_words_in};
+use notices::{action_role, misreads, shot_words_in};
 use scan::{Match, Table};
 use trim::clean;
 use words::{CONNECTORS, DETERMINERS, JOINERS, LINK_WORDS, Token, is_in, phrase_key, tokenize};
@@ -187,6 +191,14 @@ pub enum PromptWarning {
         /// The phrase with the word it may belong to, as typed.
         words: String,
     },
+    /// The subject is a role whose detector phrase names an action
+    /// ([`crate::RoleNeeds::Action`]), which OWLv2 cannot see.
+    ActionRole {
+        /// The role, as the lexicon spells it ("speaker").
+        role: String,
+        /// The detector phrase it asks for ("a person speaking").
+        phrase: String,
+    },
     /// A caveat the lexicon attaches to a shot word.
     Note {
         /// The phrase, as typed.
@@ -251,6 +263,12 @@ impl fmt::Display for PromptWarning {
                 f,
                 "\"{phrase}\" is read as a shot size here; if \"{words}\" is what to look for, \
                  send the prompt as typed (literal)"
+            ),
+            PromptWarning::ActionRole { role, phrase } => write!(
+                f,
+                "\"{role}\" asks the detector for \"{phrase}\", an action: OWLv2 sees people \
+                 and objects, not actions, so every person (photos on the screen included) gets \
+                 this query's shots; take the {role}'s shot by hand"
             ),
             PromptWarning::Note { phrase, note } => write!(f, "\"{phrase}\" {note}"),
         }
@@ -457,8 +475,9 @@ pub fn parse_prompt(text: &str, lexicon: &Lexicon) -> ParsedPrompt {
         phrase: phrase.to_string(),
         note: note.to_string(),
     }));
+    warnings.extend(action_role(role));
     ParsedPrompt {
-        model_phrase: role.map_or_else(|| subject.clone(), str::to_string),
+        model_phrase: role.map_or_else(|| subject.clone(), |r| r.phrase.to_string()),
         subject,
         shots,
         basis,

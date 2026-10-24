@@ -66,10 +66,28 @@ later work, and the operator is told so whenever the word is used. The
 camera's own wide shot stays each source's Wide.
 
 Role words are rewritten only when they are the whole subject: speaker,
-pastor and preacher become "a person speaking" (measured on SAM 3.1 only;
-OWLv2 unscored, benchmark B0), guitarist "a person playing guitar"
-(measured on both), drummer "a person playing drums", singer "a person
-singing" (neither measured). "bass guitarist" is sent as typed.
+pastor and preacher become "a person speaking", guitarist "a person playing
+guitar", drummer "a person playing drums", singer "a person singing". "bass
+guitarist" is sent as typed. "a person speaking" found the speaker on SAM
+3.1 (10 of 20 frames, no false subjects). On OWLv2 (benchmark B0:
+people-first, the described-person route at the 0.15 person threshold) it
+found the speaker in 20 of 20 frames, with 300 false boxes on the 40
+labelled frames: it picks everyone, because OWLv2 sees people and objects,
+not actions. "a person playing guitar" is measured on both models, "a person
+playing drums" on OWLv2 (20 of 20, no false boxes), "a person singing" on
+neither.
+
+Each role entry carries a `needs` tag, `action` or `object` (design §4.2):
+speaker, pastor, preacher and singer need an action, guitarist and drummer
+an object (their instrument, which people-first matching asks for). A prompt
+rewritten to an action role carries a notice: OWLv2 gives every person
+(photos on the screen included) that query's shots, so the operator takes
+the speaker's shot by hand. The design asks for the warning only when the
+chosen model lacks the capability. It is not yet conditional on the
+detector: detectors declare what they can see only with the capability
+contract (design Phase 2), which does not exist yet, so the notice is shown
+whatever the detector. A `[lexicon]` role that replaces a built-in one
+replaces its tag too; a studio's entry without `needs` draws no notice.
 
 ### Grammar
 
@@ -144,7 +162,7 @@ in the director's suggestion, and a flag in the headless summary. The
 verdict has 5% hysteresis, so tracker jitter near the ceiling does not make
 the mark flicker. When two sizes of one subject are both drawn at the
 ceiling and look alike, the tighter one's hover text says which shot it
-matches.
+matches, and the headless summary gives that shot's id (`same_picture_as`).
 
 A shot keeps the basis of the query that asked for it. While its subject is
 on program or preview, removing that query (the subject becomes an orphan)
@@ -161,9 +179,10 @@ subject (design §4.2), which is later work.
 
 The operator window shows a live parse line under the prompt ("Detector
 sees: a person speaking · Framing: Medium, Medium close (person)") with the
-parser's notices, and its size checkboxes follow the parse until the
-operator touches one. Each live query shows what its detector is asked for.
-The headless summary reports the parse of every query.
+parser's notices (an action role's among them), and its size checkboxes
+follow the parse until the operator touches one. Each live query shows what
+its detector is asked for, with the notices in its hover text. The headless
+summary reports the parse of every query, notices included.
 
 ## Consequences
 
@@ -209,7 +228,11 @@ The headless summary reports the parse of every query.
    their headroom: two tiles and two shortcut slots for one picture, both
    marked limited, the tighter one saying which shot it matches. Choosing
    one of the two for "upper body" avoids that.
-2. The role lexicon, each entry a hypothesis until benchmarked.
+2. The role lexicon, each entry a hypothesis until benchmarked, and each
+   tagged with what it needs. OWLv2 cannot carry the Speaker (B0: "a person
+   speaking" picks every person), so an action role's notice tells the
+   operator to take the speaker's shot by hand, whatever the detector, until
+   detectors declare their capabilities.
 3. Explicit presets winning over shot words.
 4. "wide" giving a Full shot until the kit-inclusive version exists.
 5. Adding shot words in prompts to spec M2 and cut lines from the head to

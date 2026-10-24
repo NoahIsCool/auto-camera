@@ -278,6 +278,49 @@ fn people_prompts_use_the_person_threshold_by_default() {
     );
 }
 
+/// What OWLv2 does with an action (see the module's limits): "a person
+/// speaking" scores every person alike, about 0.18–0.20, so the described
+/// query picks every person, as "a person" does, ranked by its own score.
+#[test]
+fn a_description_on_every_person_picks_every_person_ranked_by_its_score() {
+    let p = plan(&["a person speaking", "a person"]);
+    let (person, speaking) = (
+        model_id(&p, PERSON_PROMPT),
+        model_id(&p, "a person speaking"),
+    );
+    let people = [
+        r(0.10, 0.30, 0.20, 0.90),
+        r(0.30, 0.30, 0.40, 0.90),
+        r(0.50, 0.30, 0.60, 0.90),
+        r(0.70, 0.30, 0.80, 0.90),
+        r(0.85, 0.05, 0.90, 0.20),
+    ];
+    // In another order than the person scores.
+    let speaking_scores = [0.19, 0.18, 0.20, 0.185, 0.195];
+    let mut dets = Vec::new();
+    for (i, (bbox, s)) in people.iter().zip(speaking_scores).enumerate() {
+        dets.push(det(&person, *bbox, 0.25 + 0.01 * i as f32));
+        // OWLv2's boxes do not depend on the query: the same box.
+        dets.push(det(&speaking, *bbox, s));
+    }
+    let out = p.assign(&dets);
+    let speakers: Vec<&Detection> = out.iter().filter(|d| d.query.0 == "q0").collect();
+    assert_eq!(speakers.len(), 5, "everyone is speaking: {out:?}");
+    assert_eq!(
+        out.iter().filter(|d| d.query.0 == "q1").count(),
+        5,
+        "as many as a person"
+    );
+    let order: Vec<Rect> = speakers.iter().map(|d| d.bbox).collect();
+    assert_eq!(
+        order,
+        [people[2], people[4], people[0], people[3], people[1]],
+        "ranked by the speaking score"
+    );
+    let scores: Vec<f32> = speakers.iter().map(|d| d.score).collect();
+    assert_eq!(scores, [0.20, 0.195, 0.19, 0.185, 0.18]);
+}
+
 #[test]
 fn a_person_inside_an_object_larger_than_them_holds_it() {
     let p = plan(&["a person behind a drum kit"]);
@@ -305,6 +348,95 @@ fn contained_fraction_is_measured_against_the_smaller_box() {
     assert!((contained_fraction(&half, &small) - 0.5).abs() < 1e-9);
     let zero = r(0.5, 0.5, 0.5, 0.5);
     assert_eq!(contained_fraction(&zero, &big), 0.0);
+}
+
+/// A "person speaking" box equal to a whole person also contains a head box
+/// nested in them, small enough to survive NMS at 0.3. Both hold it fully;
+/// rounding makes the head's share the larger, but the tie goes to the
+/// higher-scored whole person.
+#[test]
+fn a_containment_tie_goes_to_the_higher_scored_person_not_to_rounding() {
+    let p = plan(&["a person speaking"]);
+    let (person, speaking) = (
+        model_id(&p, PERSON_PROMPT),
+        model_id(&p, "a person speaking"),
+    );
+    let full = Rect::new(0.2, 0.15, 0.13, 0.62);
+    let head = Rect::new(0.221, 0.15, 0.07, 0.15);
+    assert!(head.iou(&full) < 0.3, "the head box survives NMS");
+    assert!(
+        contained_fraction(&full, &head) > contained_fraction(&full, &full),
+        "rounding favours the head"
+    );
+    let dets = vec![
+        det(&person, full, 0.5),
+        det(&person, head, 0.3),
+        det(&speaking, full, 0.25),
+    ];
+    let out = p.assign(&dets);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].bbox, full);
+}
+
+/// Over a grid of head boxes nested in a whole person, a box containing
+/// both always goes to whichever of the two scored higher as a person.
+#[test]
+fn exact_containment_ties_always_go_to_the_higher_scored_person() {
+    let p = plan(&["a person speaking"]);
+    let (person, speaking) = (
+        model_id(&p, PERSON_PROMPT),
+        model_id(&p, "a person speaking"),
+    );
+    let mut rounded = 0;
+    for fx in 0..10 {
+        for hx in 0..10 {
+            for hy in 0..10 {
+                let full = Rect::new(0.20 + 0.013 * f64::from(fx), 0.15, 0.13, 0.62);
+                let head = Rect::new(
+                    full.x + 0.003 * f64::from(hx),
+                    full.y + 0.004 * f64::from(hy),
+                    0.07,
+                    0.15,
+                );
+                if contained_fraction(&full, &head) != contained_fraction(&full, &full) {
+                    rounded += 1;
+                }
+                for (full_score, head_score) in [(0.5, 0.3), (0.3, 0.5)] {
+                    let dets = vec![
+                        det(&person, full, full_score),
+                        det(&person, head, head_score),
+                        det(&speaking, full, 0.25),
+                    ];
+                    let out = p.assign(&dets);
+                    let want = if full_score > head_score { full } else { head };
+                    assert_eq!(out.len(), 1, "{out:?}");
+                    assert_eq!(
+                        out[0].bbox, want,
+                        "full {full:?} at {full_score}, head {head:?} at {head_score}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(rounded > 0, "the grid has ties that rounding breaks");
+}
+
+/// The tie margin is rounding-sized: a person holding even slightly more of
+/// an object still gets it over a higher-scored one; equal shares go to the
+/// higher score, and shares under `min_overlap` to no one.
+#[test]
+fn only_rounding_sized_differences_are_ties() {
+    let object = r(0.2, 0.0, 0.6, 1.0);
+    // 0.5 of the object against 0.500025.
+    let people = [
+        (r(0.0, 0.0, 0.4, 1.0), 0.5),
+        (r(0.39999, 0.0, 0.8, 1.0), 0.3),
+    ];
+    assert_eq!(holder(&people, &object, 0.45), Some(1));
+    let people = [(r(0.0, 0.0, 0.4, 1.0), 0.5), (r(0.4, 0.0, 0.8, 1.0), 0.3)];
+    assert_eq!(holder(&people, &object, 0.45), Some(0));
+    assert_eq!(holder(&people, &object, 0.6), None);
+    assert_eq!(holder(&[], &object, 0.45), None);
 }
 
 #[test]

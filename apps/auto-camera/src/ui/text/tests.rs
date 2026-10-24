@@ -1,7 +1,7 @@
 //! Tests for the operator-facing text.
 
 use super::*;
-use crate::ui::fixtures::{encoder_stats, recording, snapshot, subject_shot};
+use crate::ui::fixtures::{encoder_stats, preparing_snapshot, recording, snapshot, subject_shot};
 
 #[test]
 fn numbers_are_rounded_and_clamped() {
@@ -87,16 +87,20 @@ fn shot_names_fall_back_to_ids_and_dashes() {
 #[test]
 fn status_bar_lines_show_rates_timing_and_drops() {
     let mut snap = snapshot();
+    let now = Duration::from_secs(5);
     let src = &mut snap.sources[0];
-    assert_eq!(source_line(src), "stage –/30 fps · 0 missed · NO SIGNAL");
+    assert_eq!(
+        source_line(src, now),
+        "stage –/30 fps · 0 missed · NO SIGNAL"
+    );
     src.frames = 100;
     src.fps = 29.94;
     src.missed = 3;
     src.available = true;
-    assert_eq!(source_line(src), "stage 29.9/30 fps · 3 missed");
+    assert_eq!(source_line(src, now), "stage 29.9/30 fps · 3 missed");
     src.discovery.last_latency = Some(Duration::from_millis(12));
     assert_eq!(
-        source_line(src),
+        source_line(src, now),
         "stage 29.9/30 fps · 3 missed · detect 12.0 ms"
     );
 
@@ -116,6 +120,30 @@ fn status_bar_lines_show_rates_timing_and_drops() {
     assert_eq!(
         dropped_line(&snap),
         "dropped: 3 source · 4 ticks · 2 encoder"
+    );
+}
+
+#[test]
+fn source_line_says_the_detector_is_preparing_and_for_how_long() {
+    let mut snap = preparing_snapshot();
+    let src = &mut snap.sources[0];
+    assert!(src.discovery.preparing, "a fresh core with a detector");
+    assert_eq!(
+        source_line(src, Duration::ZERO),
+        "stage –/30 fps · 0 missed · preparing detector 0:00 · NO SIGNAL"
+    );
+    src.frames = 900;
+    src.fps = 30.0;
+    src.available = true;
+    assert_eq!(
+        source_line(src, Duration::from_millis(125_900)),
+        "stage 30.0/30 fps · 0 missed · preparing detector 2:05"
+    );
+    src.discovery.preparing = false;
+    src.discovery.ready_after = Some(Duration::from_secs(126));
+    assert_eq!(
+        source_line(src, Duration::from_secs(127)),
+        "stage 30.0/30 fps · 0 missed"
     );
 }
 
@@ -287,7 +315,7 @@ fn the_status_bar_counts_detector_failures_and_warns() {
     let mut snap = snapshot();
     let s = &mut snap.sources[0];
     s.discovery_enabled = true;
-    let plain = source_line(s);
+    let plain = source_line(s, Duration::ZERO);
     assert!(!plain.contains("detect "), "{plain}");
     assert_eq!(source_tone(s), Tone::Plain);
     assert_eq!(source_hover(s), "");
@@ -297,7 +325,7 @@ fn the_status_bar_counts_detector_failures_and_warns() {
     s.discovery.timeouts = 1;
     s.discovery.last_error = Some("the sidecar is unavailable: crashed".into());
     s.discovery.last_outcome = Some(PassOutcome::Failed);
-    let line = source_line(s);
+    let line = source_line(s, Duration::ZERO);
     assert!(
         line.ends_with("detect 640.0 ms · 3 detector errors · 2 too old · 1 timed out · NO SIGNAL"),
         "{line}"
@@ -388,6 +416,31 @@ fn parse_notices_are_listed_but_errors_are_not() {
     );
     assert!(parse_notes(&ac_core::parse_prompt("close-up", &lexicon)).is_empty());
     assert!(parse_notes(&ac_core::parse_prompt("guitar", &lexicon)).is_empty());
+}
+
+#[test]
+fn an_action_role_is_noted_in_the_form_and_the_query_hover() {
+    let lexicon = ac_core::Lexicon::builtin();
+    let notes = parse_notes(&ac_core::parse_prompt("speaker upper body", &lexicon));
+    assert_eq!(
+        notes,
+        [
+            "Note: \"speaker\" asks the detector for \"a person speaking\", an action: OWLv2 sees \
+          people and objects, not actions, so every person (photos on the screen included) gets \
+          this query's shots; take the speaker's shot by hand."
+        ]
+    );
+    let hover = query_hover(&query("speaker upper body", false, None));
+    assert_eq!(
+        hover.lines().collect::<Vec<_>>(),
+        [
+            "Detector sees: a person speaking · Framing: Medium, Medium close (person)",
+            notes[0].as_str(),
+        ]
+    );
+    // An object role draws none.
+    assert!(parse_notes(&ac_core::parse_prompt("guitarist close-up", &lexicon)).is_empty());
+    assert!(!query_hover(&query("guitarist close-up", false, None)).contains("Note"));
 }
 
 #[test]

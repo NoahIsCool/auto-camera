@@ -1,13 +1,27 @@
 //! The JSON summary of a headless run: plain serializable data, built by
 //! `summarize` in the parent module from the run's snapshots.
 //!
-//! Every value is rounded for reading (milliseconds to one decimal, scores
-//! to two) and absent values are `null`, so a summary diffed between runs
-//! shows changes in behaviour, not in float noise.
+//! Every value is rounded for reading (milliseconds to one decimal,
+//! normalized coordinates to four, scores to two) and absent values are
+//! `null`, so a summary diffed between runs shows changes in behaviour, not
+//! in float noise.
+//!
+//! Besides counters it carries what a run without a window needs to judge
+//! the pictures: how each query's prompt was read (what the detector was
+//! asked for, the framings and any notices) and what the newest detector
+//! pass on each source found for it (spec M2), whether each source's
+//! detector was ready and when (a run that ended while it loaded says
+//! nothing about detection), each shot's crop width and height range over the run (Phase
+//! 1 Milestone 1 of `/mnt/project-files/research/model-picker-design.md` §5
+//! asks a headless band run for a crop-height variation of at most 10% on
+//! static performers), whether each shot is zoom-limited and which shot it
+//! then looks the same as, and the subjects at the end with the queries
+//! they answer, so duplicate subjects and their roles can be told apart
+//! without a contact sheet.
 
 use std::path::PathBuf;
 
-use ac_core::{Basis, ShotSize};
+use ac_core::{Basis, ShotSize, TrackState};
 use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::ShotStatus;
 use serde::Serialize;
@@ -39,6 +53,8 @@ pub struct Summary {
     pub max_subjects: usize,
     /// Shots at the end of the run.
     pub shots: Vec<ShotSummary>,
+    /// Subjects at the end of the run, in source order.
+    pub subjects: Vec<SubjectSummary>,
     /// Program shot changes.
     pub program: ProgramSummary,
     /// Auto-director state at the end.
@@ -64,6 +80,12 @@ pub struct SourceSummary {
     pub frames: u64,
     /// Frames replaced in the mailbox before the engine saw them.
     pub missed: u64,
+    /// The run ended while the source's detector was still loading, so the
+    /// discovery counters say nothing about the detector.
+    pub discovery_preparing: bool,
+    /// Master-clock seconds at which the detector was ready (`null` while
+    /// it loaded, and without a detector).
+    pub detector_ready_s: Option<f64>,
     /// Discovery requests sent.
     pub discovery_requests: u64,
     /// Discovery results applied.
@@ -145,6 +167,34 @@ pub struct ShotSummary {
     pub quality: f32,
     /// The preset's zoom ceiling keeps the shot looser than its size.
     pub limited_by_zoom: bool,
+    /// Id of another shot of the same subject that this one looks the same
+    /// as (both drawn at the zoom ceiling), when the engine marks one.
+    pub same_picture_as: Option<String>,
+    /// Narrowest crop seen over the run, as a fraction of source width.
+    pub crop_width_min: f64,
+    /// Widest crop seen over the run, as a fraction of source width.
+    pub crop_width_max: f64,
+    /// Shortest crop seen over the run, as a fraction of source height.
+    pub crop_height_min: f64,
+    /// Tallest crop seen over the run, as a fraction of source height.
+    pub crop_height_max: f64,
+}
+
+/// One subject in the summary, as it was at the end of the run.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubjectSummary {
+    /// Id, unique within the source.
+    pub id: u32,
+    /// Source id.
+    pub source: String,
+    /// Primary query id.
+    pub query: String,
+    /// Ids of the other queries it answers.
+    pub aliases: Vec<String>,
+    /// Tracking or lost.
+    pub state: TrackState,
+    /// Box `[x, y, w, h]` in normalized source coordinates.
+    pub bbox: [f64; 4],
 }
 
 /// Program changes in the summary.

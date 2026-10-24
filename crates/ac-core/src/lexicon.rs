@@ -18,10 +18,21 @@
 //!   operator when it may have misread one.
 //! * [`RoleWord`]s rewrite a role ("speaker") into the phrase a detector
 //!   understands ("a person speaking"). Every entry is a hypothesis until it
-//!   is benchmarked: "a person speaking" is measured on SAM 3.1 only (10/20
-//!   frames, 0 false, `sam31-vs-owlv2.md`), "a person playing guitar" on
-//!   both models, the others on neither. To OWLv2 the bare word "speaker"
+//!   is benchmarked. "a person speaking" found the speaker on SAM 3.1 (10/20
+//!   frames, 0 false, `sam31-vs-owlv2.md`); on OWLv2 (benchmark B0,
+//!   people-first, described-person route at the 0.15 person threshold) it
+//!   found the speaker in 20 of 20 frames with 300 false boxes on 40
+//!   labelled frames: it picks everyone. "a person playing guitar" is
+//!   measured on both models, "a person playing drums" on OWLv2 (20/20, 0
+//!   false), "a person singing" on neither. To OWLv2 the bare word "speaker"
 //!   most likely means a loudspeaker, which is why the rewrite matters.
+//! * Each role entry says what its phrase needs the detector to see
+//!   ([`RoleNeeds`], design §4.2): an *action* (speaking, singing) or an
+//!   *object* the person plays (a guitar, drums). OWLv2 sees people and
+//!   objects, not actions, so the parser adds a notice to every prompt
+//!   rewritten to an action role. The notice does not depend on the
+//!   detector yet: that waits for the detectors' capability contract
+//!   (design Phase 2), and the tag keeps the data model-neutral until then.
 //! * Person words ("woman", "player") name people. A subject whose head
 //!   noun is a person or role word is framed on the person basis.
 //!
@@ -91,6 +102,20 @@ pub struct ShotWord {
     pub also: Option<WordClass>,
 }
 
+/// What a role's detector phrase needs the detector to see besides a
+/// person (design §4.2), so the operator can be told when it cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleNeeds {
+    /// What the person is doing ("a person speaking", "a person singing").
+    /// A detector that sees only boxes, as OWLv2 does, cannot tell it, so
+    /// the parser adds a notice (`PromptWarning::ActionRole`).
+    Action,
+    /// An object the person plays or holds ("a person playing guitar"):
+    /// people-first matching asks for the object and picks its holder.
+    Object,
+}
+
 /// A role and the phrase a detector is asked for instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +124,11 @@ pub struct RoleWord {
     pub word: String,
     /// The detector phrase, such as "a person speaking".
     pub phrase: String,
+    /// What the phrase needs the detector to see; `None` when untagged,
+    /// which draws no notice. An entry that replaces a built-in role
+    /// replaces its tag too.
+    #[serde(default)]
+    pub needs: Option<RoleNeeds>,
 }
 
 /// The parser's vocabulary; see the module docs.
@@ -183,16 +213,22 @@ const WIDE: &str = "wide";
 const WIDE_NOTE: &str = "frames the full body for now; framing the subject together with its \
                          instrument or kit is later work";
 
-/// Built-in roles: design §4.2's role lexicon. Every entry is a hypothesis
-/// until benchmarked on the rehearsal footage.
-const ROLE_WORDS: &[(&str, &str)] = &[
-    ("speaker", "a person speaking"),
-    ("pastor", "a person speaking"),
-    ("preacher", "a person speaking"),
-    ("guitarist", "a person playing guitar"),
-    ("drummer", "a person playing drums"),
-    ("singer", "a person singing"),
-];
+/// Built-in roles: design §4.2's role lexicon, with what each phrase needs.
+/// Every entry is a hypothesis until benchmarked on the rehearsal footage.
+/// The guitarist's and drummer's phrases name an instrument, which
+/// people-first matching asks for as an object; the others describe an
+/// action.
+const ROLE_WORDS: &[(&str, &str, RoleNeeds)] = {
+    use RoleNeeds::{Action, Object};
+    &[
+        ("speaker", "a person speaking", Action),
+        ("pastor", "a person speaking", Action),
+        ("preacher", "a person speaking", Action),
+        ("guitarist", "a person playing guitar", Object),
+        ("drummer", "a person playing drums", Object),
+        ("singer", "a person singing", Action),
+    ]
+};
 
 /// Built-in person words: the people-first matcher's person words
 /// (`ac_vision::matching`) and common names for band members.
@@ -241,9 +277,10 @@ impl Lexicon {
                 .collect(),
             roles: ROLE_WORDS
                 .iter()
-                .map(|(word, phrase)| RoleWord {
-                    word: (*word).into(),
-                    phrase: (*phrase).into(),
+                .map(|&(word, phrase, needs)| RoleWord {
+                    word: word.into(),
+                    phrase: phrase.into(),
+                    needs: Some(needs),
                 })
                 .collect(),
             person_words: PERSON_WORDS.iter().map(|w| (*w).into()).collect(),
@@ -399,6 +436,25 @@ mod tests {
     }
 
     #[test]
+    fn builtin_roles_say_what_their_phrases_need() {
+        let lexicon = Lexicon::builtin();
+        let needs = |word: &str| {
+            lexicon
+                .roles
+                .iter()
+                .find(|r| r.word == word)
+                .map(|r| r.needs)
+        };
+        for word in ["speaker", "pastor", "preacher", "singer"] {
+            assert_eq!(needs(word), Some(Some(RoleNeeds::Action)), "{word}");
+        }
+        for word in ["guitarist", "drummer"] {
+            assert_eq!(needs(word), Some(Some(RoleNeeds::Object)), "{word}");
+        }
+        assert!(lexicon.roles.iter().all(|r| r.needs.is_some()));
+    }
+
+    #[test]
     fn set_shot_replaces_by_key() {
         let mut lexicon = Lexicon::builtin();
         let before = lexicon.shots.len();
@@ -431,11 +487,13 @@ mod tests {
         lexicon.set_role(RoleWord {
             word: "Speaker".into(),
             phrase: "a person at a lectern".into(),
+            needs: None,
         });
         assert_eq!(lexicon.roles.len(), roles);
+        // The whole entry is replaced, its tag too.
         assert_eq!(
-            lexicon.roles.last().map(|r| r.phrase.as_str()),
-            Some("a person at a lectern")
+            lexicon.roles.last().map(|r| (r.phrase.as_str(), r.needs)),
+            Some(("a person at a lectern", None))
         );
         let people = lexicon.person_words.len();
         lexicon.add_person_word("WOMAN");
@@ -477,6 +535,7 @@ mod tests {
             roles: vec![RoleWord {
                 word: word.into(),
                 phrase: phrase.into(),
+                needs: None,
             }],
             ..Lexicon::default()
         };

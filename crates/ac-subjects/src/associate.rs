@@ -17,11 +17,17 @@
 //!    tracking and a lost subject about equally, the tracking one keeps it.
 //! 3. **Alias match.** Detections still unmatched are matched the same way to
 //!    unmatched subjects that answer the query through an alias.
-//! 4. **Aliasing.** A detection still unmatched that overlaps any subject
-//!    above `alias_iou` is that subject seen through another prompt: its query
-//!    becomes an alias and, if the subject was not observed yet in this
-//!    batch, the detection counts as an observation of it. A detection of the
-//!    *same* query there is a duplicate box and is dropped.
+//! 4. **Aliasing.** A detection still unmatched that is the same entity as a
+//!    subject is that subject seen through another prompt: its query becomes
+//!    an alias and, if the subject was not observed yet in this batch, the
+//!    detection counts as an observation of it. A box is the same entity as
+//!    a subject when it overlaps above `alias_iou` either the subject's
+//!    predicted box or the box another query's detection applied to it in
+//!    this same batch. The second reference matters for late results: the
+//!    tracker may hold a newer, differently sized box that the detection
+//!    agrees with but does not replace, and the identical boxes one pass
+//!    gives one entity for several prompts must still alias. A detection of
+//!    the *same* query there is a duplicate box and is dropped.
 //! 5. **Shadows.** An unprotected tracking subject left unmatched while it
 //!    sits above `alias_iou` on a matched subject is probably a duplicate (its
 //!    tracker drifted onto someone else). If that lasts for `lost_after` it
@@ -78,6 +84,12 @@ struct Batch {
     used: Vec<bool>,
     /// Subjects observed in this batch.
     observed: BTreeSet<SubjectId>,
+    /// The box of this batch's detection that each subject was matched,
+    /// aliased, recovered or admitted with (the first one, when several
+    /// detections reached it). Aliasing compares with it besides the
+    /// predicted box, because a late result leaves the tracker's newer box
+    /// in place.
+    applied: BTreeMap<SubjectId, Rect>,
     /// Events in the order they happened.
     events: Vec<StoreEvent>,
 }
@@ -122,7 +134,7 @@ impl SubjectStore {
             if batch.used[i] {
                 continue;
             }
-            if let Some(id) = self.overlapping(&det.bbox, pts) {
+            if let Some(id) = self.overlapping(&det.bbox, pts, &batch) {
                 self.alias(id, det, pts, &mut batch);
             } else {
                 fresh.push(i);
@@ -169,10 +181,17 @@ impl SubjectStore {
 
     /// The non-orphan subject overlapping `bbox` the most above `alias_iou`
     /// (ties to the lower id).
-    fn overlapping(&self, bbox: &Rect, pts: Duration) -> Option<SubjectId> {
+    ///
+    /// A box is the same entity as a subject when it overlaps above
+    /// `alias_iou` either the subject's predicted box at `pts` or the box
+    /// another query's detection applied to it in this same pass
+    /// (`batch.applied`): the tracker may hold a newer, differently sized
+    /// box.
+    fn overlapping(&self, bbox: &Rect, pts: Duration, batch: &Batch) -> Option<SubjectId> {
         let mut best: Option<(f64, SubjectId)> = None;
         for rec in self.subjects.values().filter(|r| !r.orphaned) {
-            let iou = bbox.iou(&rec.predicted(pts));
+            let same_pass = batch.applied.get(&rec.id()).map_or(0.0, |b| bbox.iou(b));
+            let iou = bbox.iou(&rec.predicted(pts)).max(same_pass);
             if iou > self.config.alias_iou && best.is_none_or(|(b, _)| iou > b) {
                 best = Some((iou, rec.id()));
             }
@@ -200,6 +219,7 @@ impl SubjectStore {
     /// Applies a detection that matched subject `id`.
     fn observe(&mut self, id: SubjectId, det: &Clean<'_>, pts: Duration, batch: &mut Batch) {
         batch.observed.insert(id);
+        batch.applied.insert(id, det.bbox);
         let reseed_iou = self.config.reseed_iou;
         let rec = self.subjects.get_mut(&id).expect("matched ids are live");
         rec.subject.confidence = f64::from(det.score);
@@ -312,7 +332,7 @@ impl SubjectStore {
                 .and_then(VecDeque::pop_front)
                 .expect("queue is non-empty");
             let det = &clean[i];
-            if let Some(id) = self.overlapping(&det.bbox, pts) {
+            if let Some(id) = self.overlapping(&det.bbox, pts, batch) {
                 self.alias(id, det, pts, batch);
                 continue;
             }
@@ -363,6 +383,7 @@ impl SubjectStore {
         );
         self.subjects.insert(id, rec);
         batch.observed.insert(id);
+        batch.applied.insert(id, det.bbox);
         batch
             .events
             .push(StoreEvent::Created { id, bbox: det.bbox });
