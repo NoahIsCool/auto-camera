@@ -1,7 +1,7 @@
 //! Tests for the operator-facing text.
 
 use super::*;
-use crate::ui::fixtures::{encoder_stats, recording, snapshot, subject_shot};
+use crate::ui::fixtures::{encoder_stats, preparing_snapshot, recording, snapshot, subject_shot};
 
 #[test]
 fn numbers_are_rounded_and_clamped() {
@@ -49,16 +49,20 @@ fn shot_names_fall_back_to_ids_and_dashes() {
 #[test]
 fn status_bar_lines_show_rates_timing_and_drops() {
     let mut snap = snapshot();
+    let now = Duration::from_secs(5);
     let src = &mut snap.sources[0];
-    assert_eq!(source_line(src), "stage –/30 fps · 0 missed · NO SIGNAL");
+    assert_eq!(
+        source_line(src, now),
+        "stage –/30 fps · 0 missed · NO SIGNAL"
+    );
     src.frames = 100;
     src.fps = 29.94;
     src.missed = 3;
     src.available = true;
-    assert_eq!(source_line(src), "stage 29.9/30 fps · 3 missed");
+    assert_eq!(source_line(src, now), "stage 29.9/30 fps · 3 missed");
     src.discovery.last_latency = Some(Duration::from_millis(12));
     assert_eq!(
-        source_line(src),
+        source_line(src, now),
         "stage 29.9/30 fps · 3 missed · detect 12.0 ms"
     );
 
@@ -78,6 +82,30 @@ fn status_bar_lines_show_rates_timing_and_drops() {
     assert_eq!(
         dropped_line(&snap),
         "dropped: 3 source · 4 ticks · 2 encoder"
+    );
+}
+
+#[test]
+fn source_line_says_the_detector_is_preparing_and_for_how_long() {
+    let mut snap = preparing_snapshot();
+    let src = &mut snap.sources[0];
+    assert!(src.discovery.preparing, "a fresh core with a detector");
+    assert_eq!(
+        source_line(src, Duration::ZERO),
+        "stage –/30 fps · 0 missed · preparing detector 0:00 · NO SIGNAL"
+    );
+    src.frames = 900;
+    src.fps = 30.0;
+    src.available = true;
+    assert_eq!(
+        source_line(src, Duration::from_millis(125_900)),
+        "stage 30.0/30 fps · 0 missed · preparing detector 2:05"
+    );
+    src.discovery.preparing = false;
+    src.discovery.ready_after = Some(Duration::from_secs(126));
+    assert_eq!(
+        source_line(src, Duration::from_secs(127)),
+        "stage 30.0/30 fps · 0 missed"
     );
 }
 

@@ -305,3 +305,24 @@ fn people_first_settings_are_validated() {
     }
     assert!(people_config().validate().is_ok());
 }
+
+/// A failed CoreML compile names the cache folder to delete; other errors,
+/// and sessions without a CoreML cache, are passed on as they are.
+#[test]
+fn a_failed_coreml_compile_names_the_cache_to_delete() {
+    let dir = Path::new("/models/owl/coreml-cache/detector-123-456");
+    let failed = "Error compiling model: compiler error".to_owned();
+    let hinted = with_cache_hint(failed.clone(), Some(dir));
+    assert!(hinted.starts_with(&failed), "{hinted}");
+    assert!(
+        hinted.ends_with("delete /models/owl/coreml-cache/detector-123-456 and restart)"),
+        "{hinted}"
+    );
+    assert_eq!(with_cache_hint(failed.clone(), None), failed);
+    let other = "Invalid model".to_owned();
+    assert_eq!(with_cache_hint(other.clone(), Some(dir)), other);
+    assert_eq!(
+        cache_in_use("CPU", Path::new("/models/owl/detector.onnx")),
+        None
+    );
+}

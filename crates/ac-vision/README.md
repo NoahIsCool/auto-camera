@@ -57,17 +57,35 @@ CoreML cannot run fall back to the CPU. Only nodes with static input shapes
 go to CoreML: given the dynamic query axis, MPSGraph aborts the process while
 compiling the text encoder. The first load compiles the graphs for CoreML,
 which takes two to three minutes and about 7 GB of memory. Two caches keep
-later loads short (26–29 s): ONNX Runtime's, in `coreml-cache/` next to each
-graph (about 1.6 GB for OWLv2 base, reused until the graph file changes),
-and CoreML's own, which macOS keeps per executable in
-`~/Library/Caches/<executable name>/com.apple.e5rt.e5bundlecache`. The second
-is written only when a compile finishes, so the first run of a new
-executable (`auto-camera`, or the `owl_detect` example) must stay up until
-detections start. The engine loads the detector on its discovery thread, so
-the window and program run while it compiles; discovery requests time out
-until it is ready. To build against a local ONNX Runtime
-(1.27 or newer) instead, for example the `libonnxruntime` inside the
-`onnxruntime` Python wheel:
+later loads short (26–29 s):
+
+- ONNX Runtime's, in `coreml-cache/` next to each graph (about 1.6 GB for
+  OWLv2 base). ONNX Runtime keys it on the graph's path and the provider
+  options, and the folder name adds the graph file's size and modification
+  time, so it is reused until the graph file changes and survives
+  rebuilding the app.
+- CoreML's own specialization of the compiled model for this Mac, which
+  macOS keeps per executable in
+  `~/Library/Caches/<executable name>/com.apple.e5rt.e5bundlecache`. This is
+  what each new build of `auto-camera` (or of the `owl_detect` example) pays
+  again, about 110 s in the app, and neither `ort` nor ONNX Runtime has an
+  option to move it. CoreML writes it only when the compile finishes, so
+  quitting during it loses it: after a build, keep the first run up until
+  the detector is ready.
+
+The engine loads the detector on its discovery thread, so the window and
+program run while it compiles. Meanwhile the window's status bar says
+`preparing detector m:ss`, no discovery requests are sent and no timeouts
+counted, and a headless run waits for the detector (up to five minutes)
+before it starts timing, so a short run neither spends itself on the load
+nor ends the process mid-compile. If a load fails with "Error compiling
+model", the error names the graph's `coreml-cache/` folder: a first compile
+that was interrupted can leave a folder that ONNX Runtime takes for a
+finished one, so delete it and restart. The app never deletes it by itself,
+since another loader may be writing it.
+
+To build against a local ONNX Runtime (1.27 or newer) instead, for example
+the `libonnxruntime` inside the `onnxruntime` Python wheel:
 
 ```sh
 export ORT_LIB_LOCATION=/path/to/dir/with/libonnxruntime   # .so or .dylib

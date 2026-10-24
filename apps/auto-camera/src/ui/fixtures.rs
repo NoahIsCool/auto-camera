@@ -15,6 +15,16 @@ use ac_sources::SourceConfig;
 
 /// A snapshot of a fresh one-source studio: the wide shot, nothing on air.
 pub fn snapshot() -> EngineSnapshot {
+    fresh(false)
+}
+
+/// [`snapshot`] of a studio whose source has a detector, still preparing.
+pub fn preparing_snapshot() -> EngineSnapshot {
+    fresh(true)
+}
+
+/// A fresh one-source studio's snapshot, with a detector when `detector`.
+fn fresh(detector: bool) -> EngineSnapshot {
     let config = StudioConfig::with_source(
         "stage",
         SourceConfig::Synthetic {
@@ -31,7 +41,7 @@ pub fn snapshot() -> EngineSnapshot {
         fps: 30.0,
         audio: None,
     };
-    let core = EngineCore::new(&config, vec![info], &[false]).expect("core");
+    let core = EngineCore::new(&config, vec![info], &[detector]).expect("core");
     core.snapshot(OutputView::default(), TimingView::default(), true)
 }
 

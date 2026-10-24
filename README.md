@@ -57,16 +57,22 @@ auto-camera [--config PATH] --headless [--seconds N] [--record PATH]
 
 A headless run starts the engine without a window, waits for the first
 picture, puts a shot on air (the director does it in Auto mode, otherwise
-the first wide is cut to program), starts recording when `--record` is given
+the first wide is cut to program), waits up to five minutes for the
+detector to load (a CoreML compile can take minutes; the run fails if it is
+still loading then), starts recording when `--record` is given
 (the stream also goes to `output.rtmp_url` if the config sets one), runs for
 `--seconds` (default 10) after recording started, finalizes the recording,
-shuts down and prints a JSON summary on stdout:
+shuts down and prints a JSON summary on stdout. Besides counters, each
+source says whether its detector was still preparing and when it was ready
+(`discovery_preparing`, `detector_ready_s`), each shot gives the range of
+its crop size over the run (`crop_width_min` to `crop_height_max`), and
+`subjects` lists the subjects at the end with the queries they answer:
 
 ```json
 {
   "ok": true,
   "ticks": 160,
-  "sources": [{ "id": "stage", "fps": 31.0, "frames": 155, "missed": 3, "discovery_applied": 40 }],
+  "sources": [{ "id": "stage", "fps": 31.0, "frames": 155, "missed": 3, "discovery_preparing": false, "detector_ready_s": 0.03, "discovery_applied": 40 }],
   "max_subjects": 3,
   "program": { "last": "stage/wide", "changes": 1, "log": [[0.23, "stage/wide"]] },
   "director": { "mode": "suggest", "profile": "talk", "takes": 0, "reason": "best available shot" },

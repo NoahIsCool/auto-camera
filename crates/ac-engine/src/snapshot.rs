@@ -135,9 +135,16 @@ pub struct DirectorView {
     pub takes: u64,
 }
 
-/// Discovery counters of one source.
+/// Discovery counters of one source, and whether its detector is ready.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DiscoveryStats {
+    /// The detector is still loading (a CoreML compile can take minutes):
+    /// no requests are sent and no timeouts counted until it is ready.
+    pub preparing: bool,
+    /// Master-clock time of the tick on which the detector was first ready
+    /// (its loader returned, or failed: then every pass errors); `None`
+    /// while preparing and without a detector.
+    pub ready_after: Option<Duration>,
     /// Requests sent to the worker.
     pub requests: u64,
     /// Results applied.

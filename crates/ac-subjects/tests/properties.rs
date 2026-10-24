@@ -13,11 +13,19 @@
 //! * the live set and display order match the events;
 //!
 //! and finally that replaying the same calls yields the same events.
+//!
+//! A second property pins down same-pass aliasing: when several prompts box
+//! one entity identically in one batch (as people-first matching does), the
+//! batch reaches exactly one subject and that subject answers every one of
+//! them, whatever the tracker's box (moved and rescaled to IoU 0.3 to 1.0
+//! with the detection), however late the batch, and in any query set and
+//! order. When one of the prompts is already the subject's, nothing is
+//! created at all.
 
 use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
-use ac_core::{QueryId, Rect, SourceId, SubjectId};
+use ac_core::{Point, QueryId, Rect, SourceId, SubjectId};
 use ac_subjects::{
     Detection, RetireReason, StoreConfig, StoreEvent, SubjectStore, TrackObservation,
 };
@@ -241,6 +249,89 @@ proptest! {
         let mut replay_model = Model::default();
         for (op, events) in ops.iter().zip(&log) {
             prop_assert_eq!(&apply(&mut replay, &mut replay_model, op), events);
+        }
+    }
+}
+
+/// The entity every prompt boxes in the same-pass property.
+fn entity() -> Rect {
+    Rect::new(0.4, 0.3, 0.1, 0.3)
+}
+
+/// `bbox` moved by `(dx, dy)` and scaled by `(sx, sy)` about its centre.
+fn warp(bbox: Rect, (dx, dy): (f64, f64), (sx, sy): (f64, f64)) -> Rect {
+    let c = bbox.center();
+    let centre = Point {
+        x: c.x + dx,
+        y: c.y + dy,
+    };
+    Rect::from_center(centre, bbox.w * sx, bbox.h * sy)
+}
+
+/// One detection of the entity per query in `queries`, in that order.
+fn boxes_of_the_entity(queries: &[&str]) -> Vec<Detection> {
+    queries
+        .iter()
+        .map(|&q| Detection {
+            query: QueryId(q.into()),
+            bbox: entity(),
+            score: 0.9,
+        })
+        .collect()
+}
+
+/// A non-empty set of distinct queries in random order.
+fn query_set() -> impl Strategy<Value = Vec<&'static str>> {
+    prop::sample::subsequence(QUERIES.to_vec(), 1..=QUERIES.len()).prop_shuffle()
+}
+
+/// Number of `Created` events in `events`.
+fn created_count(events: &[StoreEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, StoreEvent::Created { .. }))
+        .count()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// A pass in which the `pass` prompts box one entity identically reaches
+    /// one subject that answers them all; see the module docs.
+    #[test]
+    fn identical_boxes_of_one_pass_are_one_subject(
+        seeded in query_set(),
+        pass in query_set(),
+        offset in (-0.04f64..0.04, -0.1f64..0.1),
+        scale in (0.75f64..1.33, 0.75f64..1.33),
+        lag_frames in 0u32..12,
+    ) {
+        let tracked = warp(entity(), offset, scale);
+        prop_assume!((0.3..=1.0).contains(&tracked.iou(&entity())));
+        let mut store = SubjectStore::new(SourceId("cam".into()), StoreConfig::default())
+            .expect("valid config");
+        let ev = store.ingest_detections(Duration::ZERO, &boxes_of_the_entity(&seeded));
+        prop_assert_eq!(created_count(&ev), 1, "{:?}", ev);
+        let id = SubjectId(1);
+        // The tracker moves to `tracked` and holds it until `lag_frames`
+        // after the PTS of the next pass, which sees the entity unchanged.
+        for frame in 1..=30 + lag_frames {
+            let pts = Duration::from_secs_f64(f64::from(frame) / 30.0);
+            let ob = TrackObservation { id, bbox: tracked, confidence: 0.9 };
+            store.ingest_tracks(pts, &[ob]);
+        }
+        let ev = store.ingest_detections(Duration::from_secs(1), &boxes_of_the_entity(&pass));
+        prop_assert!(created_count(&ev) <= 1, "{:?}", ev);
+        let touched: BTreeSet<SubjectId> = ev.iter().map(StoreEvent::subject).collect();
+        prop_assert_eq!(touched.len(), 1, "{:?}", ev);
+        let subject = *touched.first().expect("one subject");
+        let rec = store.record(subject).expect("the touched subject is live");
+        for q in &pass {
+            prop_assert!(rec.answers(&QueryId((*q).into())), "{} unanswered: {:?}", q, ev);
+        }
+        if pass.iter().any(|q| seeded.contains(q)) {
+            prop_assert_eq!(subject, id);
+            prop_assert_eq!(created_count(&ev), 0, "{:?}", ev);
         }
     }
 }
