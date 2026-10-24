@@ -32,7 +32,13 @@ audio = true
 #   subject: speaker, pastor and preacher ask for "a person speaking",
 #   guitarist for "a person playing guitar", drummer for "a person playing
 #   drums", singer for "a person singing". Each is a hypothesis until
-#   benchmarked on footage; the window shows what the detector sees.
+#   benchmarked on footage; the window shows what the detector sees. Guitar
+#   and drums are objects OWLv2 finds ("a person playing drums": the drummer
+#   in 20 of 20 test frames, no false boxes). Speaking and singing are
+#   actions, which it cannot see: "a person speaking" gave every person the
+#   speaker's shots (the speaker in 20 of 20 frames, 300 false boxes on 40),
+#   photos on the screen included, so the window notes it on such a prompt;
+#   take the speaker's shot by hand.
 # * A person subject (a person or role word) on a whole-person box is cut at
 #   body lines measured from the head; anything else ("guitar close-up")
 #   scales its box.
@@ -67,10 +73,12 @@ name = "Drummer"
 prompt = "drummer wide"
 
 # The parser's words are data. Entries here are added to the built-in ones,
-# and replace a built-in entry with the same words:
+# and replace a built-in entry with the same words. A role's `needs`
+# ("action" or "object") says what its phrase asks the detector to see; an
+# action draws the window's notice, and an entry without it draws none:
 #
 # [lexicon]
-# roles = [{ word = "worship leader", phrase = "a person singing" }]
+# roles = [{ word = "worship leader", phrase = "a person singing", needs = "action" }]
 # shots = [{ phrase = "cowboy", sizes = ["medium"] },
 #          { phrase = "upper body", sizes = ["medium"] }]
 # person_words = ["organist"]

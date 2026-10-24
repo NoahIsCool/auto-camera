@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 use super::words::{
     FILLERS, JOINERS, Joint, Token, is_grammar_word, is_in, phrase_key, phrase_words,
 };
-use crate::lexicon::{Lexicon, Placement, WordClass};
+use crate::lexicon::{Lexicon, Placement, RoleNeeds, WordClass};
 use crate::model::ShotSize;
 
 /// A usable shot word.
@@ -47,6 +47,17 @@ pub(super) struct Entry<'a> {
     pub(super) note: Option<&'a str>,
     /// Its everyday reading, if any.
     pub(super) also: Option<WordClass>,
+}
+
+/// A usable role word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Role<'a> {
+    /// The role as the lexicon spells it ("speaker").
+    pub(super) word: &'a str,
+    /// The detector phrase, trimmed ("a person speaking").
+    pub(super) phrase: &'a str,
+    /// What the phrase needs the detector to see.
+    pub(super) needs: Option<RoleNeeds>,
 }
 
 /// A shot phrase found in a prompt.
@@ -69,8 +80,8 @@ pub(super) struct Table<'a> {
     keys: HashMap<String, usize>,
     /// Length in bytes of the longest shot-word key.
     max_key_len: usize,
-    /// Role-word key to detector phrase.
-    roles: HashMap<String, &'a str>,
+    /// Role-word key to role.
+    roles: HashMap<String, Role<'a>>,
     /// Keys of person and role words.
     people: HashSet<String>,
     /// Most words in any person or role word.
@@ -99,18 +110,22 @@ impl<'a> Table<'a> {
         let mut people = HashSet::new();
         let mut max_person_words = 0;
         let person_words = lexicon.person_words.iter().map(|w| (w, None));
-        let role_words = lexicon
-            .roles
-            .iter()
-            .map(|r| (&r.word, Some(r.phrase.trim())));
-        for (word, phrase) in person_words.chain(role_words) {
+        let role_words = lexicon.roles.iter().map(|r| {
+            let role = Role {
+                word: r.word.trim(),
+                phrase: r.phrase.trim(),
+                needs: r.needs,
+            };
+            (&r.word, Some(role))
+        });
+        for (word, role) in person_words.chain(role_words) {
             let key = phrase_key(word);
-            if !usable(&key) || phrase.is_some_and(str::is_empty) {
+            if !usable(&key) || role.is_some_and(|r| r.phrase.is_empty()) {
                 continue;
             }
             max_person_words = max_person_words.max(phrase_words(word).len());
-            if let Some(phrase) = phrase {
-                roles.insert(key.clone(), phrase);
+            if let Some(role) = role {
+                roles.insert(key.clone(), role);
             }
             people.insert(key);
         }
@@ -255,9 +270,9 @@ impl<'a> Table<'a> {
         (e, found)
     }
 
-    /// The detector phrase for a subject that is exactly a role word
-    /// (`words` are its word cores, determiners already dropped).
-    pub(super) fn role_phrase(&self, words: &[&str]) -> Option<&'a str> {
+    /// The role a subject is exactly (`words` are its word cores,
+    /// determiners already dropped).
+    pub(super) fn role(&self, words: &[&str]) -> Option<Role<'a>> {
         plural_lookup(&words.concat(), |key| self.roles.get(key).copied())
     }
 
@@ -366,6 +381,7 @@ mod tests {
             roles: vec![RoleWord {
                 word: "host".into(),
                 phrase: " ".into(),
+                needs: Some(RoleNeeds::Action),
             }],
             person_words: vec![String::new()],
         };
@@ -384,7 +400,14 @@ mod tests {
         assert!(table.names_person(&["guitar", "players"]));
         assert!(table.names_person(&["bass", "guitarists"]));
         assert!(!table.names_person(&["bus"]) && !table.names_person(&[]));
-        assert_eq!(table.role_phrase(&["preachers"]), Some("a person speaking"));
-        assert_eq!(table.role_phrase(&["bass", "guitarist"]), None);
+        assert_eq!(
+            table.role(&["preachers"]),
+            Some(Role {
+                word: "preacher",
+                phrase: "a person speaking",
+                needs: Some(RoleNeeds::Action),
+            })
+        );
+        assert_eq!(table.role(&["bass", "guitarist"]), None);
     }
 }

@@ -1,5 +1,6 @@
-//! Notices about shot words: those left inside the subject, and those read
-//! as shot sizes where their everyday reading is likely.
+//! Notices about shot words (those left inside the subject, and those read
+//! as shot sizes where their everyday reading is likely) and about roles
+//! whose detector phrase names an action.
 //!
 //! # Theory
 //!
@@ -27,16 +28,28 @@
 //!   These are heuristics over word order, not a grammar: "close-up guitar"
 //!   and "guitar close-up" draw no notice, "guitar face" does.
 //!
+//! A role rewrite is shown on the parse line ("Detector sees: a person
+//! speaking"), but that line cannot say that OWLv2 boxes people and
+//! objects, not actions. On the rehearsal footage it gave "a person
+//! speaking" to every person (the speaker in 20 of 20 frames, 300 false
+//! boxes on 40 labelled frames), photos on the projection screen included.
+//! So a role tagged [`RoleNeeds::Action`] draws a
+//! [`PromptWarning::ActionRole`] notice, telling the operator to take that
+//! person's shot by hand. It does not yet depend on the detector: a model
+//! that sees actions declares it through the capability contract (design
+//! Phase 2), which does not exist yet. An untagged role, such as a studio's
+//! own entry without `needs`, draws none.
+//!
 //! # Invariants
 //!
 //! * Notices never change the parse; they only describe it.
 //! * Pure and total over any tokens and matches the parser produced.
 
 use super::head::is_participle;
-use super::scan::{Match, Table};
+use super::scan::{Match, Role, Table};
 use super::words::{Token, phrase_key};
 use super::{Lead, PromptWarning, typed};
-use crate::lexicon::WordClass;
+use crate::lexicon::{RoleNeeds, WordClass};
 
 /// Shot phrases left inside a subject, as typed, without repeats and
 /// without those whose keys are in `skip`: those that may count anywhere,
@@ -68,6 +81,16 @@ pub(super) fn shot_words_in(
         }
     }
     (anywhere, after_only)
+}
+
+/// The notice for a subject that is `role`, when its phrase names an
+/// action; see the module docs.
+pub(super) fn action_role(role: Option<Role<'_>>) -> Option<PromptWarning> {
+    let role = role.filter(|r| r.needs == Some(RoleNeeds::Action))?;
+    Some(PromptWarning::ActionRole {
+        role: role.word.to_string(),
+        phrase: role.phrase.to_string(),
+    })
 }
 
 /// Notices for shot words read as shot sizes where their everyday reading

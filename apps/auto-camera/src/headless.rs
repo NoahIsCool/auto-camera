@@ -375,6 +375,7 @@ fn summarize(
                         status: v.status,
                         quality: (v.quality * 100.0).round() / 100.0,
                         limited_by_zoom: v.limited_by_zoom,
+                        same_picture_as: v.same_picture_as.as_ref().map(|t| t.0.clone()),
                         crop_width_min: round(crop.width[0], 4),
                         crop_width_max: round(crop.width[1], 4),
                         crop_height_min: round(crop.height[0], 4),

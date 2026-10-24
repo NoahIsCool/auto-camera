@@ -2,7 +2,9 @@
 
 use super::*;
 use ac_core::{ShotSize, TrackState};
-use ac_engine::{DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, TimingView};
+use ac_engine::{
+    DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, ShotView, TimingView,
+};
 use ac_media::SourceInfo;
 use ac_sources::SourceConfig;
 
@@ -253,10 +255,12 @@ fn the_summary_is_json() {
     assert_eq!(v["director"]["mode"], "off");
     assert_eq!(v["shots"][0]["status"], "wide");
     assert_eq!(v["shots"][0]["limited_by_zoom"], false);
+    assert!(v["shots"][0]["same_picture_as"].is_null());
     let plain = &v["queries"][0];
     assert_eq!(plain["prompt"], "person");
     assert_eq!(plain["detector_phrase"], "person");
     assert_eq!(plain["presets"], serde_json::json!(["medium"]));
+    assert_eq!(plain["notes"], serde_json::json!([]));
     let speaker = &v["queries"][1];
     assert_eq!(speaker["prompt"], "speaker upper body");
     assert_eq!(speaker["detector_phrase"], "a person speaking");
@@ -273,6 +277,15 @@ fn the_summary_is_json() {
     assert_eq!(
         speaker["parse"],
         "Detector sees: a person speaking · Framing: Medium, Medium close (person)"
+    );
+    // The role is an action, which the notes say.
+    let notes = speaker["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let note = notes[0].as_str().unwrap();
+    assert!(
+        note.starts_with("\"speaker\" asks the detector for \"a person speaking\", an action")
+            && note.ends_with("take the speaker's shot by hand"),
+        "{note}"
     );
     assert!(v["output"].is_null());
     let source = &v["sources"][0];
@@ -360,6 +373,45 @@ fn a_run_that_ends_while_the_detector_loads_says_so() {
     let v = summary(&snap);
     assert_eq!(v["sources"][0]["discovery_preparing"], false);
     assert_eq!(v["sources"][0]["detector_ready_s"], 152.5);
+}
+
+#[test]
+fn shots_name_the_shot_they_look_the_same_as() {
+    let mut snap = (*preparing_snapshot()).clone();
+    let wide = snap.shots[0].clone();
+    let medium = ShotView {
+        id: ShotId("stage/1/medium".into()),
+        limited_by_zoom: true,
+        ..wide.clone()
+    };
+    let medium_close = ShotView {
+        id: ShotId("stage/1/medium_close".into()),
+        limited_by_zoom: true,
+        same_picture_as: Some(medium.id.clone()),
+        ..wide
+    };
+    snap.shots.extend([medium, medium_close]);
+    let s = summarize(
+        Path::new("x.toml"),
+        &options(1.0, None),
+        Instant::now(),
+        None,
+        Totals {
+            ticks: 0,
+            threads_joined: 0,
+        },
+        Some(&snap),
+        Some(&snap),
+        &Sampler::default(),
+    );
+    let v = serde_json::to_value(&s).unwrap();
+    let shots = v["shots"].as_array().unwrap();
+    assert_eq!(shots.len(), 3);
+    assert!(shots[0]["same_picture_as"].is_null());
+    assert!(shots[1]["same_picture_as"].is_null());
+    assert_eq!(shots[1]["limited_by_zoom"], true);
+    assert_eq!(shots[2]["same_picture_as"], "stage/1/medium");
+    assert_eq!(shots[2]["limited_by_zoom"], true);
 }
 
 #[test]

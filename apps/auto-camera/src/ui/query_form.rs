@@ -429,6 +429,25 @@ mod tests {
     }
 
     #[test]
+    fn the_window_notes_an_action_role_under_the_parse_line() {
+        let mut w = Window::new(QueryForm {
+            name: "Speaker".into(),
+            prompt: "speaker upper body".into(),
+            ..QueryForm::default()
+        });
+        w.frame(Vec::new());
+        let notes = parse_notes(&w.form.parse(&lexicon()));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("an action"), "{notes:?}");
+        let line =
+            w.find("Detector sees: a person speaking · Framing: Medium, Medium close (person)");
+        assert!(
+            w.find(&notes[0]).y > line.y,
+            "the note is under the parse line"
+        );
+    }
+
+    #[test]
     fn the_window_adds_only_on_click_and_then_resets() {
         let mut w = Window::new(QueryForm {
             name: "Speaker".into(),

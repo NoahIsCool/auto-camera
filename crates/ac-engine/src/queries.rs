@@ -270,6 +270,7 @@ mod tests {
         lexicon.set_role(ac_core::RoleWord {
             word: "worship leader".into(),
             phrase: "a person singing".into(),
+            needs: None,
         });
         let q = build_query(
             QueryId("w".into()),

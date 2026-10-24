@@ -233,6 +233,31 @@ fn parse_notices_are_listed_but_errors_are_not() {
 }
 
 #[test]
+fn an_action_role_is_noted_in_the_form_and_the_query_hover() {
+    let lexicon = ac_core::Lexicon::builtin();
+    let notes = parse_notes(&ac_core::parse_prompt("speaker upper body", &lexicon));
+    assert_eq!(
+        notes,
+        [
+            "Note: \"speaker\" asks the detector for \"a person speaking\", an action: OWLv2 sees \
+          people and objects, not actions, so every person (photos on the screen included) gets \
+          this query's shots; take the speaker's shot by hand."
+        ]
+    );
+    let hover = query_hover(&query("speaker upper body", false, None));
+    assert_eq!(
+        hover.lines().collect::<Vec<_>>(),
+        [
+            "Detector sees: a person speaking · Framing: Medium, Medium close (person)",
+            notes[0].as_str(),
+        ]
+    );
+    // An object role draws none.
+    assert!(parse_notes(&ac_core::parse_prompt("guitarist close-up", &lexicon)).is_empty());
+    assert!(!query_hover(&query("guitarist close-up", false, None)).contains("Note"));
+}
+
+#[test]
 fn live_queries_show_what_the_detector_is_asked_for() {
     use ac_core::ShotSize::{Close, Full};
     assert_eq!(

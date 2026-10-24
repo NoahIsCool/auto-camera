@@ -13,9 +13,10 @@
 //! detection), each shot's crop width and height range over the run (Phase
 //! 1 Milestone 1 of `/mnt/project-files/research/model-picker-design.md` §5
 //! asks a headless band run for a crop-height variation of at most 10% on
-//! static performers), and the subjects at the end with the queries they
-//! answer, so duplicate subjects and their roles can be told apart without
-//! a contact sheet.
+//! static performers), whether each shot is zoom-limited and which shot it
+//! then looks the same as, and the subjects at the end with the queries
+//! they answer, so duplicate subjects and their roles can be told apart
+//! without a contact sheet.
 
 use std::path::PathBuf;
 
@@ -142,6 +143,9 @@ pub struct ShotSummary {
     pub quality: f32,
     /// The preset's zoom ceiling keeps the shot looser than its size.
     pub limited_by_zoom: bool,
+    /// Id of another shot of the same subject that this one looks the same
+    /// as (both drawn at the zoom ceiling), when the engine marks one.
+    pub same_picture_as: Option<String>,
     /// Narrowest crop seen over the run, as a fraction of source width.
     pub crop_width_min: f64,
     /// Widest crop seen over the run, as a fraction of source width.

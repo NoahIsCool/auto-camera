@@ -175,9 +175,15 @@ prompt once, when the query is created, with `ac_core::parse_prompt`, and
 sends the parsed phrase (`PromptQuery::prompt`): shot words are cut off and
 whole role words rewritten, so "speaker upper body" arrives here as "a
 person speaking", a described person, and "guitarist close-up" as "a person
-playing guitar", an object prompt for "a guitar". How well OWLv2 finds "a
-person speaking" is unmeasured (benchmark B0 in the model-picker design).
-See [ADR 0003](../../docs/adr/0003-shot-words-in-prompts.md).
+playing guitar", an object prompt for "a guitar". Benchmark B0 of the
+model-picker design measured "a person speaking" in Rust on CoreML, through
+the described-person route at the 0.15 person threshold, on the 40 labelled
+frames below: it found the speaker in 20 of 20 frames, with 300 false boxes.
+It picks everyone, because OWLv2 sees people and objects, not actions, so
+the parser adds a notice to every prompt rewritten to an action role
+("speaker", "singer"). "a person playing drums", an object prompt, found
+the drummer in 20 of 20 frames with no false boxes. See
+[ADR 0003](../../docs/adr/0003-shot-words-in-prompts.md).
 
 Every detection says what its box covers (`Detection::extent`). People-first
 detections are `Extent::Person`, whole bodies, and framing cuts their shots
@@ -224,6 +230,10 @@ labelled one (Python reference on CPU, best thresholds for each):
 | Object attached, with 60% of it inside instead of 45% | 45 | 22 | not measured |
 | Both attached | 60 | 2 | 1 |
 | Object attached, in Rust on CoreML, with the group rule | 59 | 2 | 1 |
+
+The Speaker column scores the example config's "a person speaking at a
+lectern" (an object prompt for "a lectern" where objects are attached), not
+"a person speaking", whose B0 result is above.
 
 The two remaining false subjects are the speaker walking right in front of a
 guitar on a stand. The speaker is found once: OWLv2 sees objects, not

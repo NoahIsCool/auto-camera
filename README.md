@@ -72,10 +72,12 @@ still loading then), starts recording when `--record` is given
 `--seconds` (default 10) after recording started, finalizes the recording,
 shuts down and prints a JSON summary on stdout. Besides counters, each
 source says whether its detector was still preparing and when it was ready
-(`discovery_preparing`, `detector_ready_s`), `queries` says how each
-prompt was read, each shot gives the range of
-its crop size over the run (`crop_width_min` to `crop_height_max`), and
-`subjects` lists the subjects at the end with the queries they answer:
+(`discovery_preparing`, `detector_ready_s`), `queries` says how each prompt
+was read (with the parse's `notes`), each shot gives the range of its crop
+size over the run (`crop_width_min` to `crop_height_max`) and whether the
+zoom ceiling limits it (`limited_by_zoom`, with `same_picture_as` naming
+the shot it then looks the same as), and `subjects` lists the subjects at
+the end with the queries they answer:
 
 ```json
 {
@@ -183,6 +185,9 @@ operator's text, only what the parser makes of it:
   pastor and preacher become "a person speaking", guitarist "a person
   playing guitar", drummer "a person playing drums", singer "a person
   singing". Each is a hypothesis until it is benchmarked on footage.
+  Speaking and singing are actions, which OWLv2 cannot see: every person
+  gets such a query's shots, and the parse carries a notice saying to take
+  the speaker's shot by hand.
 - **Basis.** A subject whose head noun is a person or role word is framed
   as a person: on a whole-person box, shots are cut at body lines measured
   in head heights from the crown (Close at the shoulders, Medium at the
@@ -203,8 +208,9 @@ operator's text, only what the parser makes of it:
   removed or replaced.
 - **Lexicon.** The words are data. A `[lexicon]` table adds entries or
   replaces built-in ones: `roles = [{ word = "worship leader", phrase = "a
-  person singing" }]`, `shots = [{ phrase = "upper body", sizes =
-  ["medium"] }]`, `person_words = ["organist"]`.
+  person singing", needs = "action" }]` (`needs`, `action` or `object`, is
+  optional; an action draws the notice), `shots = [{ phrase = "upper body",
+  sizes = ["medium"] }]`, `person_words = ["organist"]`.
 
 ## The ONNX detector
 

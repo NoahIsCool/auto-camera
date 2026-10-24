@@ -3,7 +3,7 @@
 //! very long and odd input, and custom or malformed lexicons.
 
 use super::*;
-use crate::lexicon::{Placement, RoleWord, ShotWord};
+use crate::lexicon::{Placement, RoleNeeds, RoleWord, ShotWord};
 
 #[test]
 fn literal_prompts_bypass_parsing() {
@@ -251,6 +251,7 @@ fn lexicon_entries_drive_the_parse() {
     lexicon.set_role(RoleWord {
         word: "worship leader".into(),
         phrase: "a person singing".into(),
+        needs: Some(RoleNeeds::Action),
     });
     let p = parse_prompt("worship leader cowboy", &lexicon);
     assert_eq!(
@@ -258,11 +259,59 @@ fn lexicon_entries_drive_the_parse() {
         ("a person singing", &[Medium][..])
     );
     assert_eq!(p.basis, Basis::Person);
+    assert_eq!(
+        p.warnings,
+        [PromptWarning::ActionRole {
+            role: "worship leader".into(),
+            phrase: "a person singing".into(),
+        }]
+    );
     let p = parse_prompt("guitar close-up", &lexicon);
     assert_eq!(p.shots, [MediumClose]);
     assert_eq!(p.warnings[0].to_string(), "\"close-up\" is a test caveat");
     // Now only after a subject: at the start it is no shot word.
     assert!(parse_prompt("close-up guitar", &lexicon).shots.is_empty());
+}
+
+#[test]
+fn a_role_override_brings_its_own_tag() {
+    let mut lexicon = Lexicon::builtin();
+    // No `needs`: the built-in action tag goes with the replaced entry.
+    lexicon.set_role(RoleWord {
+        word: "Speaker".into(),
+        phrase: "a person at a lectern".into(),
+        needs: None,
+    });
+    lexicon.set_role(RoleWord {
+        word: "guitarist".into(),
+        phrase: "a person singing".into(),
+        needs: Some(RoleNeeds::Action),
+    });
+    let p = parse_prompt("speaker close-up", &lexicon);
+    assert_eq!(p.model_phrase, "a person at a lectern");
+    assert_eq!(p.warnings, []);
+    let p = parse_prompt("guitarist close-up", &lexicon);
+    assert_eq!(
+        p.warnings,
+        [PromptWarning::ActionRole {
+            role: "guitarist".into(),
+            phrase: "a person singing".into(),
+        }]
+    );
+    // Nor does an untagged role in a lexicon without the built-in words.
+    let bare = Lexicon {
+        roles: vec![RoleWord {
+            word: "pastor".into(),
+            phrase: "a person speaking".into(),
+            needs: None,
+        }],
+        ..Lexicon::default()
+    };
+    let p = parse_prompt("pastor", &bare);
+    assert_eq!(
+        (p.model_phrase.as_str(), &p.warnings[..]),
+        ("a person speaking", &[][..])
+    );
 }
 
 #[test]
@@ -294,12 +343,19 @@ fn malformed_lexicons_never_fail_the_parse() {
         roles: vec![RoleWord {
             word: "speaker".into(),
             phrase: String::new(),
+            needs: Some(RoleNeeds::Action),
         }],
         person_words: vec!["   ".into()],
     };
     let p = parse_prompt("speaker and close", &lexicon);
     assert_eq!(p.model_phrase, "speaker and close");
     assert!(p.shots.is_empty() && p.is_valid());
+    // A skipped role draws no notice.
+    let p = parse_prompt("speaker", &lexicon);
+    assert_eq!(
+        (p.model_phrase.as_str(), &p.warnings[..]),
+        ("speaker", &[][..])
+    );
 }
 
 #[test]
@@ -327,6 +383,10 @@ fn errors_are_exactly_empty_and_no_subject() {
         PromptWarning::Note {
             phrase: String::new(),
             note: String::new(),
+        },
+        PromptWarning::ActionRole {
+            role: String::new(),
+            phrase: String::new(),
         },
     ];
     assert!(notices.iter().all(|w| !w.is_error()));

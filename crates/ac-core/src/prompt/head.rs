@@ -25,19 +25,18 @@
 //! * The first word always belongs to the chunk.
 
 use super::Basis;
-use super::scan::Table;
+use super::scan::{Role, Table};
 use super::words::{CONNECTORS, DETERMINERS, JOINERS, LINK_WORDS, Token, is_in};
 
-/// The detector phrase when `words` are exactly a role word after any
-/// articles.
-pub(super) fn role_of<'a>(table: &Table<'a>, words: &[Token]) -> Option<&'a str> {
+/// The role `words` are exactly, after any articles.
+pub(super) fn role_of<'a>(table: &Table<'a>, words: &[Token]) -> Option<Role<'a>> {
     let skip = words
         .iter()
         .take(words.len().saturating_sub(1))
         .take_while(|t| is_in(DETERMINERS, &t.core))
         .count();
     let cores: Vec<&str> = words[skip..].iter().map(|t| t.core.as_str()).collect();
-    table.role_phrase(&cores)
+    table.role(&cores)
 }
 
 /// The basis from the head noun of `words`; see the module docs.
@@ -108,7 +107,7 @@ mod tests {
         assert_eq!(role_of(&table, &[]), None);
         assert_eq!(role_of(&table, &tokenize("the")), None);
         assert_eq!(
-            role_of(&table, &tokenize("the the singer")),
+            role_of(&table, &tokenize("the the singer")).map(|r| r.phrase),
             Some("a person singing")
         );
     }
