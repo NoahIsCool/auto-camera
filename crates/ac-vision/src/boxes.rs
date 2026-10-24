@@ -112,6 +112,7 @@ mod tests {
             query: QueryId(query.into()),
             bbox: Rect::new(x, 0.1, 0.2, 0.2),
             score,
+            extent: ac_core::Extent::Object,
         }
     }
 

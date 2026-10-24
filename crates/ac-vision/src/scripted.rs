@@ -6,6 +6,13 @@
 //! only requested queries, boxes clipped to the frame, scores in `0..=1`.
 //! That lets the subject store, director and evaluation be exercised
 //! deterministically, without model files.
+//!
+//! Each detection keeps the [`Extent`](ac_core::Extent) the script gives
+//! it. A script that stands in for people marks its boxes
+//! `Extent::Person`, so they are framed exactly like the people-first OWL
+//! detector's whole-person boxes; any other box is `Extent::Object`. The
+//! engine's synthetic ground truth answers with coloured rectangles, not
+//! people, so it marks them `Extent::Object`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -91,7 +98,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use ac_core::{QueryId, Rect, SourceId};
+    use ac_core::{Extent, QueryId, Rect, SourceId};
 
     use super::*;
 
@@ -112,6 +119,7 @@ mod tests {
             query: QueryId(query.into()),
             bbox: Rect::new(x, 0.2, 0.2, 0.3),
             score: 0.9,
+            extent: Extent::Object,
         }
     }
 
@@ -165,6 +173,19 @@ mod tests {
         });
         let out = d.detect(&frame(3), &queries()).unwrap();
         assert_eq!(out, vec![det("p", 0.1 * 3.0), det("g", 0.1 * 3.0)]);
+    }
+
+    #[test]
+    fn scripted_people_stay_people() {
+        let person = Detection {
+            extent: Extent::Person,
+            ..det("p", 0.1)
+        };
+        let mut d = ScriptedDetector::constant("people", vec![person.clone(), det("g", 0.5)]);
+        let out = d.detect(&frame(0), &queries()).unwrap();
+        assert_eq!(out, vec![person, det("g", 0.5)]);
+        assert_eq!(out[0].extent, Extent::Person);
+        assert_eq!(out[1].extent, Extent::Object);
     }
 
     #[test]

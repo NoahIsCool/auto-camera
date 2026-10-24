@@ -2,7 +2,9 @@
 
 use super::*;
 use ac_core::{ShotSize, TrackState};
-use ac_engine::{DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, TimingView};
+use ac_engine::{
+    DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, ShotView, TimingView,
+};
 use ac_media::SourceInfo;
 use ac_sources::SourceConfig;
 
@@ -23,7 +25,8 @@ fn studio() -> StudioConfig {
         id: None,
         name: "Person".into(),
         prompt: "person".into(),
-        presets: vec![PresetSpec::Size(ShotSize::Medium)],
+        presets: Some(vec![PresetSpec::Size(ShotSize::Medium)]),
+        literal: false,
     });
     c.output.width = 320;
     c.output.height = 180;
@@ -236,15 +239,54 @@ fn a_recording_run_finalizes_the_file() {
 
 #[test]
 fn the_summary_is_json() {
-    let s = run(studio(), Path::new("studio.toml"), &options(0.5, None));
+    let mut config = studio();
+    // No presets: the shot words decide, and the role word is rewritten.
+    config
+        .queries
+        .push(QuerySettings::new("Speaker", "speaker upper body"));
+    let s = run(config, Path::new("studio.toml"), &options(0.5, None));
     let v: serde_json::Value = serde_json::to_value(&s).unwrap();
     for key in [
-        "ok", "ticks", "sources", "shots", "subjects", "program", "director", "timing", "output",
+        "ok", "ticks", "sources", "queries", "shots", "subjects", "program", "director", "timing",
+        "output",
     ] {
         assert!(v.get(key).is_some(), "{key}");
     }
     assert_eq!(v["director"]["mode"], "off");
     assert_eq!(v["shots"][0]["status"], "wide");
+    assert_eq!(v["shots"][0]["limited_by_zoom"], false);
+    assert!(v["shots"][0]["same_picture_as"].is_null());
+    let plain = &v["queries"][0];
+    assert_eq!(plain["prompt"], "person");
+    assert_eq!(plain["detector_phrase"], "person");
+    assert_eq!(plain["presets"], serde_json::json!(["medium"]));
+    assert_eq!(plain["notes"], serde_json::json!([]));
+    let speaker = &v["queries"][1];
+    assert_eq!(speaker["prompt"], "speaker upper body");
+    assert_eq!(speaker["detector_phrase"], "a person speaking");
+    assert_eq!(
+        speaker["shot_words"],
+        serde_json::json!(["medium", "medium_close"])
+    );
+    assert_eq!(
+        speaker["presets"],
+        serde_json::json!(["medium", "medium_close"])
+    );
+    assert_eq!(speaker["basis"], "person");
+    assert_eq!(speaker["literal"], false);
+    assert_eq!(
+        speaker["parse"],
+        "Detector sees: a person speaking · Framing: Medium, Medium close (person)"
+    );
+    // The role is an action, which the notes say.
+    let notes = speaker["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let note = notes[0].as_str().unwrap();
+    assert!(
+        note.starts_with("\"speaker\" asks the detector for \"a person speaking\", an action")
+            && note.ends_with("take the speaker's shot by hand"),
+        "{note}"
+    );
     assert!(v["output"].is_null());
     let source = &v["sources"][0];
     assert_eq!(source["discovery_preparing"], false);
@@ -262,7 +304,9 @@ fn the_summary_is_json() {
     assert_eq!(subject["id"], 1);
     assert_eq!(subject["source"], "stage");
     assert_eq!(subject["query"], "person");
-    assert_eq!(subject["aliases"], serde_json::json!([]));
+    // The synthetic detector boxes every subject for every prompt, so the
+    // person also answers the speaker query.
+    assert_eq!(subject["aliases"], serde_json::json!(["speaker"]));
     assert_eq!(subject["state"], "tracking");
     assert_eq!(subject["bbox"].as_array().map(Vec::len), Some(4));
 }
@@ -346,6 +390,45 @@ fn a_run_that_ends_while_the_detector_loads_says_so() {
 }
 
 #[test]
+fn shots_name_the_shot_they_look_the_same_as() {
+    let mut snap = (*preparing_snapshot()).clone();
+    let wide = snap.shots[0].clone();
+    let medium = ShotView {
+        id: ShotId("stage/1/medium".into()),
+        limited_by_zoom: true,
+        ..wide.clone()
+    };
+    let medium_close = ShotView {
+        id: ShotId("stage/1/medium_close".into()),
+        limited_by_zoom: true,
+        same_picture_as: Some(medium.id.clone()),
+        ..wide
+    };
+    snap.shots.extend([medium, medium_close]);
+    let s = summarize(
+        Path::new("x.toml"),
+        &options(1.0, None),
+        Instant::now(),
+        None,
+        Totals {
+            ticks: 0,
+            threads_joined: 0,
+        },
+        Some(&snap),
+        Some(&snap),
+        &Sampler::default(),
+    );
+    let v = serde_json::to_value(&s).unwrap();
+    let shots = v["shots"].as_array().unwrap();
+    assert_eq!(shots.len(), 3);
+    assert!(shots[0]["same_picture_as"].is_null());
+    assert!(shots[1]["same_picture_as"].is_null());
+    assert_eq!(shots[1]["limited_by_zoom"], true);
+    assert_eq!(shots[2]["same_picture_as"], "stage/1/medium");
+    assert_eq!(shots[2]["limited_by_zoom"], true);
+}
+
+#[test]
 fn the_detector_phase_waits_for_every_detector_and_gives_up_in_time() {
     let preparing = preparing_snapshot();
     let mut ready = (*preparing).clone();
@@ -424,7 +507,18 @@ fn the_sample_configs_load() {
     assert_eq!(demo.director.mode, DirectorMode::Suggest);
     assert_eq!(demo.discovery.rate_hz, 10.0);
     let file = StudioConfig::load(&root.join("file-source.example.toml")).unwrap();
-    assert_eq!(file.queries.len(), 2);
+    assert_eq!(file.queries.len(), 3);
+    let queries = file.build_queries().unwrap();
+    // The prompts without shot or role words go to the detector as typed.
+    assert_eq!(
+        queries[0].detector_phrase(),
+        "a person speaking at a lectern"
+    );
+    assert_eq!(queries[1].detector_phrase(), "a person playing guitar");
+    // "drummer wide": the role word is rewritten, the shot word picks Full.
+    assert_eq!(queries[2].detector_phrase(), "a person playing drums");
+    let sizes: Vec<ShotSize> = queries[2].presets.iter().map(|p| p.size).collect();
+    assert_eq!(sizes, [ShotSize::Full]);
     let SourceConfig::File { path, .. } = &file.sources[0].input else {
         panic!("a file source");
     };

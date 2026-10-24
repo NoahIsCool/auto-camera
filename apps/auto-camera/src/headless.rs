@@ -25,9 +25,13 @@
 //!    shut the engine down, which joins every thread and reaps ffmpeg.
 //!
 //! The summary ([`summary`]) is always produced; `ok` is false and `error`
-//! says why when a phase failed. Snapshots are sampled every [`SAMPLE`]
-//! from the detector phase on, so two program changes closer together than
-//! that show as one, and a crop range can miss a single tick's extreme.
+//! says why when a phase failed. It reports how each query's prompt was
+//! read (what the detector was asked for, the shot words' sizes, the basis
+//! and any notices), so a prompt that does not mean what the operator
+//! thought shows up in a headless run too. Snapshots are sampled every
+//! [`SAMPLE`] from the detector phase on, so two program changes closer
+//! together than that show as one, and a crop range can miss a single
+//! tick's extreme.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,8 +48,8 @@ use ac_engine::{
 mod summary;
 
 pub use summary::{
-    DirectorSummary, OutputSummary, ProgramSummary, ShotSummary, SourceSummary, SubjectSummary,
-    Summary, TimingSummary,
+    DirectorSummary, OutputSummary, ProgramSummary, QuerySummary, ShotSummary, SourceSummary,
+    SubjectSummary, Summary, TimingSummary,
 };
 
 /// Interval between snapshot samples.
@@ -370,11 +374,38 @@ fn summarize(
                         name: v.name.clone(),
                         status: v.status,
                         quality: (v.quality * 100.0).round() / 100.0,
+                        limited_by_zoom: v.limited_by_zoom,
+                        same_picture_as: v.same_picture_as.as_ref().map(|t| t.0.clone()),
                         crop_width_min: round(crop.width[0], 4),
                         crop_width_max: round(crop.width[1], 4),
                         crop_height_min: round(crop.height[0], 4),
                         crop_height_max: round(crop.height[1], 4),
                     }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let queries = end
+        .map(|s| {
+            s.queries
+                .iter()
+                .map(|q| QuerySummary {
+                    id: q.id.0.clone(),
+                    name: q.name.clone(),
+                    prompt: q.prompt.clone(),
+                    detector_phrase: q.parse.model_phrase.clone(),
+                    literal: q.parse.literal,
+                    shot_words: q.parse.shots.clone(),
+                    presets: q.presets.iter().map(|p| p.id.clone()).collect(),
+                    basis: q.parse.basis,
+                    parse: q.parse.summary(),
+                    notes: q
+                        .parse
+                        .warnings
+                        .iter()
+                        .filter(|w| !w.is_error())
+                        .map(ToString::to_string)
+                        .collect(),
                 })
                 .collect()
         })
@@ -436,6 +467,7 @@ fn summarize(
         media_seconds: end.map_or(0.0, |s| round(s.media_time.as_secs_f64(), 3)),
         threads_joined: totals.threads_joined,
         sources,
+        queries,
         max_subjects: sampler.max_subjects,
         shots,
         subjects,

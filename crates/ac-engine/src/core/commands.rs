@@ -15,9 +15,10 @@
 use ac_core::ShotId;
 use ac_director::DirectorConfig;
 
-use super::{EngineCore, QueryState};
+use super::EngineCore;
 use crate::command::{CommandError, CommandReply, EngineCommand};
-use crate::config::{slug, validate_query};
+use crate::config::slug;
+use crate::queries::build_query;
 
 impl EngineCore {
     /// Applies `cmd`; see the module docs.
@@ -54,7 +55,8 @@ impl EngineCore {
                 name,
                 prompt,
                 presets,
-            } => return self.add_query(name, prompt, presets),
+                literal,
+            } => return self.add_query(name, prompt, presets.clone(), *literal),
             C::RemoveQuery { query } => {
                 let Some(pos) = self.queries.iter().position(|q| &q.id == query) else {
                     return Err(CommandError::UnknownQuery(query.clone()));
@@ -123,24 +125,22 @@ impl EngineCore {
         Ok(CommandReply::Done)
     }
 
-    /// Validates and adds a query.
+    /// Reads the prompt once with the studio's lexicon, settles the
+    /// presets ([`crate::queries`]) and adds the query.
     fn add_query(
         &mut self,
         name: &str,
         prompt: &str,
-        presets: &[ac_core::Preset],
+        presets: Option<Vec<ac_core::Preset>>,
+        literal: bool,
     ) -> Result<CommandReply, CommandError> {
-        validate_query(name, prompt, presets).map_err(CommandError::Invalid)?;
         let id = ac_core::QueryId(slug(name));
+        let query = build_query(id.clone(), name, prompt, presets, literal, &self.lexicon)
+            .map_err(CommandError::Invalid)?;
         if self.queries.iter().any(|q| q.id == id) {
             return Err(CommandError::DuplicateQuery(id));
         }
-        self.queries.push(QueryState {
-            id: id.clone(),
-            name: name.trim().to_string(),
-            prompt: prompt.trim().to_string(),
-            presets: presets.to_vec(),
-        });
+        self.queries.push(query);
         Ok(CommandReply::QueryAdded { id })
     }
 

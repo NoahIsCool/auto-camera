@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use ac_core::{Point, QueryId, Rect, SourceId, SubjectId};
+use ac_core::{Extent, Point, QueryId, Rect, SourceId, SubjectId};
 
 use crate::{Detection, StoreConfig, StoreEvent, SubjectStore, TrackObservation};
 
@@ -24,12 +24,21 @@ pub(crate) fn person(x: f64, y: f64) -> Rect {
     Rect::from_center(Point { x, y }, 0.1, 0.3)
 }
 
-/// A detection of `query` at `bbox` with score 0.9.
+/// A detection of `query` at `bbox` with score 0.9, boxing an object.
 pub(crate) fn det(query: &str, bbox: Rect) -> Detection {
     Detection {
         query: q(query),
         bbox,
         score: 0.9,
+        extent: Extent::Object,
+    }
+}
+
+/// A detection of `query` at `bbox` with score 0.9, boxing a whole person.
+pub(crate) fn person_det(query: &str, bbox: Rect) -> Detection {
+    Detection {
+        extent: Extent::Person,
+        ..det(query, bbox)
     }
 }
 

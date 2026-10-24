@@ -9,10 +9,13 @@
 //! snapshot is cheap to build and to clone; tiles that were not re-rendered
 //! this tick are shared with the previous snapshot.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ac_core::{Preset, QueryId, Rect, ShotId, SourceId, SubjectId, TrackState};
+use ac_core::{
+    ParsedPrompt, Preset, QueryId, Rect, ShotId, ShotSize, SourceId, SubjectId, TrackState,
+};
 use ac_director::{CandidateKind, ContentProfile, DirectorMode, Reason};
 use ac_media::{SourceState, VideoFrame};
 use ac_output::EncoderStats;
@@ -53,6 +56,13 @@ pub struct ShotView {
     pub quality: f32,
     /// Framing settledness in `0..=1`.
     pub settled: f64,
+    /// The preset's zoom ceiling keeps the shot looser than its size, as
+    /// for a close-up of a distant person; the multiview labels it.
+    pub limited_by_zoom: bool,
+    /// Another shot of the same subject this zoom-limited shot looks like
+    /// (both drawn at the ceiling); see
+    /// [`ShotEntry::same_picture_as`](crate::catalog::ShotEntry::same_picture_as).
+    pub same_picture_as: Option<ShotId>,
     /// Health.
     pub status: ShotStatus,
     /// The shot can be put on air.
@@ -95,10 +105,25 @@ pub struct QueryView {
     pub id: QueryId,
     /// Operator-facing name.
     pub name: String,
-    /// Detector prompt.
+    /// The prompt as the operator typed it.
     pub prompt: String,
+    /// The prompt as read when the query was created: what the detector is
+    /// asked for (`parse.model_phrase`), the shot words' sizes and the
+    /// basis.
+    pub parse: ParsedPrompt,
     /// Framings.
     pub presets: Vec<Preset>,
+}
+
+impl QueryView {
+    /// True when the prompt names shot sizes that the query's presets do
+    /// not follow, because presets were given explicitly (they always win).
+    /// Order does not matter: the same sizes in another order follow them.
+    pub fn shot_words_overridden(&self) -> bool {
+        let sizes: HashSet<ShotSize> = self.presets.iter().map(|p| p.size).collect();
+        let words: HashSet<ShotSize> = self.parse.shots.iter().copied().collect();
+        !words.is_empty() && sizes != words
+    }
 }
 
 /// Switcher state.

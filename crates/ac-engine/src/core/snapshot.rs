@@ -54,6 +54,8 @@ impl EngineCore {
                     crop: e.crop,
                     quality: e.quality,
                     settled: e.settled,
+                    limited_by_zoom: e.limited_by_zoom,
+                    same_picture_as: e.same_picture_as.clone(),
                     status: e.status,
                     available: e.available,
                     tally: Tally {
@@ -89,6 +91,7 @@ impl EngineCore {
                 id: q.id.clone(),
                 name: q.name.clone(),
                 prompt: q.prompt.clone(),
+                parse: q.parse.clone(),
                 presets: q.presets.clone(),
             })
             .collect();

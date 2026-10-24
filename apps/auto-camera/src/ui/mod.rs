@@ -9,8 +9,9 @@
 //! The code is split so that everything but the drawing is testable
 //! without a window: [`layout`] (tile grid and monitor geometry), [`keys`]
 //! (shortcut mapping), [`text`] (labels), [`textures`] (upload decisions)
-//! and the panel forms in [`panels`]. The drawing modules also render in
-//! tests through a headless `egui::Context`.
+//! and the forms ([`query_form`], which reads prompts the way the engine
+//! will, and the output form in [`panels`]). The drawing modules also
+//! render in tests through a headless `egui::Context`.
 //!
 //! eframe runs with the OpenGL (glow) renderer and, on Linux, X11 (Wayland
 //! sessions use XWayland); both load their system libraries at run time.
@@ -22,6 +23,7 @@ mod keys;
 mod layout;
 mod multiview;
 mod panels;
+mod query_form;
 mod switching;
 mod text;
 mod textures;

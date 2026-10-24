@@ -10,7 +10,7 @@ use ac_core::{Preset, QueryId, Rect, ShotId, ShotSize, SourceId, SubjectId, Trac
 use ac_director::{ContentProfile, DirectorMode};
 use ac_media::{SourceInfo, SourceState, VideoFrame};
 use ac_sources::{SourceConfig, SyntheticPattern};
-use ac_switcher::{SwitchError, Transition, TransitionKind};
+use ac_switcher::SwitchError;
 use ac_vision::{Detection, Detector, PromptQuery, ScriptedDetector};
 
 use super::*;
@@ -19,7 +19,9 @@ use crate::config::{DetectorSettings, MonitorSettings, PresetSpec, QuerySettings
 use crate::discovery::synthetic_detector;
 use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 
+mod framing;
 mod protection;
+mod switching;
 mod vision;
 
 /// Source and output width.
@@ -51,10 +53,11 @@ fn config(subjects: u32) -> StudioConfig {
         id: None,
         name: "Person".into(),
         prompt: "person".into(),
-        presets: vec![
+        presets: Some(vec![
             PresetSpec::Size(ShotSize::Medium),
             PresetSpec::Size(ShotSize::Close),
-        ],
+        ]),
+        literal: false,
     });
     c.output.width = W;
     c.output.height = H;
@@ -249,84 +252,6 @@ fn program_is_black_until_something_is_taken() {
 }
 
 #[test]
-fn cut_and_auto_change_program_with_tally() {
-    let mut rig = Rig::new(config(2));
-    rig.run(31);
-    preview_and_cut(&mut rig, "cam/wide");
-    assert_eq!(rig.core.switcher().program(), Some(&shot("cam/wide")));
-    rig.apply(EngineCommand::SetPreview {
-        shot: shot("cam/1/medium"),
-    })
-    .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
-    rig.run(6);
-    let snap = rig.snapshot();
-    assert!(snap.switcher.in_transition);
-    assert!(snap.shot(&shot("cam/wide")).unwrap().tally.program);
-    assert!(snap.shot(&shot("cam/1/medium")).unwrap().tally.program);
-    rig.run(30);
-    let snap = rig.snapshot();
-    assert_eq!(snap.switcher.program, Some(shot("cam/1/medium")));
-    assert_eq!(snap.switcher.preview, Some(shot("cam/wide")));
-    let wide = snap.shot(&shot("cam/wide")).unwrap().tally;
-    assert!(!wide.program && wide.preview);
-    assert_eq!(snap.program_changes, 2);
-    assert!(
-        snap.subjects
-            .iter()
-            .filter(|s| s.protected)
-            .all(|s| s.id == SubjectId(1))
-    );
-}
-
-#[test]
-fn invalid_switcher_commands_are_refused_without_effect() {
-    let mut rig = Rig::new(config(1));
-    rig.step();
-    assert_eq!(
-        rig.apply(EngineCommand::SetPreview { shot: shot("nope") }),
-        Err(CommandError::UnknownShot(shot("nope")))
-    );
-    assert_eq!(
-        rig.apply(EngineCommand::Cut),
-        Err(CommandError::Switch(SwitchError::NoPreview))
-    );
-    assert!(matches!(
-        rig.apply(EngineCommand::SetTBar { position: f64::NAN }),
-        Err(CommandError::Invalid(_))
-    ));
-    let bad = Transition {
-        kind: TransitionKind::Mix,
-        duration: -1.0,
-    };
-    assert!(matches!(
-        rig.apply(EngineCommand::SetTransition { transition: bad }),
-        Err(CommandError::Switch(SwitchError::InvalidDuration(_)))
-    ));
-    assert!(matches!(
-        rig.apply(EngineCommand::StopOutput),
-        Err(CommandError::Invalid(_))
-    ));
-    assert_eq!(rig.core.switcher().program(), None);
-}
-
-#[test]
-fn tbar_takes_the_preview_shot() {
-    let mut rig = Rig::new(config(1));
-    rig.run(31);
-    preview_and_cut(&mut rig, "cam/wide");
-    rig.apply(EngineCommand::SetPreview {
-        shot: shot("cam/1/close"),
-    })
-    .unwrap();
-    rig.apply(EngineCommand::SetTBar { position: 0.5 }).unwrap();
-    rig.step();
-    assert!(rig.snapshot().switcher.overlay.is_some());
-    rig.apply(EngineCommand::SetTBar { position: 1.0 }).unwrap();
-    assert_eq!(rig.core.switcher().program(), Some(&shot("cam/1/close")));
-}
-
-#[test]
 fn a_stalled_source_makes_its_shots_unavailable() {
     let mut rig = Rig::new(config(1));
     rig.run(31);
@@ -363,7 +288,8 @@ fn queries_can_be_added_and_removed() {
     let added = rig.apply(EngineCommand::AddQuery {
         name: "Lead Guitar".into(),
         prompt: "guitar".into(),
-        presets: vec![Preset::new("full", "Full", ShotSize::Full)],
+        presets: Some(vec![Preset::new("full", "Full", ShotSize::Full)]),
+        literal: false,
     });
     assert_eq!(
         added,
@@ -375,20 +301,24 @@ fn queries_can_be_added_and_removed() {
         rig.apply(EngineCommand::AddQuery {
             name: "lead guitar".into(),
             prompt: "guitar".into(),
-            presets: vec![Preset::new("full", "Full", ShotSize::Full)],
+            presets: Some(vec![Preset::new("full", "Full", ShotSize::Full)]),
+            literal: false,
         }),
         Err(CommandError::DuplicateQuery(QueryId("lead-guitar".into())))
     );
     for (name, prompt, presets) in [
-        ("", "x", vec![Preset::new("m", "M", ShotSize::Medium)]),
-        ("A", "", vec![Preset::new("m", "M", ShotSize::Medium)]),
-        ("B", "x", vec![]),
+        ("", "x", Some(vec![Preset::new("m", "M", ShotSize::Medium)])),
+        ("A", "", Some(vec![Preset::new("m", "M", ShotSize::Medium)])),
+        ("B", "x", Some(vec![])),
+        // Shot words with nothing to frame.
+        ("C", "close-up", None),
     ] {
         assert!(matches!(
             rig.apply(EngineCommand::AddQuery {
                 name: name.into(),
                 prompt: prompt.into(),
-                presets
+                presets,
+                literal: false,
             }),
             Err(CommandError::Invalid(_))
         ));

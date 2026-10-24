@@ -34,7 +34,7 @@
 //! at the arg-max token id, which is EOS, so the pad id must be smaller than
 //! EOS (OWL's own tokenizer pads with `!`, id 0).
 
-use ac_core::Rect;
+use ac_core::{Extent, Rect};
 use ac_media::VideoFrame;
 
 use crate::api::{Detection, PromptQuery};
@@ -203,6 +203,8 @@ pub fn decode(
                     query: queries[q].id.clone(),
                     bbox,
                     score,
+                    // The prompt's own box: whatever it named.
+                    extent: Extent::Object,
                 });
             }
         }

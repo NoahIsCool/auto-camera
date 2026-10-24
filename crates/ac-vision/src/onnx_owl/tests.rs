@@ -85,6 +85,10 @@ fn near(a: Rect, b: Rect) -> bool {
 /// Checks the detections the fixtures are built to produce.
 fn assert_expected(dets: &[Detection], bright: bool) {
     let by = |q: &str| dets.iter().filter(|d| d.query.0 == q).collect::<Vec<_>>();
+    assert!(
+        dets.iter().all(|d| d.extent == ac_core::Extent::Object),
+        "each prompt's own boxes: {dets:?}"
+    );
     let person = by("p");
     assert_eq!(
         person.len(),
@@ -253,6 +257,10 @@ fn people_first_returns_people_chosen_by_their_objects() {
     assert!(
         (by("any")[0].score - 0.5).abs() < 1e-5,
         "the object's score"
+    );
+    assert!(
+        dets.iter().all(|d| d.extent == ac_core::Extent::Person),
+        "whole people: {dets:?}"
     );
     // Model queries: the person, "a guitar", "the drum" and "a woman".
     assert_eq!(det.cached_embeddings(), 4);

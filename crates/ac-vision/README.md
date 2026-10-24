@@ -170,6 +170,34 @@ next to a woman"), also attaches its own boxes, so it never picks the other
 person. "a person" or "people" picks everyone. See the `matching` module for
 the rules and their tests.
 
+A detector never sees the operator's prompt. The engine reads each query's
+prompt once, when the query is created, with `ac_core::parse_prompt`, and
+sends the parsed phrase (`PromptQuery::prompt`): shot words are cut off and
+whole role words rewritten, so "speaker upper body" arrives here as "a
+person speaking", a described person, and "guitarist close-up" as "a person
+playing guitar", an object prompt for "a guitar". Benchmark B0 of the
+model-picker design measured "a person speaking" in Rust on CoreML, through
+the described-person route at the 0.15 person threshold, on the 40 labelled
+frames below: it found the speaker in 20 of 20 frames, with 300 false boxes.
+It picks everyone, because OWLv2 sees people and objects, not actions, so
+the parser adds a notice to every prompt rewritten to an action role
+("speaker", "singer"). "a person playing drums", an object prompt, found
+the drummer in 20 of 20 frames with no false boxes. See
+[ADR 0003](../../docs/adr/0003-shot-words-in-prompts.md).
+
+Every detection says what its box covers (`Detection::extent`). People-first
+detections are `Extent::Person`, whole bodies, and framing cuts their shots
+at body lines measured in head heights from the crown, so "Close" asks for
+a head-and-shoulders crop, not a full-length shot, as long as the query
+asks for a person (`ac_core::Basis::framing_extent`): an object prompt
+answered with the person holding the object keeps the fill rule. A Close
+that needs more zoom than the preset's ceiling allows, as on a distant
+speaker, is drawn at the ceiling, so it is looser than head and shoulders
+(on a speaker half the frame high, a 4x ceiling cuts at about the waist),
+and is marked limited in the window. With `people_first` off, and for
+scripted boxes not marked as people, the boxes are `Extent::Object` and
+keep the fill rule. See `ac_framing::person`.
+
 Thresholds come on two scales. OWLv2 scores a named object high and any
 description of a person low, however well it fits. So objects need
 `score_threshold` (0.3 by default: real guitars score 0.6 to 0.75, nothing
@@ -202,6 +230,10 @@ labelled one (Python reference on CPU, best thresholds for each):
 | Object attached, with 60% of it inside instead of 45% | 45 | 22 | not measured |
 | Both attached | 60 | 2 | 1 |
 | Object attached, in Rust on CoreML, with the group rule | 59 | 2 | 1 |
+
+The Speaker column scores the example config's "a person speaking at a
+lectern" (an object prompt for "a lectern" where objects are attached), not
+"a person speaking", whose B0 result is above.
 
 The two remaining false subjects are the speaker walking right in front of a
 guitar on a stand. The speaker is found once: OWLv2 sees objects, not

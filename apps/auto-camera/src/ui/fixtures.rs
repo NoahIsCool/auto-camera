@@ -7,13 +7,15 @@ use std::time::Duration;
 use ac_core::{Rect, ShotId, SourceId, SubjectId};
 use ac_director::CandidateKind;
 use ac_engine::{
-    EngineCore, EngineSnapshot, OutputView, ShotStatus, ShotView, StudioConfig, Tally, TimingView,
+    EngineCore, EngineSnapshot, OutputView, QuerySettings, ShotStatus, ShotView, StudioConfig,
+    Tally, TimingView,
 };
 use ac_media::SourceInfo;
 use ac_output::{EncoderChoice, EncoderStats, Progress};
 use ac_sources::SourceConfig;
 
-/// A snapshot of a fresh one-source studio: the wide shot, nothing on air.
+/// A snapshot of a fresh one-source studio with one query ("speaker upper
+/// body", framed by its shot words): the wide shot, nothing on air.
 pub fn snapshot() -> EngineSnapshot {
     fresh(false)
 }
@@ -25,7 +27,7 @@ pub fn preparing_snapshot() -> EngineSnapshot {
 
 /// A fresh one-source studio's snapshot, with a detector when `detector`.
 fn fresh(detector: bool) -> EngineSnapshot {
-    let config = StudioConfig::with_source(
+    let mut config = StudioConfig::with_source(
         "stage",
         SourceConfig::Synthetic {
             width: 320,
@@ -34,6 +36,9 @@ fn fresh(detector: bool) -> EngineSnapshot {
             subjects: 1,
         },
     );
+    config
+        .queries
+        .push(QuerySettings::new("Speaker", "speaker upper body"));
     let info = SourceInfo {
         id: SourceId("stage".into()),
         width: 320,
@@ -57,6 +62,8 @@ pub fn subject_shot(id: &str, status: ShotStatus, quality: f32) -> ShotView {
         crop: Rect::new(0.25, 0.25, 0.5, 0.5),
         quality,
         settled: 1.0,
+        limited_by_zoom: false,
+        same_picture_as: None,
         status,
         available: status != ShotStatus::Unavailable,
         tally: Tally::default(),

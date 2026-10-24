@@ -7,18 +7,20 @@
 //! in float noise.
 //!
 //! Besides counters it carries what a run without a window needs to judge
-//! the pictures: whether each source's detector was ready and when (a run
-//! that ended while it loaded says nothing about detection), each shot's
-//! crop width and height range over the run (Phase 1 Milestone 1 of
-//! `/mnt/project-files/research/model-picker-design.md` §5 asks a headless
-//! band run for a crop-height variation of at most 10% on static
-//! performers), and the subjects at the end with the queries they answer,
-//! so duplicate subjects and their roles can be told apart without a
-//! contact sheet.
+//! the pictures: how each query's prompt was read (what the detector was
+//! asked for, the framings and any notices), whether each source's detector
+//! was ready and when (a run that ended while it loaded says nothing about
+//! detection), each shot's crop width and height range over the run (Phase
+//! 1 Milestone 1 of `/mnt/project-files/research/model-picker-design.md` §5
+//! asks a headless band run for a crop-height variation of at most 10% on
+//! static performers), whether each shot is zoom-limited and which shot it
+//! then looks the same as, and the subjects at the end with the queries
+//! they answer, so duplicate subjects and their roles can be told apart
+//! without a contact sheet.
 
 use std::path::PathBuf;
 
-use ac_core::TrackState;
+use ac_core::{Basis, ShotSize, TrackState};
 use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::ShotStatus;
 use serde::Serialize;
@@ -44,6 +46,8 @@ pub struct Summary {
     pub threads_joined: usize,
     /// Per-source counters.
     pub sources: Vec<SourceSummary>,
+    /// The queries and how their prompts were read.
+    pub queries: Vec<QuerySummary>,
     /// Largest number of live subjects seen.
     pub max_subjects: usize,
     /// Shots at the end of the run.
@@ -101,6 +105,31 @@ pub struct SourceSummary {
     pub subjects_retired: u64,
 }
 
+/// One query in the summary: its prompt as read when it was created.
+#[derive(Debug, Clone, Serialize)]
+pub struct QuerySummary {
+    /// Query id.
+    pub id: String,
+    /// Operator-facing name.
+    pub name: String,
+    /// The prompt as the operator typed it.
+    pub prompt: String,
+    /// What the detector is asked for.
+    pub detector_phrase: String,
+    /// The prompt was sent as typed, without reading shot or role words.
+    pub literal: bool,
+    /// Shot sizes the prompt's shot words name, in typed order.
+    pub shot_words: Vec<ShotSize>,
+    /// Ids of the presets its subjects are framed with.
+    pub presets: Vec<String>,
+    /// Person or object.
+    pub basis: Basis,
+    /// The operator window's parse line.
+    pub parse: String,
+    /// The parse's notices, one sentence each.
+    pub notes: Vec<String>,
+}
+
 /// One shot in the summary.
 #[derive(Debug, Clone, Serialize)]
 pub struct ShotSummary {
@@ -112,6 +141,11 @@ pub struct ShotSummary {
     pub status: ShotStatus,
     /// Director quality in `0..=1`.
     pub quality: f32,
+    /// The preset's zoom ceiling keeps the shot looser than its size.
+    pub limited_by_zoom: bool,
+    /// Id of another shot of the same subject that this one looks the same
+    /// as (both drawn at the zoom ceiling), when the engine marks one.
+    pub same_picture_as: Option<String>,
     /// Narrowest crop seen over the run, as a fraction of source width.
     pub crop_width_min: f64,
     /// Widest crop seen over the run, as a fraction of source width.

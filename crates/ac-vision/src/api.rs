@@ -15,10 +15,15 @@
 //!   finite, non-empty and inside `Rect::FULL`.
 //! * Scores and confidences are in `0.0..=1.0`.
 //! * A detector answers only the queries it was asked about.
+//! * Every detection says what its box covers ([`Extent`]): a whole person
+//!   (the people-first OWL matcher, a script standing in for people) or the
+//!   thing the prompt named (any other box). Framing composes the two
+//!   differently, so a detector must not leave a whole person marked as an
+//!   object.
 //! * Results describe the frame that was passed in; the caller keeps the
 //!   frame's source, sequence number and PTS alongside them.
 
-use ac_core::{QueryId, Rect, SubjectId};
+use ac_core::{Extent, QueryId, Rect, SubjectId};
 use ac_media::VideoFrame;
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +35,10 @@ use crate::error::VisionError;
 pub struct PromptQuery {
     /// Query the prompt belongs to; detections carry it back.
     pub id: QueryId,
-    /// Open-vocabulary prompt, such as "person's upper body".
+    /// Open-vocabulary prompt, such as "a person playing guitar". The
+    /// engine sends a query's parsed detector phrase here, never the
+    /// operator's prompt: "speaker upper body" arrives as "a person
+    /// speaking" (`ac_core::Query::detector_phrase`).
     pub prompt: String,
 }
 
@@ -53,6 +61,10 @@ pub struct Detection {
     pub bbox: Rect,
     /// Match score in `0.0..=1.0`.
     pub score: f32,
+    /// What `bbox` covers. Absent in older data, where it reads as
+    /// [`Extent::Object`].
+    #[serde(default)]
+    pub extent: Extent,
 }
 
 /// An open-vocabulary detector.
@@ -111,7 +123,7 @@ pub trait Tracker: Send {
 ///
 /// Drops detections for queries not in `queries`, with non-finite scores, or
 /// whose box is empty after clipping to the frame; clips boxes to the frame
-/// and clamps scores into `0.0..=1.0`. Order is preserved.
+/// and clamps scores into `0.0..=1.0`. Order and extents are preserved.
 pub fn sanitize_detections(detections: Vec<Detection>, queries: &[PromptQuery]) -> Vec<Detection> {
     detections
         .into_iter()
@@ -121,6 +133,7 @@ pub fn sanitize_detections(detections: Vec<Detection>, queries: &[PromptQuery]) 
                 query: d.query,
                 bbox,
                 score: d.score.clamp(0.0, 1.0),
+                extent: d.extent,
             })
         })
         .collect()
@@ -135,6 +148,7 @@ mod tests {
             query: QueryId(query.into()),
             bbox,
             score,
+            extent: Extent::Object,
         }
     }
 
@@ -175,6 +189,18 @@ mod tests {
         assert!(Rect::FULL.contains_rect(&b));
         assert!((b.w - 0.2).abs() < 1e-12 && (b.h - 0.1).abs() < 1e-12);
         assert_eq!(out[0].score, 1.0);
+    }
+
+    #[test]
+    fn sanitize_keeps_the_extent() {
+        let queries = [PromptQuery::new("a", "person")];
+        let person = Detection {
+            extent: Extent::Person,
+            ..det("a", Rect::new(-0.1, 0.2, 0.3, 0.5), 0.8)
+        };
+        let out = sanitize_detections(vec![person], &queries);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].extent, Extent::Person);
     }
 
     #[test]

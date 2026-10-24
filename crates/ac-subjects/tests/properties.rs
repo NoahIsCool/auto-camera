@@ -25,7 +25,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
-use ac_core::{Point, QueryId, Rect, SourceId, SubjectId};
+use ac_core::{Extent, Point, QueryId, Rect, SourceId, SubjectId};
 use ac_subjects::{
     Detection, RetireReason, StoreConfig, StoreEvent, SubjectStore, TrackObservation,
 };
@@ -126,6 +126,7 @@ fn apply(store: &mut SubjectStore, model: &mut Model, op: &Op) -> Vec<StoreEvent
                     query: QueryId(QUERIES[q].into()),
                     bbox: cell(c, j),
                     score,
+                    extent: Extent::Object,
                 })
                 .collect();
             store.ingest_detections(ms(model.now.saturating_sub(*lag_ms)), &dets)
@@ -268,7 +269,8 @@ fn warp(bbox: Rect, (dx, dy): (f64, f64), (sx, sy): (f64, f64)) -> Rect {
     Rect::from_center(centre, bbox.w * sx, bbox.h * sy)
 }
 
-/// One detection of the entity per query in `queries`, in that order.
+/// One detection of the entity per query in `queries`, in that order: whole
+/// person boxes, as people-first matching returns them.
 fn boxes_of_the_entity(queries: &[&str]) -> Vec<Detection> {
     queries
         .iter()
@@ -276,6 +278,7 @@ fn boxes_of_the_entity(queries: &[&str]) -> Vec<Detection> {
             query: QueryId(q.into()),
             bbox: entity(),
             score: 0.9,
+            extent: Extent::Person,
         })
         .collect()
 }

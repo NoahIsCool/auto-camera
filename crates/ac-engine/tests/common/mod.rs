@@ -33,10 +33,11 @@ pub fn studio(subjects: u32) -> StudioConfig {
         id: None,
         name: "Person".into(),
         prompt: "person".into(),
-        presets: vec![
+        presets: Some(vec![
             PresetSpec::Size(ShotSize::Medium),
             PresetSpec::Size(ShotSize::Close),
-        ],
+        ]),
+        literal: false,
     });
     c.output.width = 320;
     c.output.height = 180;

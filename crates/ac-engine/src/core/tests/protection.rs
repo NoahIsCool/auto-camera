@@ -88,7 +88,8 @@ fn two_queries() -> StudioConfig {
         id: None,
         name: "Body".into(),
         prompt: "body".into(),
-        presets: vec![PresetSpec::Size(ShotSize::Full)],
+        presets: Some(vec![PresetSpec::Size(ShotSize::Full)]),
+        literal: false,
     });
     c
 }
@@ -104,11 +105,15 @@ fn an_on_air_shot_survives_its_query_being_replaced_by_an_alias() {
     rig.run(31);
     let snap = rig.snapshot();
     // Admission is fair across prompts: "body" sorts first, so it is the
-    // primary query and "person" an alias.
+    // primary query and "person" an alias. Both queries' presets make
+    // shots, the primary's first.
     let subject = &snap.subjects[0];
     assert_eq!(subject.query, QueryId("body".into()));
     assert_eq!(subject.aliases, [QueryId("person".into())]);
-    assert_eq!(shot_ids(&snap), ["cam/wide", "cam/1/full"]);
+    assert_eq!(
+        shot_ids(&snap),
+        ["cam/wide", "cam/1/full", "cam/1/medium", "cam/1/close"]
+    );
     preview_and_cut(&mut rig, "cam/1/full");
     rig.run(2);
     rig.apply(EngineCommand::RemoveQuery {
@@ -118,7 +123,7 @@ fn an_on_air_shot_survives_its_query_being_replaced_by_an_alias() {
     rig.run(2);
     let snap = rig.snapshot();
     assert_eq!(snap.subjects[0].query, QueryId("person".into()));
-    // The alias's shots are added and the one on air stays.
+    // The alias's shots stay and the one on air stays too.
     assert_eq!(
         shot_ids(&snap),
         ["cam/wide", "cam/1/medium", "cam/1/close", "cam/1/full"]
@@ -153,18 +158,19 @@ fn an_on_air_shot_survives_its_query_being_replaced_by_an_alias() {
 fn a_kept_shot_frames_with_the_new_query_s_preset() {
     // Both queries define a "close" preset, with different headroom.
     let mut c = config(1);
-    c.queries[0].presets = vec![PresetSpec::Full(Preset {
+    c.queries[0].presets = Some(vec![PresetSpec::Full(Preset {
         id: "close".into(),
         name: "Close".into(),
         size: ShotSize::Close,
         headroom: 0.03,
         max_zoom: 6.0,
-    })];
+    })]);
     c.queries.push(QuerySettings {
         id: None,
         name: "Body".into(),
         prompt: "body".into(),
-        presets: vec![PresetSpec::Size(ShotSize::Close)],
+        presets: Some(vec![PresetSpec::Size(ShotSize::Close)]),
+        literal: false,
     });
     let mut rig = Rig::new(c);
     rig.run(31);

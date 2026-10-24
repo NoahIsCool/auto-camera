@@ -4,7 +4,14 @@
 //! shot visible on program (both shots during a mix), **green** the shot
 //! staged on preview, and an unavailable shot is dimmed with "no signal".
 //! The caption carries the tile's shortcut number (1–9), the shot name, its
-//! tracking status and a quality bar.
+//! tracking status and a quality bar. A shot that its preset's zoom ceiling
+//! keeps looser than its size carries an amber [`LIMITED_BADGE`] in the top
+//! right corner of its picture, never in the caption: a caption is clipped
+//! to its tile, and on a narrow tile a long name would push a trailing
+//! "(limited)" out of sight. The badge's width does not depend on the name
+//! and fits the narrowest tile ([`MIN_TILE_WIDTH`]). The hover text says why
+//! the shot is limited and, when it looks the same as another of its
+//! subject's shots, which one.
 //!
 //! Interaction: a click stages the shot on preview; a double click stages
 //! and cuts it to program. The right-click menu of a subject shot pins,
@@ -15,12 +22,15 @@ use ac_core::ShotId;
 use ac_director::CandidateKind;
 use ac_engine::{EngineCommand, EngineSnapshot, ShotView, SubjectView, Tally};
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
+    self, Align2, Color32, CornerRadius, FontId, Painter, Rect, Sense, Stroke, StrokeKind, Ui,
+    Vec2, pos2, vec2,
 };
 
 use super::keys::tile_label;
+#[cfg(doc)]
+use super::layout::MIN_TILE_WIDTH;
 use super::layout::{CAPTION, grid};
-use super::text::shot_status;
+use super::text::{LIMITED_BADGE, shot_hover, shot_status};
 use super::textures::Textures;
 
 /// Program tally colour.
@@ -31,6 +41,37 @@ pub const PREVIEW_GREEN: Color32 = Color32::from_rgb(40, 200, 80);
 const IDLE_BORDER: Color32 = Color32::from_gray(70);
 /// Width of a tally border.
 const TALLY_WIDTH: f32 = 3.0;
+/// Colour of the zoom-limit badge.
+const BADGE_AMBER: Color32 = Color32::from_rgb(230, 160, 40);
+/// Font size of the zoom-limit badge, in points.
+const BADGE_FONT: f32 = 10.0;
+/// Padding around the badge's text, in points.
+const BADGE_PAD: f32 = 3.0;
+/// Gap between the badge and the picture's edges, in points.
+const BADGE_MARGIN: f32 = 4.0;
+
+/// Where a badge whose text is `text_size` sits on `picture`: its top
+/// right corner, inset by the margin.
+pub fn badge_rect(picture: Rect, text_size: Vec2) -> Rect {
+    let size = text_size + Vec2::splat(2.0 * BADGE_PAD);
+    let min = pos2(
+        picture.right() - BADGE_MARGIN - size.x,
+        picture.top() + BADGE_MARGIN,
+    );
+    Rect::from_min_size(min, size)
+}
+
+/// Paints the zoom-limit badge on `picture`.
+fn draw_badge(painter: &Painter, picture: Rect) {
+    let galley = painter.layout_no_wrap(
+        LIMITED_BADGE.into(),
+        FontId::proportional(BADGE_FONT),
+        Color32::BLACK,
+    );
+    let rect = badge_rect(picture, galley.size());
+    painter.rect_filled(rect, CornerRadius::same(2), BADGE_AMBER);
+    painter.galley(rect.min + Vec2::splat(BADGE_PAD), galley, Color32::BLACK);
+}
 
 /// The tally colour of a tile, program taking precedence.
 pub fn tally_color(tally: Tally) -> Option<Color32> {
@@ -102,8 +143,7 @@ pub fn show(
                 if shot.kind == CandidateKind::Subject {
                     response.context_menu(|ui| subject_menu(ui, snap, shot, &mut commands));
                 }
-                response
-                    .on_hover_text(format!("{}\nclick: preview · double-click: cut", shot.id.0));
+                response.on_hover_text(shot_hover(snap, shot));
             }
         });
     commands
@@ -132,6 +172,9 @@ fn draw_tile(
         None => {
             painter.rect_filled(picture, CornerRadius::ZERO, Color32::from_gray(24));
         }
+    }
+    if shot.limited_by_zoom {
+        draw_badge(&painter, picture);
     }
     if !shot.available {
         painter.rect_filled(picture, CornerRadius::ZERO, Color32::from_black_alpha(170));
@@ -241,6 +284,7 @@ fn subject_menu(
 mod tests {
     use super::*;
     use crate::ui::fixtures::snapshot;
+    use crate::ui::layout::MIN_TILE_WIDTH;
 
     #[test]
     fn program_tally_wins_over_preview() {
@@ -304,5 +348,71 @@ mod tests {
         });
         assert!(commands.is_empty());
         assert_eq!(textures.len(), 1);
+    }
+
+    /// Every text the frame painted, with its on-screen rectangle and the
+    /// clip rectangle it was painted under.
+    fn painted_texts(out: &egui::FullOutput) -> Vec<(String, Rect, Rect)> {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some((
+                    t.galley.text().to_string(),
+                    t.galley.rect.translate(t.pos.to_vec2()),
+                    c.clip_rect,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_limited_badge_is_whole_on_the_narrowest_tile() {
+        // Many shots with long names in a narrow window: tiles at their
+        // minimum width, captions clipped, the badge whole.
+        let mut snap = snapshot();
+        for i in 0..12 {
+            let mut s = crate::ui::fixtures::subject_shot(
+                &format!("stage/{i}/medium_close"),
+                ac_engine::ShotStatus::Tracking,
+                0.9,
+            );
+            s.name = format!("Speaker {i} Medium close with a long name");
+            s.limited_by_zoom = true;
+            snap.shots.push(s);
+        }
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 900.0))),
+            ..Default::default()
+        };
+        let mut textures = Textures::default();
+        let out = ctx.run_ui(input, |ui| {
+            show(ui, &snap, &mut textures, 16.0 / 9.0);
+        });
+        let texts = painted_texts(&out);
+        // Tiles scrolled out of view are clipped away entirely.
+        let badges: Vec<&(String, Rect, Rect)> = texts
+            .iter()
+            .filter(|(t, _, clip)| t == LIMITED_BADGE && clip.is_positive())
+            .collect();
+        assert!(!badges.is_empty());
+        for (_, rect, clip) in &badges {
+            assert!(clip.contains_rect(*rect), "{rect:?} clipped by {clip:?}");
+        }
+        assert!(
+            texts.iter().all(|(t, _, _)| !t.contains("(limited)")),
+            "the caption carries no mark that could be clipped"
+        );
+        // Whatever the name, the badge takes the same room, well inside the
+        // narrowest tile.
+        let size = badges[0].1.size() + Vec2::splat(2.0 * BADGE_PAD);
+        let picture = Rect::from_min_size(pos2(0.0, 0.0), vec2(MIN_TILE_WIDTH, 68.0));
+        let badge = badge_rect(picture, badges[0].1.size());
+        assert!(picture.contains_rect(badge), "{badge:?}");
+        assert!(
+            size.x + 2.0 * BADGE_MARGIN <= MIN_TILE_WIDTH / 2.0,
+            "{size:?}"
+        );
     }
 }

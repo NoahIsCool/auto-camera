@@ -26,6 +26,10 @@
 //!   threads, channels and mailboxes.
 //! * [`StudioConfig`] describes a studio (sources, queries, detector,
 //!   output, director, framing) as TOML or JSON.
+//! * [`queries`] reads each query's prompt once, when it is created: the
+//!   detector is asked for the parsed phrase ("speaker upper body" asks for
+//!   "a person speaking"), and the prompt's shot words pick its framings
+//!   unless presets are given (ADR 0003).
 //!
 //! # Time
 //!
@@ -46,6 +50,7 @@ pub mod core;
 pub mod discovery;
 pub mod mailbox;
 pub mod output;
+pub mod queries;
 pub mod runtime;
 pub mod schedule;
 pub mod snapshot;
@@ -58,6 +63,7 @@ pub use config::{
     QuerySettings, SourceEntry, StudioConfig, preset_for,
 };
 pub use core::{EngineCore, SourceFeed, TickOutput};
+pub use queries::{build_query, default_presets, read_prompt, shot_presets};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};
 pub use snapshot::{
     DirectorView, EngineSnapshot, OutputState, OutputView, QueryView, ShotView, SourceView,

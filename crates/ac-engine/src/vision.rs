@@ -31,7 +31,8 @@
 //!   every observation is passed on.
 //!
 //! The store and the tracker live in different crates with their own
-//! observation types; the conversions happen here. Time is always the
+//! observation types; the conversions happen here, and a detection's
+//! extent (whole person or object) is passed on unchanged. Time is always the
 //! source's media clock, never the engine's master clock.
 
 use std::collections::HashMap;
@@ -173,6 +174,7 @@ impl SourceVision {
                 query: d.query.clone(),
                 bbox: d.bbox,
                 score: d.score,
+                extent: d.extent,
             })
             .collect();
         self.stats.detection_batches += 1;
@@ -281,6 +283,7 @@ mod tests {
                 query: QueryId("person".into()),
                 bbox: g.bbox,
                 score: 0.9,
+                extent: ac_core::Extent::Person,
             })
             .collect()
     }
@@ -304,6 +307,8 @@ mod tests {
         );
         assert_eq!(v.confidence(SubjectId(1)), 1.0);
         assert_eq!(v.stats().created, 2);
+        let extent = v.store().get(SubjectId(1)).unwrap().extent;
+        assert_eq!(extent, ac_core::Extent::Person, "the detector's extent");
     }
 
     #[test]
