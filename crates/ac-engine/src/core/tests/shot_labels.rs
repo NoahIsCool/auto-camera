@@ -1,6 +1,8 @@
 //! Shot labels through the core: an alias from one stray detector pass
 //! continues its subject but makes no shot, and an alias shot on air keeps
-//! its id and name after its label goes stale, until it leaves the air.
+//! its id and name until it leaves the air, both after its label goes stale
+//! and when another alias with the same preset id, sorting first, starts
+//! framing.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,18 +15,27 @@ use super::*;
 /// query framing medium shots and a "Guitarist" query framing close-ups,
 /// and the ground-truth boxes of the people in the picture.
 fn band(subjects: u32) -> (Rig, Vec<Rect>) {
+    still_studio(
+        subjects,
+        &[
+            ("Speaker", ShotSize::Medium),
+            ("Guitarist", ShotSize::Close),
+        ],
+    )
+}
+
+/// [`config`] on a still picture of `subjects` people, with one query per
+/// `(name, size)` (its id the lowercase name) framing that one size, and
+/// the ground-truth boxes of the people in the picture.
+fn still_studio(subjects: u32, queries: &[(&str, ShotSize)]) -> (Rig, Vec<Rect>) {
     let mut c = config(subjects);
-    let preset = |size| Some(vec![PresetSpec::Size(size)]);
-    c.queries = vec![
-        QuerySettings {
-            presets: preset(ShotSize::Medium),
-            ..QuerySettings::new("Speaker", "speaker")
-        },
-        QuerySettings {
-            presets: preset(ShotSize::Close),
-            ..QuerySettings::new("Guitarist", "guitarist")
-        },
-    ];
+    c.queries = queries
+        .iter()
+        .map(|&(name, size)| QuerySettings {
+            presets: Some(vec![PresetSpec::Size(size)]),
+            ..QuerySettings::new(name, &name.to_lowercase())
+        })
+        .collect();
     let mut rig = Rig::new(c);
     let still = rig.pattern.frame(&cam(), 0);
     let boxes = rig
@@ -159,4 +170,63 @@ fn an_on_air_alias_shot_keeps_its_id_and_name_until_it_leaves_air() {
         name(&rig, "cam/1/medium").as_deref(),
         Some("Speaker 1 Medium")
     );
+}
+
+/// One person answering "speaker" (medium shots; the primary, as the only
+/// query of the first pass), "beta" (close-ups, boxed from the second pass
+/// on) and "alpha" (close-ups too, boxed once `alpha_on` is set). "alpha"
+/// sorts before "beta", so once its label frames, it is the query that
+/// asks for the close-up.
+fn trio(alpha_on: Arc<AtomicBool>) -> Rig {
+    let sizes = [
+        ("Speaker", ShotSize::Medium),
+        ("Alpha", ShotSize::Close),
+        ("Beta", ShotSize::Close),
+    ];
+    let (rig, boxes) = still_studio(1, &sizes);
+    let body = boxes[0];
+    let mut passes = 0;
+    let detector = ScriptedDetector::from_fn("trio", move |_, _| {
+        passes += 1;
+        let mut out = vec![found("speaker", body)];
+        if passes > 1 {
+            out.push(found("beta", body));
+            if alpha_on.load(Ordering::SeqCst) {
+                out.push(found("alpha", body));
+            }
+        }
+        Ok(out)
+    });
+    rig.with_detector(detector)
+}
+
+/// The close-up, named after "beta", is cut to program; then "alpha",
+/// which sorts first and shares the close preset id, starts framing. On
+/// air the shot keeps its name (it is not handed to the newly framing
+/// alias); once it leaves program and preview it is named after "alpha".
+#[test]
+fn an_on_air_shot_is_not_renamed_by_an_alias_that_starts_framing() {
+    let alpha_on = Arc::new(AtomicBool::new(false));
+    let mut rig = trio(alpha_on.clone());
+    rig.run_secs(4.0);
+    assert_eq!(name(&rig, "cam/1/close").as_deref(), Some("Beta 1 Close"));
+    preview_and_cut(&mut rig, "cam/1/close");
+    rig.run(2);
+    alpha_on.store(true, Ordering::SeqCst);
+    for _ in 0..(4.0 * FPS) as usize {
+        rig.step();
+        assert_eq!(name(&rig, "cam/1/close").as_deref(), Some("Beta 1 Close"));
+    }
+    let alpha = QueryId("alpha".into());
+    let rec = rig.core.store(0).unwrap().record(SubjectId(1)).unwrap();
+    assert!(rec.shot_queries().any(|q| *q == alpha), "alpha frames");
+    assert_eq!(rig.snapshot().switcher.program, Some(shot("cam/1/close")));
+    // Off air, the first framing query that asks for the close-up names it.
+    preview_and_cut(&mut rig, "cam/wide");
+    rig.apply(EngineCommand::SetPreview {
+        shot: shot("cam/wide"),
+    })
+    .unwrap();
+    rig.run(2);
+    assert_eq!(name(&rig, "cam/1/close").as_deref(), Some("Alpha 1 Close"));
 }
