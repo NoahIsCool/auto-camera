@@ -63,11 +63,14 @@ fn detections_follow_the_detector_contract() {
     );
     assert_eq!(out[0].bbox, Rect::new(0.05, 0.1, 0.15, 0.6));
     assert!(out.iter().all(|d| Rect::FULL.contains_rect(&d.bbox)));
-    let logs = service.logs();
+    // Logged on stderr, which may lag the answer on stdout.
     assert!(
-        logs.iter()
-            .any(|l| l == "fake: detect id=1 1008x567 phrases=3"),
-        "{logs:?}"
+        eventually(PROMPT, || service
+            .logs()
+            .iter()
+            .any(|l| l == "fake: detect id=1 1008x567 phrases=3")),
+        "{:?}",
+        service.logs()
     );
     let status = service.status();
     assert_eq!(status.state, HostState::Ready);
@@ -89,15 +92,14 @@ fn the_send_side_limits_the_image() {
     let queries = [PromptQuery::new("a", "a person")];
     detector.detect(&frame(1280, 720, 1), &queries).unwrap();
     detector.detect(&frame(320, 180, 2), &queries).unwrap();
-    let logs = service.logs();
-    assert!(
-        logs.iter().any(|l| l.ends_with(" 640x360 phrases=1")),
-        "{logs:?}"
-    );
-    assert!(
-        logs.iter().any(|l| l.ends_with(" 320x180 phrases=1")),
-        "{logs:?}"
-    );
+    // Logged on stderr, which may lag the answers on stdout.
+    for size in [" 640x360 phrases=1", " 320x180 phrases=1"] {
+        assert!(
+            eventually(PROMPT, || service.logs().iter().any(|l| l.ends_with(size))),
+            "{size}: {:?}",
+            service.logs()
+        );
+    }
     drop(service);
     assert_reaped(pid);
 }

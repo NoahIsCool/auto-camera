@@ -57,10 +57,15 @@ fn ok_mode_answers_each_phrase_and_exits_at_end_of_input() {
         (2, 2, 1)
     );
     assert!(status.last_latency.is_some());
+    // The fake logs on stderr, which a separate reader drains, so its line
+    // may land just after the answer.
     assert!(
-        host.logs()
+        eventually(PROMPT, || host
+            .logs()
             .iter()
-            .any(|l| l == "fake: detect id=1 4x2 phrases=3")
+            .any(|l| l == "fake: detect id=1 4x2 phrases=3")),
+        "{:?}",
+        host.logs()
     );
     host.shutdown();
     assert_reaped(pid);
@@ -86,10 +91,14 @@ fn large_frames_are_written_whole() {
     r.image.height = 567;
     r.image.data = vec![9; 1008 * 567 * 3];
     host.detect(r, PROMPT).unwrap();
+    // Logged on stderr, which may lag the answer on stdout.
     assert!(
-        host.logs()
+        eventually(PROMPT, || host
+            .logs()
             .iter()
-            .any(|l| l.ends_with("1008x567 phrases=1"))
+            .any(|l| l.ends_with("1008x567 phrases=1"))),
+        "{:?}",
+        host.logs()
     );
     drop(host);
     assert_reaped(pid);
