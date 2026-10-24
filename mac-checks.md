@@ -27,8 +27,8 @@ Reminder: `queries[].matches` in the summary is the newest pass only, one frame.
 `git fetch origin`. For each local branch (`video-pipeline`, `prompt-matching`,
 `shot-words`, `sam-sidecar`) check `git log origin/<branch>..<branch>` is empty (stop and
 report if not), then `git checkout <branch> && git merge --ff-only origin/<branch>`.
-Expected heads: video-pipeline b97f97a, prompt-matching 2f7f9d0, shot-words dc3712a,
-sam-sidecar 1f38732 or later. Run everything below on `sam-sidecar`: it contains every other
+Expected heads, or later: video-pipeline d6c4cfc, prompt-matching 88a402c, shot-words
+a31f43b, sam-sidecar 2dc8204. Run everything below on `sam-sidecar`: it contains every other
 branch. Before building, note `ls -laT ~/Library/Caches/auto-camera/` and
 `ls -laT <owl export dir>/coreml-cache/*/` (the OWLv2 export your round 1 configs use). Then
 `cargo build --release -p auto-camera --features onnx`. The first OWLv2 run after this build
