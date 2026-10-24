@@ -191,6 +191,25 @@ class Sam31GlueTests(unittest.TestCase):
         detections = backend.detect(self.request(("a", 0.5), ("b", 0.3), ("a", 0.4)))
         self.assertEqual([d.phrase for d in detections], [0, 1, 2, 2])
 
+    def test_a_prompt_with_no_rows_moves_no_other_phrase(self) -> None:
+        """The Mac studio's prompts at 0.3, with no rows for the first one.
+
+        SAM finds nothing for "a person speaking", so its label never comes
+        back; each row still goes to its own phrase, not to the first.
+        """
+        result = self.result(
+            [[0, 0, 10, 10], [10, 10, 20, 20], [20, 20, 30, 30]],
+            np.zeros((3, SIDE, SIDE), np.uint8),
+            [0.8, 0.6, 0.5],
+            ["a person playing guitar", "a person", "a person"],
+        )
+        backend, calls = self.build(result)
+        prompts = ("a person speaking", "a person playing guitar", "a person")
+        detections = backend.detect(self.request(*((p, 0.3) for p in prompts)))
+        self.assertEqual(calls["detect"][1], list(prompts))
+        self.assertEqual([d.phrase for d in detections], [1, 2, 2])
+        self.assertEqual([round(d.score, 6) for d in detections], [0.8, 0.6, 0.5])
+
     def test_text_cache_keeps_only_texts_in_use(self) -> None:
         """Embeddings of prompts no source asks for any more are dropped."""
         backend, _ = self.build(self.result([], np.zeros((0, SIDE, SIDE), np.uint8), [], []))

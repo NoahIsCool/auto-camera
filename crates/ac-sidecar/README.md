@@ -242,8 +242,9 @@ integration tests need no Python; they drive the host, the service and the
 detector through every mode of `ac-fake-sidecar`: `ok`, `slow`, `hang`,
 `crash-after-hello`, `crash-before-hello`, `crash-once`, `fail-load-once`,
 `garbage`, `wrong-seq`, `never-ready`, `error-reply`, `fatal-error`, plus
-`--hello-delay-ms` for a slow load and `--grandchild` for helper processes
-(see `src/bin/ac-fake-sidecar.rs`). Like the real sidecar, the fake exits
+`--hello-delay-ms` for a slow load, `--input-side` for the input side its
+hello names (the image sent keeps its shorter side at it) and
+`--grandchild` for helper processes (see `src/bin/ac-fake-sidecar.rs`). Like the real sidecar, the fake exits
 once its parent is gone.
 
 * Every test checks that its child was reaped.

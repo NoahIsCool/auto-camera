@@ -1,7 +1,8 @@
 //! Prompt feedback (spec M2): every live query carries, per source, what
 //! the newest applied discovery pass found for it, tagged with the frame;
-//! queries a pass did not look for, stale results and errors change
-//! nothing, and removing a query forgets its feedback.
+//! a later pass replaces it, even when it found nothing; queries a pass did
+//! not look for, stale results and errors change nothing, and removing a
+//! query forgets its feedback.
 
 use super::*;
 use crate::snapshot::MatchView;
@@ -175,6 +176,44 @@ fn a_prompt_with_nothing_found_reports_no_matches() {
     assert_eq!(guitar.len(), 1);
     assert_eq!((guitar[0].count, guitar[0].best), (0, None));
     assert_eq!(matches(&snap, "person")[0].count, 2);
+}
+
+#[test]
+fn a_later_pass_replaces_the_feedback_rather_than_adding_to_it() {
+    // The first pass finds both people; every later pass finds nothing.
+    let mut rig = Rig::new(config(2));
+    let mut found = people_only(rig.pattern.clone());
+    let mut passes = 0;
+    rig = rig.with_detector(ScriptedDetector::from_fn("once", move |frame, queries| {
+        passes += 1;
+        if passes == 1 {
+            found.detect(frame, queries)
+        } else {
+            Ok(Vec::new())
+        }
+    }));
+    until_a_pass_is_pending(&mut rig);
+    rig.step();
+    let first = matches(&rig.snapshot(), "person");
+    assert_eq!(first.len(), 1);
+    assert_eq!((first[0].count, first[0].kept), (2, 2));
+    until_a_pass_is_pending(&mut rig);
+    let looked_at = rig.pending[0].frame.clone();
+    assert!(looked_at.seq > first[0].seq);
+    rig.step();
+    assert_eq!(
+        matches(&rig.snapshot(), "person"),
+        [MatchView {
+            source: cam(),
+            seq: looked_at.seq,
+            pts: looked_at.pts,
+            count: 0,
+            best: None,
+            kept: 0,
+            floor: 0.35,
+        }],
+        "the second pass's own count, not the sum, nor the first pass's"
+    );
 }
 
 #[test]
