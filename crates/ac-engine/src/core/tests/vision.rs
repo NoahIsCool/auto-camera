@@ -1,8 +1,30 @@
 //! Discovery and tracking through the core: result staleness, the
 //! discovery rate, tracking quality on the synthetic pattern, identities of
-//! crossing subjects and the rule that detections vouch for existence.
+//! crossing subjects, the rule that detections vouch for existence and one
+//! subject for several prompts when results arrive late.
+
+use std::collections::VecDeque;
 
 use super::*;
+
+/// Ticks from a discovery request to the tick that applies its result in
+/// the late-result test: about the 200 ms a detector pass takes on a Mac.
+const LATE_TICKS: usize = 6;
+
+/// Runs `ticks` ticks, holding each discovery result back until `latency`
+/// ticks after the tick that requested it (the rig alone answers on the
+/// next tick, a latency of 1).
+fn run_late(rig: &mut Rig, ticks: usize, latency: usize) {
+    let mut late: VecDeque<(usize, DiscoveryResult)> = VecDeque::new();
+    for tick in 0..ticks {
+        while late.front().is_some_and(|(due, _)| *due <= tick) {
+            let (_, result) = late.pop_front().expect("checked above");
+            rig.pending.push(result);
+        }
+        rig.step();
+        late.extend(rig.pending.drain(..).map(|r| (tick + latency, r)));
+    }
+}
 
 #[test]
 fn stale_discovery_results_are_dropped() {
@@ -139,4 +161,64 @@ fn subjects_the_detector_no_longer_sees_are_not_kept_alive_by_the_tracker() {
     let snap = rig.snapshot();
     assert!(snap.subjects.is_empty(), "{:?}", snap.subjects);
     assert!(snap.sources[0].vision.unvouched_observations > 0);
+}
+
+/// Two prompts box one static subject identically in every pass, as
+/// people-first matching does, and every pass after the first boxes it 30%
+/// wider while the tracker keeps the first box's size. Applied 6 ticks late,
+/// each pass agrees with the tracker's newer box without aliasing on it, so
+/// only the box the first prompt just applied lets the second prompt reach
+/// the subject: the run keeps one subject answering both.
+#[test]
+fn two_prompts_on_one_static_subject_stay_one_subject_with_late_results() {
+    let mut c = config(1);
+    c.discovery.rate_hz = 2.0;
+    c.queries.push(QuerySettings {
+        id: None,
+        name: "Speaker".into(),
+        prompt: "speaker".into(),
+        presets: vec![PresetSpec::Size(ShotSize::Medium)],
+    });
+    let mut rig = Rig::new(c);
+    let still = rig.pattern.frame(&cam(), 0);
+    let body = rig.pattern.ground_truth(still.pts)[0].bbox;
+    rig.still = Some(still);
+    let mut passes = 0;
+    let detector = ScriptedDetector::from_fn("people-first", move |_, queries| {
+        passes += 1;
+        let bbox = if passes == 1 {
+            body
+        } else {
+            Rect {
+                w: body.w * 1.3,
+                ..body
+            }
+        };
+        let one = |q: &PromptQuery| Detection {
+            query: q.id.clone(),
+            bbox,
+            score: 0.9,
+        };
+        Ok(queries.iter().map(one).collect())
+    });
+    let mut rig = rig.with_detector(detector);
+    run_late(&mut rig, (20.0 * FPS) as usize, LATE_TICKS);
+    let snap = rig.snapshot();
+    assert!(snap.sources[0].discovery.applied >= 30);
+    assert_eq!(snap.sources[0].vision.created, 1);
+    let store = rig.core.store(0).unwrap();
+    assert_eq!(store.len(), 1);
+    let rec = store.record(SubjectId(1)).unwrap();
+    assert!(rec.is_tracking());
+    assert!(
+        (rec.subject.bbox.w - body.w).abs() < 0.01,
+        "the tracker keeps the first box's size: {:?}",
+        rec.subject.bbox
+    );
+    assert!(rec.answers(&QueryId("person".into())) && rec.answers(&QueryId("speaker".into())));
+    assert!(snap.subject_shots().count() >= 2);
+    assert!(
+        snap.subject_shots()
+            .all(|s| s.subject == Some(SubjectId(1)))
+    );
 }
