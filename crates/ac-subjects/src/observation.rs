@@ -56,8 +56,9 @@ pub struct TrackObservation {
     /// Where the match held back lay, in normalized source coordinates,
     /// when the tracker says so; read only when [`Self::held`] is set. A
     /// coasting tracker is not restarted from a detection computed on this
-    /// observation's frame that overlaps this box no more than the
-    /// subject's box ([`crate::record`]): a performer who sidestepped is
+    /// observation's frame that overlaps this box, but no more than the
+    /// subject's box does ([`crate::record`]; a detection clear of it still
+    /// restarts the tracker): a performer who sidestepped is
     /// where the match was, while a brighter occluder that looks partly
     /// like the subject draws the match onto itself, off the subject's
     /// detection. A held observation without it (older data, a tracker

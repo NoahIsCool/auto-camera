@@ -123,7 +123,9 @@ pub struct TrackObservation {
     /// occluder that looks partly like the subject draws the match onto
     /// itself, and the subject's detection lands where its box already was
     /// instead. The subject store restarts the tracker from such a
-    /// detection only in the first case: the restart is seeded on that
+    /// detection in the first case, and whenever this box does not overlap
+    /// the detection at all; not when it overlaps the detection, but no
+    /// more than the subject's box does. The restart is seeded on that
     /// frame. Absent in older data, where it reads as `None`.
     #[serde(default)]
     pub held_at: Option<Rect>,
