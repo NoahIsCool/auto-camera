@@ -24,15 +24,21 @@
 //! when the detection disagrees with the box (the tracker drifted), when no
 //! tracker runs (a failed start), and when the tracker reported
 //! observations its contrast check held back (`held`) and no confident one
-//! since the subject's previous applied detection ([`crate::record`]). A
-//! coasting tracker reports no confident observation, so only detections
-//! keep its subject alive. When they are applied within `lost_after` of the
-//! previous one's PTS (pass interval plus latency), the first one after a
-//! whole window of held-back coasting restarts the tracker; when they are
-//! further apart, the subject is lost first and the detection that recovers
-//! it restarts the tracker. A tracker that coasts for want of score, as when
-//! an occluder covers its subject, is not restarted for it: its template,
-//! taken before the occluder came, finds the subject again when it leaves.
+//! since the subject's previous applied detection, unless the tracker's
+//! report on the frame the detection was computed on had the match it held
+//! back (`held_at`) overlapping the detection, but no more than the
+//! subject's box predicted at its PTS ([`crate::record`]). A coasting
+//! tracker reports no confident observation, so only detections keep its
+//! subject alive. When they are applied within `lost_after` of the previous
+//! one's PTS (pass interval plus latency), the first one after a whole
+//! window of held-back coasting restarts the tracker, unless that is the
+//! case on its frame; when they are further apart, the subject is lost
+//! first and the detection that recovers it restarts the tracker. A
+//! tracker that coasts for want of score, as when an occluder covers its
+//! subject, is not restarted for it, and neither is one whose held-back
+//! match a brighter occluder over part of the subject that looks partly
+//! like it drew onto itself: its template, taken before the
+//! occluder came, finds the subject again when it leaves.
 //!
 //! # Invariants
 //!
@@ -50,11 +56,13 @@
 //!   detections alone until the next matching detection retries the start.
 //! * A tracker that reported a held-back observation and no confident one
 //!   since the previous applied detection is restarted by the next applied
-//!   one. A subject that got no held-back observation in that window (none
-//!   at all, or only low ones the tracker did not hold back, as when
-//!   something covers the subject), or a confident one, is not: without that
-//!   evidence a detection that agrees with the box only re-anchors it, as it
-//!   always has.
+//!   one, unless the tracker's report on that detection's frame had the
+//!   match held back overlapping the detection no more than the subject's
+//!   predicted box does. A subject that got no held-back observation in
+//!   that window (none at all, or only low ones the tracker did not hold
+//!   back, as when something covers the subject), or a confident one, is
+//!   not: without that evidence a detection that agrees with the box only
+//!   re-anchors it, as it always has.
 //! * Fast-track observations never create or revive a subject; only
 //!   detections and operator reacquires do.
 //! * Shot labels ([`crate::labels`]) change only in detection passes that
@@ -74,7 +82,7 @@ use ac_core::{QueryId, Rect, SourceId, Subject, SubjectId, TrackState};
 use crate::config::StoreConfig;
 use crate::event::{RetireReason, StoreError, StoreEvent};
 use crate::observation::{TrackObservation, sanitize};
-use crate::record::{SubjectRecord, TrackerReport};
+use crate::record::{FrameReport, SubjectRecord, TrackerReport};
 
 /// Stable identities for the subjects of one source.
 #[derive(Debug, Clone)]
@@ -157,9 +165,13 @@ impl SubjectStore {
     /// ([`TrackObservation::held`]) it counts as coasting evidence
     /// ([`crate::record`]), so that the next detection restarts a tracker
     /// that was held back all along, and otherwise (a match its own low
-    /// score held back, as when something covers the subject) it is
-    /// ignored. Anything else is ignored too: tracks never create or revive
-    /// a subject. Emits one [`StoreEvent::Updated`] per moved subject.
+    /// score held back, as when something covers the subject) it is no
+    /// evidence. Each usable observation is also kept as the tracker's
+    /// report on its frame, with where the match held back lay
+    /// ([`TrackObservation::held_at`], when it is a valid box), for the
+    /// detections that will be computed on that frame. Anything else is
+    /// ignored: tracks never create or revive a subject. Emits one
+    /// [`StoreEvent::Updated`] per moved subject.
     pub fn ingest_tracks(&mut self, pts: Duration, obs: &[TrackObservation]) -> Vec<StoreEvent> {
         let mut events = Vec::new();
         let min = self.config.track_min_confidence;
@@ -179,10 +191,16 @@ impl SubjectStore {
             }
             // A low observation is coasting evidence only when the tracker
             // held it back for a reason that lasts; one its own score held
-            // back (an occluder over the subject) is not; see `crate::record`.
-            if confident || ob.held {
-                rec.note_track(confident);
-            }
+            // back (an occluder over the subject) is not, but it still says
+            // what the tracker made of its frame; see `crate::record`.
+            let report = if confident {
+                FrameReport::Trusted
+            } else if ob.held {
+                FrameReport::Held(ob.held_at.as_ref().and_then(sanitize))
+            } else {
+                FrameReport::Sunk
+            };
+            rec.note_track(pts, report);
             if !confident {
                 continue;
             }
@@ -360,6 +378,7 @@ impl SubjectStore {
         if let Some(rec) = self.subjects.get_mut(&id) {
             rec.tracker_running = false;
             rec.tracker_report = TrackerReport::Silent;
+            rec.frame_reports.clear();
         }
     }
 
@@ -383,6 +402,7 @@ impl SubjectStore {
         rec.shadowed_since = None;
         rec.motion.velocity = Default::default();
         rec.tracker_report = TrackerReport::Silent;
+        rec.frame_reports.clear();
         events.push(StoreEvent::Lost { id });
         if rec.tracker_running {
             rec.tracker_running = false;

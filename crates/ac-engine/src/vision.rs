@@ -7,12 +7,17 @@
 //! * **Every new frame** advances the [`TemplateTracker`], feeds its
 //!   observations to [`SubjectStore::ingest_tracks`] with the frame's PTS,
 //!   and runs [`SubjectStore::tick`] at that PTS. Low-confidence
-//!   observations are passed on too, with the tracker's `held` flag: they
-//!   do not move a box, but a held one (a match the contrast check held
-//!   back) tells the store that the tracker coasts for a reason that lasts,
-//!   so that its next detection restarts it even when it agrees with the
-//!   box. A low observation that is not held (an occluder over the subject)
-//!   is no such evidence.
+//!   observations are passed on too, with the tracker's `held` flag and
+//!   `held_at` box: they do not move a box, but a held one (a match the
+//!   contrast check held back) tells the store that the tracker coasts for
+//!   a reason that lasts, so that its next detection restarts it even when
+//!   it agrees with the box. A low observation that is not held (an
+//!   occluder over the subject) is no such evidence. Each one is also the
+//!   tracker's report on its frame: the restart is seeded on the
+//!   detection's frame, and the store does not restart from a frame on
+//!   which the match held back overlapped the detection, but no more than
+//!   the subject's box did, as when a lookalike
+//!   occluder drew it onto itself.
 //! * **Every accepted detection batch** goes to
 //!   [`SubjectStore::ingest_detections`] with the PTS of the frame it was
 //!   computed on.
@@ -158,6 +163,7 @@ impl SourceVision {
                     bbox: o.bbox,
                     confidence: o.confidence,
                     held: o.held,
+                    held_at: o.held_at,
                 });
             } else {
                 self.stats.unvouched_observations += 1;

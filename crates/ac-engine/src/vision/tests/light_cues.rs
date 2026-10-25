@@ -16,11 +16,15 @@
 //! The last two cover what the check gives up: under a sustained spot the
 //! template keeps its old contrast, so a performer who sidesteps farther
 //! than the surprising-move distance in one frame is held back from then
-//! on. Those coasts are flagged as held back, and the store restarts a
-//! tracker that reported them and nothing confident since the previous
-//! pass; at one pass a second the subject is lost first and the pass that
-//! recovers it restarts the tracker instead. The `occluders` tests cover
-//! the coasts the store must not restart.
+//! on. Those coasts are flagged as held back, with the match held back
+//! lying on the performer where they now stand, and the store restarts a
+//! tracker that reported them and nothing confident since the previous pass
+//! from the next pass, seeded on that pass's frame: a pass computed after
+//! the sidestep boxes the performer where the match held back on its frame
+//! lay, and one computed just before it, on a frame the tracker trusted,
+//! boxes them where they stood. At one pass a second the subject is lost
+//! first and the pass that recovers it restarts the tracker instead. The
+//! `occluders` tests cover the coasts the store must not restart.
 //!
 //! Frames are 320 x 180 grey, luma `light x albedo`, and nothing clips.
 //! Under a wash the subject's texture fills its box and the cue scales every
@@ -287,25 +291,41 @@ fn a_sidestep_under_a_followspot_is_restarted_by_the_next_pass() {
     // with it, and at two passes a second the subject is never lost either.
     // Before the store restarted coasting trackers, the passes only
     // re-anchored the box and the tracker coasted to the end of the run.
-    // The pass from frame 75, applied after the sidestep, closes a window
-    // that holds the confident frames before it; the pass from frame 90, the
-    // first on the new spot, closes one in which the tracker only coasted,
-    // and restarts it under the spot.
-    const SIDESTEP: u64 = 80;
-    let x_at = |seq: u64| if seq < SIDESTEP { 140.0 } else { 153.0 };
-    for latency in [6, 15] {
-        let restarted = 90 + latency;
+    //
+    // The first pass applied after a window in which the tracker only
+    // coasted restarts it on the pass's own frame. After a sidestep at
+    // frame 80 that is the pass from frame 90, the first on the new spot
+    // (the pass from frame 75, applied after the sidestep, closes a window
+    // that holds the confident frames before it): the match held back on
+    // frame 90 lies on the performer, whom the pass boxes there. After a
+    // sidestep at frame 76, at a latency of 15, it is the pass from frame
+    // 75, applied on frame 90 after a window of frames 76 to 90: the
+    // tracker trusted its match on frame 75, so the restart takes the
+    // template there, under the spot, puts the box where the performer
+    // stood on that frame, and finds them on the new spot on the next one.
+    // Restarted only by a pass that landed on the newest match held back,
+    // the tracker coasted to frame 105 there.
+    for (sidestep, latency, restarted, on) in [
+        (80, 6, 96, 96),
+        (80, 15, 105, 105),
+        (76, 6, 96, 96),
+        (76, 15, 90, 91),
+    ] {
+        let x_at = move |seq: u64| if seq < sidestep { 140.0 } else { 153.0 };
         let v = play_late(240, (15, latency), (Cue::Spot, CUE), x_at, |seq, v| {
-            if seq < SIDESTEP {
+            let at = format!("sidestep {sidestep}, latency {latency}, frame {seq}");
+            if seq < sidestep {
                 assert_tracking(seq, v, 0.5);
             } else if seq < restarted {
                 // The lockout the restart ends.
                 let state = v.store().get(SubjectId(1)).map(|s| s.state);
-                assert_eq!(state, Some(ac_core::TrackState::Tracking), "frame {seq}");
-                assert!(v.confidence(SubjectId(1)) <= 0.3, "frame {seq}");
+                assert_eq!(state, Some(ac_core::TrackState::Tracking), "{at}");
+                assert!(v.confidence(SubjectId(1)) <= 0.3, "{at}");
             } else {
-                assert_on(seq, v, x_at(seq));
                 assert_tracking(seq, v, 0.8);
+                let bbox = v.store().get(SubjectId(1)).map(|s| s.bbox);
+                let iou = bbox.map_or(0.0, |b| b.iou(&performer_rect(x_at(seq))));
+                assert!(seq < on || iou > 0.6, "{at}: IoU {iou:.2} ({bbox:?})");
             }
         });
         assert_eq!(v.stats().created, 1, "latency {latency}: {:?}", v.stats());

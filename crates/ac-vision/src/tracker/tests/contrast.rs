@@ -259,15 +259,27 @@ fn weak_contrast_mismatched_match_coasts_only_far_from_the_prediction() {
                 (dx - jump).abs() < 3.0,
                 "jump {jump}, contrast {contrast}: followed, {o:?}"
             );
-            assert!(!o.held, "jump {jump}, contrast {contrast}: {o:?}");
+            assert!(
+                !o.held && o.held_at.is_none(),
+                "jump {jump}, contrast {contrast}: {o:?}"
+            );
         } else {
             assert!(o.confidence <= 0.3, "coasts: {}", o.confidence);
             assert!(dx.abs() < 1.0, "held: {o:?}");
             assert!((o.bbox.w - start.w).abs() < 1e-9, "size held: {o:?}");
-            // Flagged for the subject store, until a restart.
+            // Flagged for the subject store, with where the match lay (on
+            // the jumped square, at the box's size), until a restart.
             assert!(o.held, "flagged as held back: {o:?}");
+            let at = o.held_at.expect("a held match says where it lay");
+            let at_dx = (at.center().x - start.center().x) * SW as f64;
+            assert!((at_dx - jump).abs() < 3.0, "held at {at:?}");
+            assert!((at.w - start.w).abs() < 1e-9 && (at.h - start.h).abs() < 1e-9);
             tracker.start(&next, SubjectId(1), o.bbox).unwrap();
-            assert!(!tracker.observations()[0].held, "a start clears it");
+            let restarted = tracker.observations()[0];
+            assert!(
+                !restarted.held && restarted.held_at.is_none(),
+                "a start clears it"
+            );
         }
     }
 }
@@ -375,5 +387,68 @@ fn a_mismatched_match_below_accept_score_reports_its_score() {
     let dx = (o.bbox.center().x - start.center().x) * SW as f64;
     assert!(dx.abs() < 1.0, "held: {o:?}");
     // Its score held it back, not the contrast check: no restart is due.
-    assert!(!o.held, "{o:?}");
+    assert!(!o.held && o.held_at.is_none(), "{o:?}");
+}
+
+#[test]
+fn an_ambiguous_match_the_contrast_check_refuses_is_held_too() {
+    // The weak-match scene's four times more contrasty square, 100 px to
+    // the right of the box: beyond `surprise_fraction` of its side, at
+    // about 0.65 and a gain of about 4.7, so the contrast check holds it
+    // back and flags it, with where it lay. With a twin 100 px to the left
+    // the match is ambiguous as well, and it is flagged all the same: the
+    // check refused it, and a lockout under a spot gives such matches too
+    // (not flagging them kept 16 and 20 px performers walking under a spot
+    // off their box several times as long in scans). A match held back by
+    // its ambiguity alone is not flagged
+    // (`ambiguous_peaks_give_low_confidence_instead_of_a_jump`). The window
+    // is widened to take in both twins.
+    let config = TemplateTrackerConfig {
+        search_fraction: 1.5,
+        max_search_radius: 48,
+        ..TemplateTrackerConfig::default()
+    };
+    let side = 128.0;
+    let texture = move |(x, y): (f64, f64), cx: f64, seed: u64| {
+        let (u, v) = ((x - cx) / side + 0.5, (y - 360.0) / side + 0.5);
+        ((0.0..1.0).contains(&u) && (0.0..1.0).contains(&v))
+            .then(|| value_noise(u * 6.0, v * 6.0, seed) - 0.5)
+    };
+    let contrasty =
+        move |(x, y): (f64, f64), cx: f64| match (texture((x, y), cx, 7), texture((x, y), cx, 8)) {
+            (Some(a), Some(b)) => Some(0.45 + 4.0 * 0.12 * (a + b) / 2f64.sqrt()),
+            _ => None,
+        };
+    let first = stage::frame(0, 0.0, move |x, y| {
+        texture((x, y), 500.0, 7).map_or(0.45, |a| 0.45 + 0.12 * a)
+    });
+    let start = Rect::new(
+        (500.0 - side / 2.0) / SW as f64,
+        (360.0 - side / 2.0) / SH as f64,
+        side / SW as f64,
+        side / SH as f64,
+    );
+    for twins in [&[600.0][..], &[400.0, 600.0]] {
+        let next = stage::frame(1, 0.0, move |x, y| {
+            twins
+                .iter()
+                .find_map(|&cx| contrasty((x, y), cx))
+                .unwrap_or(0.45)
+        });
+        let mut tracker = TemplateTracker::new(config.clone()).unwrap();
+        tracker.start(&first, SubjectId(1), start).unwrap();
+        let o = tracker.update(&next)[0];
+        assert!(o.confidence <= 0.3, "{twins:?}: coasts, {o:?}");
+        let dx = (o.bbox.center().x - start.center().x) * SW as f64;
+        assert!(dx.abs() < 1.0, "{twins:?}: held, {o:?}");
+        assert!(o.held, "{twins:?}: contrast-refused, {o:?}");
+        // On a twin, at the box's size.
+        let at = o.held_at.expect("a held match says where it lay");
+        let at_dx = (at.center().x - start.center().x) * SW as f64;
+        assert!(
+            twins.iter().any(|&cx| (at_dx - (cx - 500.0)).abs() < 3.0),
+            "{twins:?}: held at {at:?}"
+        );
+        assert!((at.w - start.w).abs() < 1e-9 && (at.h - start.h).abs() < 1e-9);
+    }
 }

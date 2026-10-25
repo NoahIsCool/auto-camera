@@ -54,15 +54,18 @@
 //!
 //! A matched detection is authoritative. It *re-seeds* the subject (box and
 //! anchor jump to the detection, and the tracker is restarted there) when it
-//! overlaps the subject's current box by less than `reseed_iou` (the
-//! tracker drifted), when no tracker runs (its start failed), and when the
-//! tracker was held back since the subject's previous applied detection: it
-//! reported observations its contrast check held back (`held`) and none at
-//! or above `track_min_confidence` ([`crate::record`]). Otherwise the
-//! detection becomes the new anchor and box, unless the tracker has already
-//! reported a newer box that agrees with it, which is kept because it is
-//! more recent. Either way the subject takes the detection's extent (whole
-//! person or object), since that is what its box now stands for.
+//! overlaps the subject's current box by less than `reseed_iou` (the tracker
+//! drifted), when no tracker runs (its start failed), and when the tracker was
+//! held back since the subject's previous applied detection: it reported
+//! observations its contrast check held back (`held`) and none at or above
+//! `track_min_confidence`, and its report on the detection's own frame does
+//! not have the match it held back (`held_at`) overlapping the detection, but
+//! no more than the subject's box, as when a lookalike occluder draws it
+//! ([`crate::record`]). Otherwise the detection becomes the new anchor and
+//! box, unless the tracker has already reported a newer box that agrees with
+//! it, which is kept because it is more recent. Either way the subject takes
+//! the detection's extent (whole person or object), since that is what its box
+//! now stands for.
 //!
 //! The coasting cause is there for the coast that does not end by itself:
 //! after a sidestep under a sustained followspot, whose template keeps its
@@ -73,11 +76,17 @@
 //! of score, as when an occluder covers its subject, is not restarted for
 //! coasting: its template still holds the subject's clean look, which finds
 //! the subject again when the occluder leaves, while one taken from the
-//! occluded frame would follow the occluder off. Ambiguous matches do not count either (a
-//! narrow occluder in front of the subject makes them too). And a subject
-//! whose tracker reported nothing since the previous detection
-//! (detection-only operation, a failed start), or anything confident, is
-//! re-anchored by an agreeing detection as before.
+//! occluded frame would follow the occluder off. A match held back by its
+//! ambiguity alone does not count either (a narrow occluder in front of the
+//! subject makes those too). And a held-back tracker is not restarted from
+//! a detection whose frame, by the tracker's report, had the held-back
+//! match overlapping the detection, but no more than the subject's box: a
+//! brighter occluder over part of the subject that looks partly like it
+//! drew the match onto itself there, and the restart, seeded on that
+//! frame, would take the occluder into the template. A subject whose
+//! tracker reported nothing since the previous detection (detection-only
+//! operation, a failed start), or anything confident, is re-anchored by an
+//! agreeing detection as before.
 //!
 //! A late detection, older than the box but not than the anchor, re-seeds at
 //! its own PTS whatever the cause: the engine seeds the tracker on that
@@ -309,8 +318,10 @@ impl SubjectStore {
         let agrees = rec.predicted(pts).iou(&det.bbox) >= reseed_iou;
         // A tracker held back by its contrast check, with no confident
         // observation since the previous applied detection, will not find the
-        // subject again by itself.
-        let coasting = rec.take_coasting();
+        // subject again by itself; unless its report on this detection's
+        // frame says a lookalike drew the match there, restart it on that
+        // frame. Either way the window ends here.
+        let coasting = rec.take_coasting(&det.bbox, pts);
         if !agrees || !rec.tracker_running || coasting {
             rec.reseed(det.bbox, pts);
             rec.tracker_running = true;

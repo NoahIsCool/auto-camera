@@ -10,7 +10,14 @@
 //! the box would follow it at near-full confidence. So the store restarts a
 //! coasting tracker only when the tracker held its matches back for a
 //! lasting reason (`TrackObservation::held`), never when their own low
-//! score held them back, which is what an occluder does.
+//! score held them back, which is what an occluder usually does. A much
+//! brighter occluder that looks partly like the subject does hold them
+//! back for a lasting reason: it draws the match onto itself, where the
+//! contrast check holds it back as it would under a followspot. Then the
+//! tracker's report on the frame a pass was computed on, which is the frame
+//! a restart would be seeded on, has the match held back on the occluder
+//! (`TrackObservation::held_at`), while the pass boxes the subject where
+//! its box is, and the store does not restart from such a frame either.
 //!
 //! The tests drive [`SourceVision`] as the light-cue tests do, with a pass
 //! every 15 frames (two a second) applied 6 or 15 frames late on the frame
@@ -20,10 +27,10 @@
 //!
 //! Frames are 320 x 180 grey. The subject is a 44 x 120 px textured box
 //! standing still at x = 140 under light 0.3 in front of a mottled
-//! backdrop. The occluder, a textured box of its own, much brighter than
-//! the subject and never reported by the detector, walks in from the left
-//! at 4 px a frame, stands over part of the subject for 45 frames and walks
-//! back out the way it came.
+//! backdrop. The occluder, a textured box much brighter than the subject
+//! and never reported by the detector, walks in from the left at 4 px a
+//! frame, stands over part of the subject for 45 frames and walks back out
+//! the way it came. Its texture is its own, or partly the subject's.
 
 use rayon::prelude::*;
 
@@ -67,6 +74,9 @@ struct Occluder {
     light: f64,
     /// Left edge while it stands over the subject, in pixels.
     stop: f64,
+    /// Weight of the subject's texture in its own, `0..=1`: 0 for a
+    /// texture unrelated to the subject's.
+    blend: f64,
 }
 
 impl Occluder {
@@ -108,7 +118,9 @@ impl Occluder {
                         ((0.0..1.0).contains(&u) && (0.0..1.0).contains(&v)).then_some((u, v))
                     };
                     let luma = if let Some((u, v)) = inside(ox, self.w) {
-                        let n = value_noise(u * 4.0 * self.w / 44.0, v * 11.0, 33);
+                        let (u, v) = (u * 4.0 * self.w / 44.0, v * 11.0);
+                        let n = self.blend * value_noise(u, v, 7)
+                            + (1.0 - self.blend) * value_noise(u, v, 33);
                         self.light * (0.1 + 0.6 * n)
                     } else if let Some((u, v)) = inside(SUBJECT_X, 44.0) {
                         LIGHT * (0.1 + 0.6 * value_noise(u * 4.0, v * 11.0, 7))
@@ -197,6 +209,7 @@ fn a_bright_occluder_leaves_the_subject_where_it_was() {
         w: 44.0,
         light: 0.9,
         stop: 118.0,
+        blend: 0.0,
     };
     for latency in [6, 15] {
         play(
@@ -238,6 +251,7 @@ fn a_narrow_occluder_in_the_middle_leaves_the_subject_where_it_was() {
                 w,
                 light: 2.0 * LIGHT,
                 stop,
+                blend: 0.0,
             };
             play(
                 occluder,
@@ -259,5 +273,47 @@ fn a_narrow_occluder_in_the_middle_leaves_the_subject_where_it_was() {
                 },
             );
         }
+    }
+}
+
+#[test]
+fn a_bright_occluder_that_looks_partly_like_the_subject_leaves_it_where_it_was() {
+    // The bright occluder over the left half of the subject, as in the
+    // first test, with 40 % of the subject's texture in its own. The
+    // subject's match does not merely sink with its visible part any more:
+    // the occluder draws it onto itself, where the contrast check holds it
+    // back, so the coast is flagged as held. When any pass after a window
+    // of that restarted the tracker, the pass from frame 90 seeded it on
+    // its occluded frame, and once the occluder walked off the box followed
+    // it at 0.99 (frame 120: x = 128.2, IoU 0.57 with the subject, 0.33
+    // with the occluder), off the subject for 19 frames, down to IoU 0.00,
+    // at a latency of 6, and 28 at 15. On the frame of each pass that
+    // closes a window of such coasting, the match held back lies on the
+    // occluder while the pass boxes the subject where its box is, so none
+    // restarts the tracker, and the old template finds the subject again
+    // when the occluder leaves (IoU 0.82 or more after it).
+    let occluder = Occluder {
+        w: 44.0,
+        light: 0.9,
+        stop: 118.0,
+        blend: 0.4,
+    };
+    for latency in [6, 15] {
+        play(
+            occluder,
+            latency,
+            |_| Some(subject()),
+            |seq, v| {
+                let (bbox, iou) = subject_box(seq, v);
+                assert!(
+                    iou > 0.6,
+                    "latency {latency}, frame {seq}: box at x = {:.1}, IoU {iou:.2} with the \
+                     subject, {:.2} with the occluder, confidence {:.2}",
+                    bbox.x * W as f64,
+                    bbox.iou(&rect(occluder.x(seq), occluder.w)),
+                    v.confidence(SubjectId(1))
+                );
+            },
+        );
     }
 }

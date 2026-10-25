@@ -49,6 +49,7 @@ pub(crate) fn track(id: SubjectId, bbox: Rect) -> TrackObservation {
         bbox,
         confidence: 0.9,
         held: false,
+        held_at: None,
     }
 }
 

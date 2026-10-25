@@ -16,9 +16,17 @@
 //!   back by its contrast check, with no confident observation, since the
 //!   subject's previous detection ([`record`]), so a tracker that cannot
 //!   find its subject again is not left coasting while detections keep the
-//!   subject alive; a tracker that coasts because something covers its
-//!   subject is not restarted for it, so its template, taken before the
-//!   occluder came, finds the subject again when it leaves;
+//!   subject alive. The restart is seeded on the detection's frame, and a
+//!   held-back tracker is not restarted from a frame on which, by its own
+//!   report, the match it held back overlapped the detection, but no more
+//!   than the subject's box did: something else drew it, partly inside the
+//!   box the new template would be taken from. So a tracker
+//!   that coasts because something covers its subject is not restarted for
+//!   it, whether the occluder sinks the match's score (the tracker does not
+//!   flag that) or, brighter and partly like the subject, draws the match
+//!   onto itself, where the contrast check holds it back: its template,
+//!   taken before the occluder came, finds the subject again when it
+//!   leaves;
 //! * prompts that find the same entity become aliases of one subject at
 //!   once, while an alias frames shots only after it has been seen in
 //!   several detection passes and stops after several passes without it
@@ -44,9 +52,11 @@
 //!    the frame they were computed on. PTS must not go backwards across a
 //!    source restart; start a new store instead. Pass the tracker's
 //!    low-confidence observations too, with whether the tracker held them
-//!    back ([`TrackObservation::held`]): they never move a box, but the held
+//!    back ([`TrackObservation::held`]) and where the match held back lay
+//!    ([`TrackObservation::held_at`]): they never move a box, but the held
 //!    ones are what tells the store that a tracker coasts and needs a
-//!    restart.
+//!    restart, and each one's position whether a detection computed on its
+//!    frame is one to restart from.
 //! 2. Call [`SubjectStore::tick`] once per frame.
 //! 3. Act on tracker events: start or restart a tracker on
 //!    [`StoreEvent::NeedsTrackerStart`] and drop the previous tracker's

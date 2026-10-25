@@ -36,26 +36,32 @@
 //! not hold it back. Otherwise the subject is considered occluded or
 //! ambiguous: the box coasts on its decaying velocity instead of jumping to a
 //! distractor. An ambiguous match, or a match of at least `accept_score` held
-//! back by its contrast, reports at most `ambiguous_confidence`; a match
-//! below `accept_score` reports its own score. The appearance template learns
-//! the new look with `learning_rate` only when the confidence reaches
+//! back by its contrast, reports at most `ambiguous_confidence`; a match below
+//! `accept_score` reports its own score. The appearance template learns the
+//! new look with `learning_rate` only when the confidence reaches
 //! `update_score` and the box is fully inside the frame, so occluders and the
 //! frame border are not learned. The tracker never drops a subject by itself,
 //! and never restarts one: a coasting subject keeps its old template and
-//! reports a low confidence for as long as the cause lasts. Restarts come
-//! from the subject store (`ac-subjects`), which re-seeds the tracker from a
+//! reports a low confidence for as long as the cause lasts. Restarts come from
+//! the subject store (`ac-subjects`), which re-seeds the tracker from a
 //! detection that disagrees with the box, from the first detection after the
 //! contrast check below held the tracker back, with no trusted match, since
 //! the previous one, and from the detection that recovers a subject lost for
-//! want of confident observations. Each observation says whether the
-//! contrast check held it back ([`TrackObservation::held`]): that cause
-//! does not end by itself (a followspot the template never learns), and a
-//! restart under it does end it. A coast for want of score, such as an
-//! occluder over the subject, is not flagged, and neither is an ambiguous
-//! match, which a narrow occluder in front of the subject also produces:
-//! the template that was never taught the occluder is what finds the
-//! subject again when it leaves, and a restart would take a new one from
-//! the occluded frame.
+//! want of confident observations. Each observation says whether the contrast
+//! check held its match back ([`TrackObservation::held`]), and where that
+//! match lay ([`TrackObservation::held_at`]): that cause does not end by
+//! itself (a followspot the template never learns), and a restart under it
+//! does end it. The store seeds the restart on the detection's frame, and does
+//! not restart from a frame on which the match held back overlapped the
+//! detection, but no more than the subject's box did: a brighter occluder that
+//! looks partly like the subject can draw the match onto itself, and a
+//! template taken there would hold the occluder. A coast for want of score,
+//! such as an occluder over the subject, is not flagged, and neither is a
+//! match held back by its ambiguity alone, which a narrow occluder in front of
+//! the subject also produces: the template that was never taught the occluder
+//! is what finds the subject again when it leaves, and a restart would take a
+//! new one from the occluded frame. An ambiguous match the contrast check also
+//! refuses is flagged, as a lockout under a spot gives those too.
 //!
 //! NCC is blind to contrast, so a faint template, such as a shadow on a wall,
 //! matches a nearby high-contrast performer of the same shape at 0.70 to
@@ -151,9 +157,10 @@ struct Track {
     appearance: GrayImage,
     /// Confidence of the latest estimate.
     confidence: f32,
-    /// The contrast check held the latest match back
-    /// ([`TrackObservation::held`]).
-    held: bool,
+    /// Where the latest match lay when the contrast check held it back, as
+    /// the observations report it ([`TrackObservation::held_at`]); `None`
+    /// when it did not, which is what [`TrackObservation::held`] reports.
+    held_at: Option<Rect>,
     /// Sequence number of the last frame applied.
     seq: u64,
     /// Presentation time of the last frame applied.
@@ -163,14 +170,22 @@ struct Track {
 impl Track {
     /// The visible part of the box, inside the frame.
     fn visible_box(&self) -> Rect {
-        let full = Rect::from_center(self.center, self.size.0, self.size.1);
-        clamp_box(full).unwrap_or(Rect::new(
-            self.center.x.min(1.0 - 1e-6),
-            self.center.y.min(1.0 - 1e-6),
-            1e-6,
-            1e-6,
-        ))
+        visible_part(self.center, self.size)
     }
+}
+
+/// The visible part, inside the frame, of a box of normalized `size`
+/// centred at `center` (a point of the frame, border included): never
+/// empty, so a box that only touches the frame becomes a sliver at the
+/// border.
+fn visible_part(center: Point, size: (f64, f64)) -> Rect {
+    let full = Rect::from_center(center, size.0, size.1);
+    clamp_box(full).unwrap_or(Rect::new(
+        center.x.min(1.0 - 1e-6),
+        center.y.min(1.0 - 1e-6),
+        1e-6,
+        1e-6,
+    ))
 }
 
 /// The pyramid of one frame, kept for reuse on that frame.
@@ -225,7 +240,8 @@ impl TemplateTracker {
                 id,
                 bbox: t.visible_box(),
                 confidence: t.confidence,
-                held: t.held,
+                held: t.held_at.is_some(),
+                held_at: t.held_at,
             })
             .collect()
     }
@@ -349,7 +365,7 @@ fn step(
                 (track.size.1 * m.scale).clamp(min_h.min(1.0), 1.0),
             );
             track.confidence = m.score.clamp(0.0, 1.0);
-            track.held = false;
+            track.held_at = None;
             let full = Rect::from_center(center, track.size.0, track.size.1);
             if m.score >= config.update_score && Rect::FULL.contains_rect(&full) {
                 learn(config, track, level);
@@ -362,8 +378,17 @@ fn step(
                 track.velocity.1 * config.velocity_decay,
             );
             // Only the contrast check holds a match back for a reason that
-            // outlasts the frame; see `TrackObservation::held`.
-            track.held = matches!(other, Some(m) if m.contrast_refused(config));
+            // outlasts the frame, ambiguous or not; one held back by its
+            // ambiguity alone is not flagged; see `TrackObservation::held`.
+            // The match's own centre says where it lay, at the box's size,
+            // since a match that is not trusted is not measured for scale.
+            track.held_at = other.filter(|m| m.contrast_refused(config)).map(|m| {
+                let at = Point {
+                    x: (m.cx / lw).clamp(0.0, 1.0),
+                    y: (m.cy / lh).clamp(0.0, 1.0),
+                };
+                visible_part(at, track.size)
+            });
             track.confidence = match other {
                 // Held back by its ambiguity or its contrast, not its score.
                 Some(m) if m.ambiguous || m.contrast_refused(config) => {
@@ -443,7 +468,7 @@ impl Tracker for TemplateTracker {
                 velocity: (0.0, 0.0),
                 appearance: GrayImage::new(cw, ch, data),
                 confidence: 1.0,
-                held: false,
+                held_at: None,
                 seq: frame.seq,
                 pts: frame.pts,
             },

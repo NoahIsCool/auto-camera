@@ -1,10 +1,13 @@
-//! Coasting trackers: a detection applied to a subject whose tracker
-//! reported held-back observations and no confident one since the subject's
-//! previous applied detection restarts the tracker, as a re-seed does, even
-//! when it agrees with the box. No observation in that window, only low ones
-//! the tracker did not hold back (an occluder over the subject), or a
-//! confident one, leaves an agreeing detection a re-anchor, as before the
-//! rule.
+//! Coasting trackers: a detection applied to a subject whose tracker reported
+//! held-back observations and no confident one since the subject's previous
+//! applied detection restarts the tracker, as a re-seed does, even when it
+//! agrees with the box, unless the tracker's report on the frame the detection
+//! was computed on had the match held back overlapping the detection, but no
+//! more than the subject's box (a lookalike occluder over part of the
+//! subject); one held back clear of the detection restarts it. No observation
+//! in that window, only low ones the tracker did not hold back (an occluder
+//! over the subject), or a confident one, leaves an agreeing detection a
+//! re-anchor, as before the rule.
 
 use ac_core::{Point, Rect, SubjectId};
 
@@ -20,6 +23,15 @@ fn coasting(id: SubjectId, bbox: Rect) -> TrackObservation {
         confidence: 0.3,
         held: true,
         ..track(id, bbox)
+    }
+}
+
+/// [`coasting`], with the tracker saying that the match it held back lay at
+/// `at`.
+fn held_at(id: SubjectId, bbox: Rect, at: Rect) -> TrackObservation {
+    TrackObservation {
+        held_at: Some(at),
+        ..coasting(id, bbox)
     }
 }
 
@@ -124,6 +136,108 @@ fn a_tracker_that_coasts_for_want_of_score_is_not_restarted() {
             restart(id, person(0.31, 0.5), 1.0)
         ]
     );
+}
+
+#[test]
+fn the_held_match_on_the_detection_s_frame_decides_the_restart() {
+    let here = person(0.3, 0.5);
+    // Under a spot, the performer sidestepped to where the match the
+    // tracker holds back lies; their detection lands there and restarts it.
+    let (mut s, id) = one();
+    let sidestep = person(0.33, 0.5);
+    for time in [0.1, 0.2, 0.3, 0.4, 0.5] {
+        assert!(
+            s.ingest_tracks(t(time), &[held_at(id, here, sidestep)])
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        s.record(id).unwrap().tracker_report,
+        TrackerReport::Coasting
+    );
+    let ev = s.ingest_detections(t(0.5), &[det("person", sidestep)]);
+    assert_eq!(
+        ev,
+        vec![StoreEvent::Updated { id }, restart(id, sidestep, 0.5)]
+    );
+    // A brighter occluder over the subject's left half that looks partly
+    // like it drew the match onto itself on the detection's frame, and the
+    // subject stayed: its detection only re-anchors, and the window ends
+    // all the same. A restart would take the template from the occluded
+    // frame.
+    let (mut s, id) = one();
+    let lookalike = person(0.26, 0.5);
+    coast(&mut s, id, &[0.1]);
+    for time in [0.2, 0.3, 0.4, 0.5] {
+        s.ingest_tracks(t(time), &[held_at(id, here, lookalike)]);
+    }
+    let ev = s.ingest_detections(t(0.5), &[det("person", person(0.301, 0.5))]);
+    assert_eq!(ev, vec![StoreEvent::Updated { id }]);
+    let rec = s.record(id).unwrap();
+    assert_eq!(rec.motion.anchor, person(0.301, 0.5));
+    assert_eq!(rec.tracker_report, TrackerReport::Silent);
+    // A position on an observation that is not held back is no evidence;
+    // an invalid one is no position, which leaves the held window to
+    // restart the tracker.
+    let unheld = TrackObservation {
+        held: false,
+        ..held_at(id, here, sidestep)
+    };
+    s.ingest_tracks(t(0.6), &[unheld]);
+    assert_eq!(s.record(id).unwrap().tracker_report, TrackerReport::Silent);
+    let nowhere = Rect::new(f64::NAN, 0.0, 0.1, 0.1);
+    s.ingest_tracks(t(0.7), &[held_at(id, here, nowhere)]);
+    assert_eq!(
+        s.record(id).unwrap().tracker_report,
+        TrackerReport::Coasting
+    );
+    let ev = s.ingest_detections(t(1.0), &[det("person", here)]);
+    assert_eq!(ev, vec![StoreEvent::Updated { id }, restart(id, here, 1.0)]);
+}
+
+#[test]
+fn a_match_held_back_clear_of_the_detection_restarts_a_coasting_tracker() {
+    // A narrow performer walking under a spot: the match the tracker holds
+    // back lies off to the side, clear of their box, and their detection
+    // lands where the box was. Nothing that drew the match is in the box the
+    // new template would be taken from, so the tracker restarts there.
+    let here = person(0.3, 0.5);
+    let clear = person(0.45, 0.5);
+    assert_eq!(clear.iou(&here), 0.0);
+    let (mut s, id) = one();
+    for time in [0.1, 0.2, 0.3, 0.4, 0.5] {
+        let ob = held_at(id, here, clear);
+        assert!(s.ingest_tracks(t(time), &[ob]).is_empty());
+    }
+    let ev = s.ingest_detections(t(0.5), &[det("person", here)]);
+    assert_eq!(ev, vec![StoreEvent::Updated { id }, restart(id, here, 0.5)]);
+}
+
+#[test]
+fn a_late_pass_from_a_frame_the_tracker_trusted_restarts_a_coasting_tracker() {
+    // Passes every half second, applied half a second late. The tracker
+    // trusts its match up to t = 1.0, the performer sidesteps at 1.05
+    // under the spot, and from then on the tracker holds back the match on
+    // them. The pass from 0.5, applied after the frame at 1.0, closes a
+    // window of trusted frames and only moves the anchor.
+    let here = person(0.3, 0.5);
+    let sidestep = person(0.33, 0.5);
+    let (mut s, id) = one();
+    for i in 1..=10 {
+        s.ingest_tracks(t(f64::from(i) / 10.0), &[track(id, here)]);
+    }
+    let ev = s.ingest_detections(t(0.5), &[det("person", here)]);
+    assert_eq!(ev, vec![StoreEvent::Updated { id }]);
+    for i in 11..=15 {
+        let ob = held_at(id, here, sidestep);
+        assert!(s.ingest_tracks(t(f64::from(i) / 10.0), &[ob]).is_empty());
+    }
+    // The pass from 1.0, applied after the frame at 1.5, closes a window of
+    // held frames only. It boxes the performer where they stood on its
+    // frame, which the tracker trusted, so it restarts the tracker there,
+    // although every match held back since lay on the new spot.
+    let ev = s.ingest_detections(t(1.0), &[det("person", here)]);
+    assert_eq!(ev, vec![StoreEvent::Updated { id }, restart(id, here, 1.0)]);
 }
 
 #[test]

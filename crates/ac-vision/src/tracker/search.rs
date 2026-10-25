@@ -62,24 +62,28 @@
 //! to three quarters of the shorter side is judged on its score, while the
 //! jumps above are still a box width or more.
 //!
-//! What the rule gives up: a weak gain-mismatched match that creeps towards
-//! a distractor in steps shorter than the distance is followed. And a
-//! performer under a sustained spot, whose template therefore keeps the old
-//! contrast, who lands farther than the distance from the prediction in one
-//! frame (a third of a box width sideways, say) is held back from then on,
-//! until the light changes or a detection restarts the tracker. A step that
-//! small leaves the coasting box overlapping the performer above the store's
-//! `reseed_iou`, so a detection agrees with the box (a longer one re-seeds
-//! as a drift). So `step` flags every observation the check holds back
-//! (`TrackObservation::held`), the subject store restarts a tracker that
+//! What the rule gives up: a weak gain-mismatched match that creeps towards a
+//! distractor in steps shorter than the distance is followed. And a performer
+//! under a sustained spot, whose template therefore keeps the old contrast,
+//! who lands farther than the distance from the prediction in one frame (a
+//! third of a box width sideways, say) is held back from then on, until the
+//! light changes or a detection restarts the tracker. A step that small leaves
+//! the coasting box overlapping the performer above the store's `reseed_iou`,
+//! so a detection agrees with the box (a longer one re-seeds as a drift). So
+//! `step` flags every observation the check holds back
+//! (`TrackObservation::held`), ambiguous or not, with where the match lay
+//! (`TrackObservation::held_at`). The subject store restarts a tracker that
 //! reported such observations and no trusted match since the subject's
-//! previous detection from the next one, and a subject whose detections
-//! come further apart than its `lost_after` is lost first and restarted by
-//! the detection that recovers it; either way the new template is taken
-//! under the spot. Velocity prediction covers ordinary motion:
-//! stops, turns, sway and a dash that builds up over a few frames all stay
-//! within it. The parent module's docs name the case no contrast check helps
-//! with, a start box that already holds someone else's pixels.
+//! previous detection from the next one, seeded on that detection's frame,
+//! unless the match held back on that frame overlapped the detection, but no
+//! more than the subject's box (something else drew it, partly inside the box
+//! the new template would be taken from), and a subject whose detections come
+//! further apart than its `lost_after` is lost first and restarted by the
+//! detection that recovers it; either way the new template is taken under the
+//! spot. Velocity prediction covers ordinary motion: stops, turns, sway and a
+//! dash that builds up over a few frames all stay within it. The parent
+//! module's docs name the case no contrast check helps with, a start box that
+//! already holds someone else's pixels.
 //!
 //! # Invariants
 //!

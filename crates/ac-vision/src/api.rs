@@ -100,16 +100,33 @@ pub struct TrackObservation {
     /// have moved it, for a reason that outlasts the frame: the
     /// [`TemplateTracker`](crate::TemplateTracker)'s contrast check refused
     /// a surprising match far off the template's contrast (under a
-    /// followspot the template never learned, say). A coast for that reason
-    /// lasts as long as its cause, so the subject store restarts a tracker
-    /// that reported such observations and no confident one between two
-    /// detections. False for a trusted match, for one held back by its own
-    /// low score (an occluder over the subject, which the old template finds
-    /// again once it leaves) and for one held back only by its ambiguity (a
-    /// narrow occluder in front of the subject makes those too). Absent in
-    /// older data, where it reads as false.
+    /// followspot the template never learned, say), whether or not the
+    /// match was also ambiguous. A coast for that reason lasts as long as
+    /// its cause, so the subject store restarts a tracker that reported
+    /// such observations and no confident one between two detections,
+    /// unless its report on the second detection's frame had the match held
+    /// back ([`Self::held_at`]) overlapping the detection, but no more than
+    /// the subject's box. False for a trusted
+    /// match, for one held back by its own low score (an occluder over the
+    /// subject, which the old template finds again once it leaves) and for
+    /// one held back by its ambiguity alone (a narrow occluder in front of
+    /// the subject makes those too). Absent in older data, where it reads
+    /// as false.
     #[serde(default)]
     pub held: bool,
+    /// Where the match held back lay, when [`Self::held`] is set: the
+    /// visible part of a box of the tracked size centred on it, in
+    /// normalized source coordinates; `None` otherwise. The box itself
+    /// ([`Self::bbox`]) stays where the tracker coasts. A performer who
+    /// sidestepped under a followspot is where the match was, so a
+    /// detection computed on the same frame lands on this box; a brighter
+    /// occluder that looks partly like the subject draws the match onto
+    /// itself, and the subject's detection lands where its box already was
+    /// instead. The subject store restarts the tracker from such a
+    /// detection only in the first case: the restart is seeded on that
+    /// frame. Absent in older data, where it reads as `None`.
+    #[serde(default)]
+    pub held_at: Option<Rect>,
 }
 
 /// A per-frame, per-source subject tracker.

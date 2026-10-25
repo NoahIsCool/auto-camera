@@ -42,7 +42,9 @@ pub struct StoreConfig {
     /// than this IoU, the fast tracker has drifted and is restarted from the
     /// detection, in `0.0..=1.0`. A tracker that reported held-back
     /// observations and no confident one since the previous detection is
-    /// restarted whatever the overlap ([`crate::record`]).
+    /// restarted whatever the overlap, unless the tracker's report on the
+    /// detection's frame had the match held back overlapping the detection,
+    /// but no more than the subject's box ([`crate::record`]).
     pub reseed_iou: f64,
     /// A tracking subject becomes lost after this long without a confident
     /// observation. Must be positive.
@@ -54,7 +56,8 @@ pub struct StoreConfig {
     /// ([`TrackObservation::held`](crate::TrackObservation::held)) count as
     /// coasting evidence: a tracker that reports such observations and no
     /// confident one between two detections is restarted by the second
-    /// ([`crate::record`]). The others are ignored.
+    /// ([`crate::record`]). The others are no such evidence; every usable
+    /// one is kept as the tracker's report on its frame.
     pub track_min_confidence: f32,
     /// An alias frames shots only after it has been seen in this many
     /// detection passes that observed its subject ([`crate::labels`]), at
