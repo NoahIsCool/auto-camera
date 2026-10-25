@@ -2,8 +2,9 @@
 //! through the framer for a minute at 30 Hz: the smoothed assumed head
 //! count keeps the crop and the "(limited)" verdict steady through
 //! gestures, a walk to a side edge, a crown bobbing at the top edge and a
-//! single box that ends just above the bottom edge, also as the speaker
-//! steps out from behind a lectern.
+//! single box that ends just above the bottom edge, also when that box
+//! comes as the speaker steps out from behind a lectern (the lectern
+//! itself is framed on the fill rule; only the state after it is checked).
 
 use super::*;
 

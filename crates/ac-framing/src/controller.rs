@@ -16,9 +16,11 @@
 //!   half-life, how many head heights a box cut by the bottom of the picture
 //!   is assumed to show: a speaker never seen whole is framed down from the
 //!   crown on that bounded guess, steady through gestures, a walk to the side
-//!   of the picture, a lectern and boxes that end just above the bottom
-//!   edge, until a box measured on the canon (a whole standing body) ends
-//!   clear of the release band ([`HeadMemory::assumed_heads_in_force`]).
+//!   of the picture and boxes that end just above the bottom edge, until a
+//!   box measured on the canon (a whole standing body) ends clear of the
+//!   release band ([`HeadMemory::assumed_heads_in_force`]). A squat box (the
+//!   speaker behind a lectern) is framed on the fill rule while it lasts,
+//!   but it does not end the guess.
 //!   The guess never becomes a remembered head. The memory lives and dies
 //!   with the shot.
 //! * **Dead zone with hysteresis.** The camera starts moving only when the
