@@ -12,7 +12,10 @@
 //! it away, so the shot list kept a "Guitarist 7 Close" of the audience.
 //!
 //! So identity stays as it is, and each answered query keeps a
-//! [`LabelEvidence`] that decides only whether it frames shots. Evidence is
+//! [`LabelEvidence`] that decides whether it frames shots and, when the
+//! operator removes the primary query, which alias
+//! [`SubjectStore::remove_query`](crate::SubjectStore::remove_query)
+//! promotes in its place. Evidence is
 //! counted in **observing passes**: detection batches that observed the
 //! subject (matched, aliased, recovered or admitted it). A query is *seen*
 //! in such a pass when one of the pass's detections of that query reached
@@ -32,9 +35,14 @@
 //! passes without it between any two of them, and stops after `stale`
 //! observing passes in a row without it; it then needs `confirm` new
 //! sightings to frame again. The primary query frames shots whatever its
-//! evidence says ([`SubjectRecord::shot_queries`]): which query names a
-//! subject is the admission rule's and the operator's business, not this
-//! module's.
+//! evidence says ([`SubjectRecord::shot_queries`]). The admission rule
+//! picks it; when the operator removes it, the store promotes an alias
+//! whose label frames shots by this module's evidence (the first alias
+//! when none does), so the evidence then also decides which query names
+//! the subject. That promoted primary matches the subject's detections
+//! first (phase 2 of [`crate::associate`]) and counts for admission
+//! fairness (phase 6), so through it the evidence can change which subject
+//! a later detection continues.
 //!
 //! Counting passes rather than seconds keeps the rule independent of the
 //! detector's cadence: 8 observing passes are about 8 s of a 1 Hz OWLv2 and
@@ -54,8 +62,10 @@
 //! * Evidence changes only in a detection pass that observes the subject
 //!   and in [`SubjectStore::remove_query`](crate::SubjectStore::remove_query),
 //!   which drops the removed query's entry. Ticks, losses, operator flags and
-//!   reacquires never touch it, and it never changes which subject a
-//!   detection continues.
+//!   reacquires never touch it. It never changes which subject a detection
+//!   continues, except through the primary that `remove_query` promotes by
+//!   it, which then matches first (phase 2) and counts for admission
+//!   fairness (phase 6).
 //! * After a pass that observed the subject, there is exactly one entry per
 //!   query it answers. It is pure and deterministic: replaying the same calls
 //!   gives the same evidence.

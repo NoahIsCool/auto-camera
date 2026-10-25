@@ -16,9 +16,11 @@
 //! The last two cover what the check gives up: under a sustained spot the
 //! template keeps its old contrast, so a performer who sidesteps farther
 //! than the surprising-move distance in one frame is held back from then
-//! on. The store restarts a tracker that coasted on everything it reported
-//! since the previous pass; at one pass a second the subject is lost first
-//! and the pass that recovers it restarts the tracker instead.
+//! on. Those coasts are flagged as held back, and the store restarts a
+//! tracker that reported them and nothing confident since the previous
+//! pass; at one pass a second the subject is lost first and the pass that
+//! recovers it restarts the tracker instead. The `occluders` tests cover
+//! the coasts the store must not restart.
 //!
 //! Frames are 320 x 180 grey, luma `light x albedo`, and nothing clips.
 //! Under a wash the subject's texture fills its box and the cue scales every
@@ -31,11 +33,11 @@ use rayon::prelude::*;
 use super::*;
 
 /// Frame width in pixels.
-const W: u32 = 320;
+pub(super) const W: u32 = 320;
 /// Frame height in pixels.
-const H: u32 = 180;
+pub(super) const H: u32 = 180;
 /// Frame interval at 30 fps.
-const FRAME_DT: Duration = Duration::from_micros(33_333);
+pub(super) const FRAME_DT: Duration = Duration::from_micros(33_333);
 /// Frames from a detection pass's frame to the frame its result is applied.
 const LATENCY: u64 = 6;
 /// Frame at which the light steps, unless a test says otherwise.
@@ -57,7 +59,7 @@ fn lattice(ix: i64, iy: i64, seed: u64) -> f64 {
 }
 
 /// Smooth value noise in `0..1` with lattice spacing 1.
-fn value_noise(u: f64, v: f64, seed: u64) -> f64 {
+pub(super) fn value_noise(u: f64, v: f64, seed: u64) -> f64 {
     let (x0, y0) = (u.floor(), v.floor());
     let (tx, ty) = (u - x0, v - y0);
     let (ix, iy) = (x0 as i64, y0 as i64);

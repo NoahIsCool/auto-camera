@@ -22,14 +22,17 @@
 //! While a subject is tracking, a matched detection may also restart its
 //! tracker (a [`StoreEvent::NeedsTrackerStart`] while it runs). That happens
 //! when the detection disagrees with the box (the tracker drifted), when no
-//! tracker runs (a failed start), and when the tracker coasted on every
-//! observation it reported since the subject's previous applied detection
-//! ([`crate::record`]). A coasting tracker reports no confident observation,
-//! so only detections keep its subject alive. When they are applied within
-//! `lost_after` of the previous one's PTS (pass interval plus latency), the
-//! first one after a whole window of coasting restarts the tracker; when
-//! they are further apart, the subject is lost first and the detection that
-//! recovers it restarts the tracker.
+//! tracker runs (a failed start), and when the tracker reported
+//! observations its contrast check held back (`held`) and no confident one
+//! since the subject's previous applied detection ([`crate::record`]). A
+//! coasting tracker reports no confident observation, so only detections
+//! keep its subject alive. When they are applied within `lost_after` of the
+//! previous one's PTS (pass interval plus latency), the first one after a
+//! whole window of held-back coasting restarts the tracker; when they are
+//! further apart, the subject is lost first and the detection that recovers
+//! it restarts the tracker. A tracker that coasts for want of score, as when
+//! an occluder covers its subject, is not restarted for it: its template,
+//! taken before the occluder came, finds the subject again when it leaves.
 //!
 //! # Invariants
 //!
@@ -45,11 +48,13 @@
 //!   tracking, except after a start the engine reported as failed
 //!   ([`SubjectStore::tracker_failed`]): the subject then follows its
 //!   detections alone until the next matching detection retries the start.
-//! * A tracker that coasted since the previous applied detection is
-//!   restarted by the next applied one. A subject that got no track
-//!   observation in that window, or a confident one, is not: without
-//!   observations a detection that agrees with the box only re-anchors it,
-//!   as it always has.
+//! * A tracker that reported a held-back observation and no confident one
+//!   since the previous applied detection is restarted by the next applied
+//!   one. A subject that got no held-back observation in that window (none
+//!   at all, or only low ones the tracker did not hold back, as when
+//!   something covers the subject), or a confident one, is not: without that
+//!   evidence a detection that agrees with the box only re-anchors it, as it
+//!   always has.
 //! * Fast-track observations never create or revive a subject; only
 //!   detections and operator reacquires do.
 //! * Shot labels ([`crate::labels`]) change only in detection passes that
@@ -147,12 +152,14 @@ impl SubjectStore {
     /// An observation is *usable* when the subject is tracking, its tracker
     /// is running, the box is valid, the confidence is a number and `pts` is
     /// not older than the subject's current box. A usable observation whose
-    /// confidence reaches `track_min_confidence` moves the box; one below it
-    /// leaves the box alone and only counts as coasting evidence
+    /// confidence reaches `track_min_confidence` moves the box. One below it
+    /// leaves the box alone; when the tracker held it back
+    /// ([`TrackObservation::held`]) it counts as coasting evidence
     /// ([`crate::record`]), so that the next detection restarts a tracker
-    /// that coasted all along. Anything else is ignored: tracks never create
-    /// or revive a subject. Emits one [`StoreEvent::Updated`] per moved
-    /// subject.
+    /// that was held back all along, and otherwise (a match its own low
+    /// score held back, as when something covers the subject) it is
+    /// ignored. Anything else is ignored too: tracks never create or revive
+    /// a subject. Emits one [`StoreEvent::Updated`] per moved subject.
     pub fn ingest_tracks(&mut self, pts: Duration, obs: &[TrackObservation]) -> Vec<StoreEvent> {
         let mut events = Vec::new();
         let min = self.config.track_min_confidence;
@@ -160,8 +167,8 @@ impl SubjectStore {
             // Both comparisons are false for NaN, which is neither confident
             // nor coasting evidence.
             let confident = ob.confidence >= min;
-            let coasting = ob.confidence < min;
-            let (Some(bbox), true) = (sanitize(&ob.bbox), confident || coasting) else {
+            let low = ob.confidence < min;
+            let (Some(bbox), true) = (sanitize(&ob.bbox), confident || low) else {
                 continue;
             };
             let Some(rec) = self.subjects.get_mut(&ob.id) else {
@@ -170,7 +177,12 @@ impl SubjectStore {
             if !rec.is_tracking() || !rec.tracker_running || pts < rec.motion.box_pts {
                 continue;
             }
-            rec.note_track(confident);
+            // A low observation is coasting evidence only when the tracker
+            // held it back for a reason that lasts; one its own score held
+            // back (an occluder over the subject) is not; see `crate::record`.
+            if confident || ob.held {
+                rec.note_track(confident);
+            }
             if !confident {
                 continue;
             }

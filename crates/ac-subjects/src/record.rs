@@ -46,36 +46,48 @@
 //!
 //! A tracker that cannot trust its match coasts: it keeps reporting a box
 //! at a confidence below `track_min_confidence`, which the store ignores
-//! for the box. Usually that passes in a few frames. But some causes last:
-//! under a sustained followspot the template keeps its old contrast, so
-//! after one sudden sidestep every later match is held back, and a subject
-//! can stay ambiguous or occluded. A detection that agrees with the box
-//! (above `reseed_iou`) only re-anchors the box, so it would end none of
-//! them, and while detections keep coming within `lost_after` the subject
-//! is never lost either: its tracker coasts for good.
+//! for the box. Usually that passes in a few frames, and an occlusion ends
+//! by itself too: the match sinks with the subject's visible part while
+//! something covers it, and the template, which never learns from a weak
+//! match, finds the subject again once the occluder leaves. One cause does
+//! not end by itself: under a sustained followspot the template keeps its
+//! old contrast, so after one sudden sidestep the tracker's contrast check
+//! holds back every later match. A detection that agrees with the box
+//! (above `reseed_iou`) only re-anchors the box, so it would not end that,
+//! and while detections keep coming within `lost_after` the subject is
+//! never lost either: its tracker coasts for good.
 //!
-//! So each record keeps a tracker report: what its tracker reported in the
+//! The tracker therefore flags each observation its contrast check held
+//! back ([`TrackObservation::held`](crate::TrackObservation::held)), and
+//! each record keeps a tracker report: what its tracker reported in the
 //! current *window*, from the subject's latest applied detection or tracker
-//! (re)start to now. Only observations the store would act on count: the
+//! (re)start to now. Only observations the store would act on count (the
 //! subject is tracking, its tracker runs, the box is valid, the confidence
-//! is a number and `pts` is not older than the box. The report is
+//! is a number and `pts` is not older than the box), and of those only
+//! confident and held ones. A low observation that is not held is no
+//! evidence: restarted on it, the tracker would take its template from a
+//! frame with the occluder in the box, and when the occluder left the box
+//! would follow it off the subject. Ambiguous matches are not held either,
+//! since a narrow occluder in front of the subject makes them too. The
+//! report is
 //!
-//! * `Silent` until the first such observation, and again after every
+//! * `Silent` until the first counted observation, and again after every
 //!   applied detection, every tracker (re)start (admission, re-seed,
 //!   recovery, reacquire), a failed start and a loss;
-//! * `Coasting` from the first observation below the threshold, for as
-//!   long as no confident one follows;
+//! * `Coasting` from the first held observation, for as long as no
+//!   confident one follows;
 //! * `Following` from the first confident observation, whatever follows,
 //!   until the window ends.
 //!
 //! A detection applied to a subject whose report is `Coasting` restarts its
 //! tracker from the detection, as a re-seed does, even when it agrees with
 //! the box ([`crate::associate`]). The other two never do: a subject that
-//! got no observation in the window (detection-only operation, a failed
-//! start, callers that never feed tracks) or a confident one is handled as
-//! if the rule did not exist. A detection older than the anchor is not
-//! applied (it only confirms the subject), so it neither restarts the
-//! tracker nor ends the window.
+//! got no counted observation in the window (detection-only operation, a
+//! failed start, callers that never feed tracks, a tracker that coasted
+//! only for want of score) or a confident one is handled as if the rule
+//! did not exist. A detection older than the anchor is not applied (it only
+//! confirms the subject), so it neither restarts the tracker nor ends the
+//! window.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -111,11 +123,11 @@ pub(crate) struct Motion {
 /// [module docs](self)).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum TrackerReport {
-    /// No usable observation yet.
+    /// No counted (confident or held) observation yet.
     #[default]
     Silent,
-    /// Usable observations, every one below `track_min_confidence`: the
-    /// tracker coasted on every frame it reported.
+    /// Held observations and no confident one: the contrast check held the
+    /// tracker back, and it trusted no match since.
     Coasting,
     /// At least one confident observation.
     Following,
@@ -166,9 +178,9 @@ pub struct SubjectRecord {
     /// What the tracker reported since the latest applied detection or
     /// tracker (re)start: the coasting evidence. `Silent` whenever the
     /// tracker is not running, and right after every applied detection and
-    /// every (re)start; `Coasting` only while every usable observation since
-    /// then was below `track_min_confidence`; `Following` from a confident
-    /// one until the window ends.
+    /// every (re)start; `Coasting` from a held observation for as long as no
+    /// confident one follows; `Following` from a confident one until the
+    /// window ends. Low observations that are not held leave it alone.
     pub(crate) tracker_report: TrackerReport,
 }
 
@@ -326,10 +338,11 @@ impl SubjectRecord {
         self.tracker_report = TrackerReport::Silent;
     }
 
-    /// Counts a usable track observation in the coasting evidence: a
-    /// confident one makes the report `Following` for the rest of the
-    /// window, and one below the threshold makes a `Silent` report
-    /// `Coasting`.
+    /// Counts a usable track observation that is confident or held in the
+    /// coasting evidence: a confident one makes the report `Following` for
+    /// the rest of the window, and a held one below the threshold makes a
+    /// `Silent` report `Coasting`. The store does not call it for a low
+    /// observation that is not held.
     pub(crate) fn note_track(&mut self, confident: bool) {
         self.tracker_report = match (self.tracker_report, confident) {
             (_, true) => TrackerReport::Following,
@@ -339,8 +352,8 @@ impl SubjectRecord {
     }
 
     /// Ends the window for an applied detection: true when the tracker
-    /// coasted on every observation it reported since the previous applied
-    /// detection or (re)start, and reported at least one.
+    /// reported a held observation and no confident one since the previous
+    /// applied detection or (re)start.
     pub(crate) fn take_coasting(&mut self) -> bool {
         std::mem::take(&mut self.tracker_report) == TrackerReport::Coasting
     }
@@ -429,10 +442,11 @@ mod tests {
     }
 
     #[test]
-    fn coasting_evidence_needs_low_observations_only() {
+    fn coasting_evidence_needs_held_observations_only() {
         let mut r = record(Rect::FULL);
         // Nothing reported: no evidence.
         assert!(!r.take_coasting());
+        // Held observations (the store notes no other low ones).
         r.note_track(false);
         r.note_track(false);
         assert_eq!(r.tracker_report, TrackerReport::Coasting);

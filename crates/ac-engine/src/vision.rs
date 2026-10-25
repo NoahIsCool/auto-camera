@@ -7,9 +7,12 @@
 //! * **Every new frame** advances the [`TemplateTracker`], feeds its
 //!   observations to [`SubjectStore::ingest_tracks`] with the frame's PTS,
 //!   and runs [`SubjectStore::tick`] at that PTS. Low-confidence
-//!   observations are passed on too: they do not move a box, but they tell
-//!   the store that a tracker coasts, so that its next detection restarts
-//!   it even when it agrees with the box.
+//!   observations are passed on too, with the tracker's `held` flag: they
+//!   do not move a box, but a held one (a match the contrast check held
+//!   back) tells the store that the tracker coasts for a reason that lasts,
+//!   so that its next detection restarts it even when it agrees with the
+//!   box. A low observation that is not held (an occluder over the subject)
+//!   is no such evidence.
 //! * **Every accepted detection batch** goes to
 //!   [`SubjectStore::ingest_detections`] with the PTS of the frame it was
 //!   computed on.
@@ -150,7 +153,12 @@ impl SourceVision {
         for o in self.tracker.update(frame) {
             self.confidence.insert(o.id, o.confidence);
             if self.vouched(o.id) {
-                observations.push((o.id, o.bbox, o.confidence).into());
+                observations.push(ac_subjects::TrackObservation {
+                    id: o.id,
+                    bbox: o.bbox,
+                    confidence: o.confidence,
+                    held: o.held,
+                });
             } else {
                 self.stats.unvouched_observations += 1;
             }
@@ -263,6 +271,7 @@ mod tests {
     use ac_sources::SyntheticPattern;
 
     mod light_cues;
+    mod occluders;
 
     /// The test source id.
     fn source() -> SourceId {

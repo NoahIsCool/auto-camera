@@ -96,6 +96,20 @@ pub struct TrackObservation {
     pub bbox: Rect,
     /// Confidence in `0.0..=1.0` that `bbox` is on the subject.
     pub confidence: f32,
+    /// The tracker held the box back from a match whose score alone would
+    /// have moved it, for a reason that outlasts the frame: the
+    /// [`TemplateTracker`](crate::TemplateTracker)'s contrast check refused
+    /// a surprising match far off the template's contrast (under a
+    /// followspot the template never learned, say). A coast for that reason
+    /// lasts as long as its cause, so the subject store restarts a tracker
+    /// that reported such observations and no confident one between two
+    /// detections. False for a trusted match, for one held back by its own
+    /// low score (an occluder over the subject, which the old template finds
+    /// again once it leaves) and for one held back only by its ambiguity (a
+    /// narrow occluder in front of the subject makes those too). Absent in
+    /// older data, where it reads as false.
+    #[serde(default)]
+    pub held: bool,
 }
 
 /// A per-frame, per-source subject tracker.

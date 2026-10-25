@@ -70,11 +70,13 @@
 //! until the light changes or a detection restarts the tracker. A step that
 //! small leaves the coasting box overlapping the performer above the store's
 //! `reseed_iou`, so a detection agrees with the box (a longer one re-seeds
-//! as a drift). So the subject store restarts a tracker that coasted on
-//! every frame since the subject's previous detection from the next one, and
-//! a subject whose detections come further apart than its `lost_after` is
-//! lost first and restarted by the detection that recovers it; either way
-//! the new template is taken under the spot. Velocity prediction covers ordinary motion:
+//! as a drift). So `step` flags every observation the check holds back
+//! (`TrackObservation::held`), the subject store restarts a tracker that
+//! reported such observations and no trusted match since the subject's
+//! previous detection from the next one, and a subject whose detections
+//! come further apart than its `lost_after` is lost first and restarted by
+//! the detection that recovers it; either way the new template is taken
+//! under the spot. Velocity prediction covers ordinary motion:
 //! stops, turns, sway and a dash that builds up over a few frames all stay
 //! within it. The parent module's docs name the case no contrast check helps
 //! with, a start box that already holds someone else's pixels.

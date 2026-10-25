@@ -45,9 +45,17 @@
 //! reports a low confidence for as long as the cause lasts. Restarts come
 //! from the subject store (`ac-subjects`), which re-seeds the tracker from a
 //! detection that disagrees with the box, from the first detection after the
-//! tracker coasted on every frame since the previous one, and from the
-//! detection that recovers a subject lost for want of confident
-//! observations.
+//! contrast check below held the tracker back, with no trusted match, since
+//! the previous one, and from the detection that recovers a subject lost for
+//! want of confident observations. Each observation says whether the
+//! contrast check held it back ([`TrackObservation::held`]): that cause
+//! does not end by itself (a followspot the template never learns), and a
+//! restart under it does end it. A coast for want of score, such as an
+//! occluder over the subject, is not flagged, and neither is an ambiguous
+//! match, which a narrow occluder in front of the subject also produces:
+//! the template that was never taught the occluder is what finds the
+//! subject again when it leaves, and a restart would take a new one from
+//! the occluded frame.
 //!
 //! NCC is blind to contrast, so a faint template, such as a shadow on a wall,
 //! matches a nearby high-contrast performer of the same shape at 0.70 to
@@ -143,6 +151,9 @@ struct Track {
     appearance: GrayImage,
     /// Confidence of the latest estimate.
     confidence: f32,
+    /// The contrast check held the latest match back
+    /// ([`TrackObservation::held`]).
+    held: bool,
     /// Sequence number of the last frame applied.
     seq: u64,
     /// Presentation time of the last frame applied.
@@ -214,6 +225,7 @@ impl TemplateTracker {
                 id,
                 bbox: t.visible_box(),
                 confidence: t.confidence,
+                held: t.held,
             })
             .collect()
     }
@@ -337,6 +349,7 @@ fn step(
                 (track.size.1 * m.scale).clamp(min_h.min(1.0), 1.0),
             );
             track.confidence = m.score.clamp(0.0, 1.0);
+            track.held = false;
             let full = Rect::from_center(center, track.size.0, track.size.1);
             if m.score >= config.update_score && Rect::FULL.contains_rect(&full) {
                 learn(config, track, level);
@@ -348,6 +361,9 @@ fn step(
                 track.velocity.0 * config.velocity_decay,
                 track.velocity.1 * config.velocity_decay,
             );
+            // Only the contrast check holds a match back for a reason that
+            // outlasts the frame; see `TrackObservation::held`.
+            track.held = matches!(other, Some(m) if m.contrast_refused(config));
             track.confidence = match other {
                 // Held back by its ambiguity or its contrast, not its score.
                 Some(m) if m.ambiguous || m.contrast_refused(config) => {
@@ -427,6 +443,7 @@ impl Tracker for TemplateTracker {
                 velocity: (0.0, 0.0),
                 appearance: GrayImage::new(cw, ch, data),
                 confidence: 1.0,
+                held: false,
                 seq: frame.seq,
                 pts: frame.pts,
             },

@@ -259,10 +259,15 @@ fn weak_contrast_mismatched_match_coasts_only_far_from_the_prediction() {
                 (dx - jump).abs() < 3.0,
                 "jump {jump}, contrast {contrast}: followed, {o:?}"
             );
+            assert!(!o.held, "jump {jump}, contrast {contrast}: {o:?}");
         } else {
             assert!(o.confidence <= 0.3, "coasts: {}", o.confidence);
             assert!(dx.abs() < 1.0, "held: {o:?}");
             assert!((o.bbox.w - start.w).abs() < 1e-9, "size held: {o:?}");
+            // Flagged for the subject store, until a restart.
+            assert!(o.held, "flagged as held back: {o:?}");
+            tracker.start(&next, SubjectId(1), o.bbox).unwrap();
+            assert!(!tracker.observations()[0].held, "a start clears it");
         }
     }
 }
@@ -335,8 +340,8 @@ fn a_mismatched_match_below_accept_score_reports_its_score() {
     // most of the texture replaced (weights 0.3 and 0.95), so the best
     // match scores about 0.46, below `accept_score`. Its score alone holds
     // the box back, and it reports that score as any weak match does: the
-    // `ambiguous_confidence` cap is only for matches the contrast check
-    // held back.
+    // `ambiguous_confidence` cap is for ambiguous matches and those the
+    // contrast check held back, and the `held` flag for the latter alone.
     let side = 128.0;
     let texture = move |(x, y): (f64, f64), cx: f64, seed: u64| {
         let (u, v) = ((x - cx) / side + 0.5, (y - 360.0) / side + 0.5);
@@ -369,4 +374,6 @@ fn a_mismatched_match_below_accept_score_reports_its_score() {
     );
     let dx = (o.bbox.center().x - start.center().x) * SW as f64;
     assert!(dx.abs() < 1.0, "held: {o:?}");
+    // Its score held it back, not the contrast check: no restart is due.
+    assert!(!o.held, "{o:?}");
 }

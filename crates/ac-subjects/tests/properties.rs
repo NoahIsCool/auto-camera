@@ -64,8 +64,9 @@ enum Op {
     Track {
         /// Clock advance before the call.
         advance_ms: u64,
-        /// (subject id, grid cell, jitter, confidence) per observation.
-        obs: Vec<(u32, u8, u8, f32)>,
+        /// (subject id, grid cell, jitter, confidence, held back) per
+        /// observation.
+        obs: Vec<(u32, u8, u8, f32, bool)>,
     },
     /// A frame tick.
     Tick {
@@ -94,7 +95,7 @@ fn cell(cell: u8, jitter: u8) -> Rect {
 /// Strategy for one operation.
 fn op() -> impl Strategy<Value = Op> {
     let det = (0..QUERIES.len(), 0u8..12, 0u8..5, 0.2f32..1.0);
-    let ob = (1u32..12, 0u8..12, 0u8..5, 0.2f32..1.0);
+    let ob = (1u32..12, 0u8..12, 0u8..5, 0.2f32..1.0, any::<bool>());
     prop_oneof![
         4 => (0u64..800, 0u64..400, prop::collection::vec(det, 0..6))
             .prop_map(|(advance_ms, lag_ms, dets)| Op::Detect { advance_ms, lag_ms, dets }),
@@ -149,10 +150,11 @@ fn apply(store: &mut SubjectStore, model: &mut Model, op: &Op) -> Vec<StoreEvent
             model.now += advance_ms;
             let obs: Vec<TrackObservation> = obs
                 .iter()
-                .map(|&(id, c, j, confidence)| TrackObservation {
+                .map(|&(id, c, j, confidence, held)| TrackObservation {
                     id: SubjectId(id),
                     bbox: cell(c, j),
                     confidence,
+                    held,
                 })
                 .collect();
             store.ingest_tracks(ms(model.now), &obs)
@@ -344,7 +346,7 @@ proptest! {
         // after the PTS of the next pass, which sees the entity unchanged.
         for frame in 1..=30 + lag_frames {
             let pts = Duration::from_secs_f64(f64::from(frame) / 30.0);
-            let ob = TrackObservation { id, bbox: tracked, confidence: 0.9 };
+            let ob = TrackObservation { id, bbox: tracked, confidence: 0.9, held: false };
             store.ingest_tracks(pts, &[ob]);
         }
         let ev = store.ingest_detections(Duration::from_secs(1), &boxes_of_the_entity(&pass));

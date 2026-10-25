@@ -1,8 +1,10 @@
-//! Coasting trackers: a detection applied to a subject whose tracker coasted
-//! on every observation it reported since the subject's previous applied
-//! detection restarts the tracker, as a re-seed does, even when it agrees
-//! with the box. No observation in that window, or a confident one, leaves
-//! an agreeing detection a re-anchor, as before the rule.
+//! Coasting trackers: a detection applied to a subject whose tracker
+//! reported held-back observations and no confident one since the subject's
+//! previous applied detection restarts the tracker, as a re-seed does, even
+//! when it agrees with the box. No observation in that window, only low ones
+//! the tracker did not hold back (an occluder over the subject), or a
+//! confident one, leaves an agreeing detection a re-anchor, as before the
+//! rule.
 
 use ac_core::{Point, Rect, SubjectId};
 
@@ -10,11 +12,13 @@ use crate::record::TrackerReport;
 use crate::testkit::*;
 use crate::{StoreEvent, SubjectStore, TrackObservation};
 
-/// A track observation below the default `track_min_confidence` (0.5), as a
-/// tracker reports while it coasts.
+/// A track observation below the default `track_min_confidence` (0.5) that
+/// the tracker held back, as it reports while its contrast check refuses
+/// every match.
 fn coasting(id: SubjectId, bbox: Rect) -> TrackObservation {
     TrackObservation {
         confidence: 0.3,
+        held: true,
         ..track(id, bbox)
     }
 }
@@ -78,6 +82,48 @@ fn an_agreeing_detection_restarts_a_tracker_that_coasted_since_the_last_one() {
     // The restarted tracker is followed at once.
     let ev = s.ingest_tracks(t(0.53), &[track(id, person(0.331, 0.5))]);
     assert_eq!(ev, vec![StoreEvent::Updated { id }]);
+}
+
+#[test]
+fn a_tracker_that_coasts_for_want_of_score_is_not_restarted() {
+    // Something covers the subject: the match sinks with the visible part,
+    // below `accept_score`, and the tracker reports that score without
+    // holding the box back for any other reason. A restart would take the
+    // template from a frame with the occluder in the box, so the agreeing
+    // detection only re-anchors.
+    let (mut s, id) = one();
+    for time in [0.1, 0.2, 0.3, 0.4] {
+        let occluded = TrackObservation {
+            confidence: 0.44,
+            ..track(id, person(0.3, 0.5))
+        };
+        assert!(s.ingest_tracks(t(time), &[occluded]).is_empty());
+    }
+    assert_eq!(s.record(id).unwrap().tracker_report, TrackerReport::Silent);
+    let ev = s.ingest_detections(t(0.5), &[det("person", person(0.31, 0.5))]);
+    assert_eq!(ev, vec![StoreEvent::Updated { id }]);
+    assert_eq!(s.record(id).unwrap().motion.anchor, person(0.31, 0.5));
+    // One held observation among them is evidence, and the unheld ones
+    // around it neither add to it nor take it away.
+    let occluded = TrackObservation {
+        confidence: 0.44,
+        ..track(id, person(0.31, 0.5))
+    };
+    s.ingest_tracks(t(0.6), &[occluded]);
+    coast(&mut s, id, &[0.7]);
+    s.ingest_tracks(t(0.8), &[occluded]);
+    assert_eq!(
+        s.record(id).unwrap().tracker_report,
+        TrackerReport::Coasting
+    );
+    let ev = s.ingest_detections(t(1.0), &[det("person", person(0.31, 0.5))]);
+    assert_eq!(
+        ev,
+        vec![
+            StoreEvent::Updated { id },
+            restart(id, person(0.31, 0.5), 1.0)
+        ]
+    );
 }
 
 #[test]
@@ -262,7 +308,7 @@ fn a_tracker_restart_or_a_loss_ends_the_window() {
 #[test]
 fn coasting_restarts_replay_identically() {
     // Two subjects at 2 Hz detections and 30 Hz tracks; the second one's
-    // tracker coasts for a second at a time.
+    // tracker is held back for a second at a time.
     let run = || {
         let mut s = store();
         let mut log = Vec::new();
@@ -275,6 +321,7 @@ fn coasting_restarts_replay_identically() {
                     track(SubjectId(1), person(0.3, 0.5)),
                     TrackObservation {
                         confidence,
+                        held: confidence < 0.5,
                         ..track(SubjectId(2), person(x, 0.5))
                     },
                 ];

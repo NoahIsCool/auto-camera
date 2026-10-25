@@ -222,6 +222,7 @@ fn reports_low_confidence_when_the_target_disappears_and_recovers() {
                 dist(o.bbox.center(), s.center()) < 0.01,
                 "box must not jump"
             );
+            assert!(!o.held, "occluded frame {seq}: held back by its score");
         }
         let back = tracker.update(&render(10, background, &[s]))[0];
         assert!(
@@ -283,6 +284,9 @@ fn ambiguous_peaks_give_low_confidence_instead_of_a_jump() {
         dist(o.bbox.center(), s.center()) < 0.01,
         "box must not jump"
     );
+    // Not flagged as held back: a narrow occluder in front of a subject
+    // makes ambiguous matches too, and the store must not restart on those.
+    assert!(!o.held);
 
     // Control: a single displaced copy is unambiguous and is followed.
     let mut tracker = TemplateTracker::new(config).unwrap();

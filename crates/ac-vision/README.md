@@ -26,10 +26,15 @@ size around the constant-velocity prediction. It moves only on a strong,
 unambiguous peak; otherwise it coasts and reports low confidence. The
 detector re-anchors subjects; the tracker never retires or restarts one by
 itself. The subject store restarts a tracker from a detection that disagrees
-with its box, and from the first detection after it coasted on every frame
-since the previous one. When detections (with their latency) are further
-apart than the store's `lost_after`, the subject is lost first, and the
-detection that recovers it restarts the tracker.
+with its box, and from the first detection after the contrast check below
+held it back, with no trusted match, since the previous one; each
+observation says so in `held`. When detections (with their latency) are
+further apart than the store's `lost_after`, the subject is lost first, and
+the detection that recovers it restarts the tracker. A tracker that coasts
+for want of score (as when something covers its subject) or on ambiguous
+matches is not restarted for that: its template, which never learns a weak
+match, finds the subject again when the occluder leaves, while one taken
+from the occluded frame would follow the occluder off.
 
 NCC ignores contrast, so a faint template (a shadow on a wall) would also
 match a nearby high-contrast performer of the same shape, or a gentle wall

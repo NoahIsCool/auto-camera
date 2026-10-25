@@ -9,7 +9,9 @@
 //!
 //! The store does not depend on the vision crate. The engine converts the
 //! detector's output into [`Detection`]s and the tracker's into
-//! [`TrackObservation`]s.
+//! [`TrackObservation`]s, which keep whether the tracker held its match
+//! back. A tuple `(id, bbox, confidence)` converts to an observation that
+//! was not held back.
 //!
 //! A detection says what its box covers ([`Extent`]); a track observation
 //! does not, because the tracker follows the box it was started on at that
@@ -42,6 +44,15 @@ pub struct TrackObservation {
     pub bbox: Rect,
     /// Tracker confidence in `0.0..=1.0`.
     pub confidence: f32,
+    /// The tracker held the box back from a match its score alone would
+    /// have moved it to, for a reason that lasts as long as its cause (the
+    /// template tracker's contrast check, under a followspot its template
+    /// never learned, say). Besides confident observations, only these
+    /// count as coasting evidence ([`crate::record`]); a low observation
+    /// that is not held, such as an occluded subject's, is ignored. Absent
+    /// in older data, where it reads as false.
+    #[serde(default)]
+    pub held: bool,
 }
 
 impl From<(SubjectId, Rect, f32)> for TrackObservation {
@@ -50,6 +61,7 @@ impl From<(SubjectId, Rect, f32)> for TrackObservation {
             id,
             bbox,
             confidence,
+            held: false,
         }
     }
 }
@@ -106,5 +118,6 @@ mod tests {
         let ob: TrackObservation = (SubjectId(2), Rect::FULL, 0.7).into();
         assert_eq!(ob.id, SubjectId(2));
         assert_eq!(ob.confidence, 0.7);
+        assert!(!ob.held);
     }
 }
