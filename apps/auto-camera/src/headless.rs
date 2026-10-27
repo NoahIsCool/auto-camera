@@ -573,4 +573,4 @@ fn round(v: f64, digits: i32) -> f64 {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

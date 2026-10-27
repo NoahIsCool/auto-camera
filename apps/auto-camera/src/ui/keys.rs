@@ -5,12 +5,16 @@
 //! | 1–9   | stage multiview tile 1–9 on preview            |
 //! | Space | cut: preview and program swap at once          |
 //! | Enter | auto: run the selected transition to preview   |
+//! | Esc   | give the keyboard back to the shortcuts        |
 //!
 //! Shortcuts must never fire by accident during a show, so they are ignored
-//! while a text field has keyboard focus (typing a prompt must not cut),
-//! on key repeat (holding Space must not cut back and forth), and while
-//! Ctrl, Alt or Cmd is held (those combinations belong to the system). Only
-//! key presses count, not releases.
+//! while a widget has keyboard focus (typing a prompt must not cut, Enter
+//! ending a number must not run a transition; the window says
+//! [`PAUSED`]), on key repeat (holding Space must not cut back and forth),
+//! and while Ctrl, Alt or Cmd is held (those combinations belong to the
+//! system). Only key presses count, not releases. Escape is the way out of
+//! a focused widget, so it works while the others are paused
+//! ([`drops_focus`]).
 //!
 //! [`actions`] turns egui input events into [`Action`]s and [`command`]
 //! turns an action into an engine command; neither needs a window.
@@ -18,6 +22,14 @@
 use ac_core::ShotId;
 use ac_engine::EngineCommand;
 use eframe::egui::{Event, Key, Modifiers};
+
+/// What the status bar says while the shortcuts are paused.
+pub const PAUSED: &str = "shortcuts paused · Esc resumes";
+
+/// The hover text of [`PAUSED`].
+pub const PAUSED_HOVER: &str = "A field or control has the keyboard, so 1–9, Space and Enter \
+                                go to it. Press Esc, or click anywhere else, to give them \
+                                back to the switcher.";
 
 /// What a shortcut asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +85,23 @@ pub fn actions(events: &[Event], typing: bool) -> Vec<Action> {
             _ => None,
         })
         .collect()
+}
+
+/// True when `events` press Escape, with or without modifiers: the window
+/// then drops the keyboard focus, whichever widget holds it. (egui drops
+/// it too on a plain Escape, unless the focused widget claims the key; the
+/// window does not leave the way out to each widget.)
+pub fn drops_focus(events: &[Event]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            Event::Key {
+                key: Key::Escape,
+                pressed: true,
+                ..
+            }
+        )
+    })
 }
 
 /// The engine command for `action`, given the multiview's shots in tile
@@ -166,6 +195,31 @@ mod tests {
         assert!(actions(&[repeat, release, ctrl], false).is_empty());
         assert_eq!(actions(&[shift], false), [Action::Preview(0)]);
         assert!(actions(&[Event::Text(" ".into())], false).is_empty());
+    }
+
+    #[test]
+    fn escape_drops_focus_and_is_no_shortcut() {
+        let ctrl_escape = Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::CTRL,
+        };
+        assert!(drops_focus(&[press(Key::Num1), press(Key::Escape)]));
+        assert!(drops_focus(&[ctrl_escape]));
+        assert!(!drops_focus(&[press(Key::Space)]));
+        assert!(!drops_focus(&[]));
+        let release = Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        assert!(!drops_focus(&[release]));
+        assert_eq!(action_for(Key::Escape), None);
+        assert!(actions(&[press(Key::Escape)], false).is_empty());
     }
 
     #[test]

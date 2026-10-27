@@ -17,6 +17,12 @@
 //! and cuts it to program. The right-click menu of a subject shot pins,
 //! hides or re-acquires its subject. Clicks become [`EngineCommand`]s that
 //! the caller sends; this module never talks to the engine itself.
+//!
+//! A tile is painted, not built from widgets, so it tells the
+//! accessibility tree (AccessKit) what it is itself: a button named by
+//! [`tile_name`] with everything its picture shows in words (number, name,
+//! the LIMITED badge, tally, status). Screen readers read that name, and
+//! the window tests find tiles by it.
 
 use ac_core::ShotId;
 use ac_director::CandidateKind;
@@ -30,7 +36,7 @@ use super::keys::tile_label;
 #[cfg(doc)]
 use super::layout::MIN_TILE_WIDTH;
 use super::layout::{CAPTION, grid};
-use super::text::{LIMITED_BADGE, shot_hover, shot_status};
+use super::text::{LIMITED_BADGE, shot_hover, shot_status, shot_title};
 use super::textures::Textures;
 
 /// Program tally colour.
@@ -101,6 +107,26 @@ pub fn click_commands(shot: &ShotId, clicked: bool, double_clicked: bool) -> Vec
     }
 }
 
+/// The accessible name of the tile of `shot` at `index`: its shortcut
+/// number, its title (with "(limited)" where the picture has the badge),
+/// its tally and its status, as in "2 Speaker 1 Medium · on preview ·
+/// tracking · 81%".
+pub fn tile_name(index: usize, shot: &ShotView) -> String {
+    let title = shot_title(shot);
+    let mut parts = vec![match tile_label(index) {
+        Some(n) => format!("{n} {title}"),
+        None => title,
+    }];
+    if shot.tally.program {
+        parts.push("on program".into());
+    }
+    if shot.tally.preview {
+        parts.push("on preview".into());
+    }
+    parts.push(shot_status(shot));
+    parts.join(" · ")
+}
+
 /// The subject a shot frames, if it is a subject shot.
 fn subject_of<'a>(snap: &'a EngineSnapshot, shot: &ShotView) -> Option<&'a SubjectView> {
     let id = shot.subject?;
@@ -134,6 +160,9 @@ pub fn show(
                 let picture = g.picture_rect(tile);
                 let response =
                     ui.interact(tile, ui.id().with(("tile", &shot.id.0)), Sense::click());
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tile_name(i, shot))
+                });
                 draw_tile(ui, shot, i, tile, picture, textures, response.hovered());
                 commands.extend(click_commands(
                     &shot.id,
@@ -315,6 +344,35 @@ mod tests {
                 EngineCommand::SetPreview { shot: s.clone() },
                 EngineCommand::Cut
             ]
+        );
+    }
+
+    #[test]
+    fn tile_names_say_what_the_picture_shows() {
+        let mut shot = crate::ui::fixtures::subject_shot(
+            "stage/1/medium",
+            ac_engine::ShotStatus::Tracking,
+            0.81,
+        );
+        assert_eq!(
+            tile_name(1, &shot),
+            "2 Person stage/1/medium · tracking · 81%"
+        );
+        shot.limited_by_zoom = true;
+        shot.tally = Tally {
+            program: true,
+            preview: true,
+        };
+        assert_eq!(
+            tile_name(8, &shot),
+            "9 Person stage/1/medium (limited) · on program · on preview · tracking · 81%"
+        );
+        shot.tally.program = false;
+        shot.status = ac_engine::ShotStatus::Unavailable;
+        assert_eq!(
+            tile_name(9, &shot),
+            "Person stage/1/medium (limited) · on preview · no signal",
+            "no shortcut past the ninth tile"
         );
     }
 

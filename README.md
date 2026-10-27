@@ -56,8 +56,14 @@ source frame rates, tick timing and dropped frames.
 | `1`–`9` | stage tile 1–9 on preview |
 | `Space` | cut |
 | `Enter` | auto transition |
+| `Esc` | leave a focused field or control, so the shortcuts work again |
 
-Shortcuts are ignored while a text field has focus and on key repeat.
+Shortcuts are paused while a field or control has the keyboard (a prompt or
+number being edited, or a control reached with `Tab`), and the status bar
+then says "shortcuts paused"; they are also ignored on key repeat and with
+Ctrl, Alt or Cmd held. While the output is starting or running, closing the
+window or clicking Stop asks first, so a stray click cannot end the show; a
+termination signal (Ctrl-C, `SIGTERM`) still quits without asking.
 
 ## Headless mode
 

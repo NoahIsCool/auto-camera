@@ -1,33 +1,27 @@
 //! The operator window's application state and frame loop.
 //!
 //! Each frame [`OperatorApp`] takes the newest engine snapshot (an `Arc`,
-//! never blocking the engine), turns shortcuts into commands, draws the
-//! panels, the monitors and the multiview, and posts every command the
-//! operator asked for. Commands are posted, not sent: their replies are
-//! polled on later frames ([`OperatorApp::poll`]), so a slow command never
-//! freezes the window, and errors surface as a notice in the status bar.
-//! The window repaints at about the monitor rate while the engine runs.
+//! never blocking the engine), has the [`Console`] draw it (shortcuts,
+//! panels, monitors, multiview), and posts every command the operator asked
+//! for. Commands are posted, not sent: their replies are polled on later
+//! frames ([`OperatorApp::poll`]), so a slow command never freezes the
+//! window, and errors surface as a notice in the status bar. The window
+//! repaints at about the monitor rate while the engine runs.
 //!
 //! Closing the window shuts the engine down, which finishes a running
-//! recording before the process exits. A termination signal (Ctrl-C in
-//! the terminal, `SIGTERM`, `SIGHUP`; [`crate::signals`]) closes the window
-//! the same way.
+//! recording before the process exits; while the output is live the
+//! console asks first ([`super::close_guard`]). A termination signal
+//! (Ctrl-C in the terminal, `SIGTERM`, `SIGHUP`; [`crate::signals`]) closes
+//! the window the same way, without asking.
 
 use std::time::{Duration, Instant};
 
-use ac_core::ShotId;
 use ac_engine::{
-    CommandError, CommandReply, Engine, EngineCommand, EngineHandle, PendingReply, PromptReader,
-    StudioConfig,
+    CommandError, CommandReply, Engine, EngineCommand, EngineHandle, PendingReply, StudioConfig,
 };
 use eframe::egui;
 
-use super::keys;
-use super::multiview;
-use super::panels::{self, OutputForm};
-use super::query_form::QueryForm;
-use super::switching::{self, SwitchState};
-use super::textures::Textures;
+use super::console::Console;
 use crate::signals::QuitSignal;
 
 /// How long a notice stays in the status bar.
@@ -82,24 +76,12 @@ pub struct OperatorApp {
     engine: Option<Engine>,
     /// Commands and snapshots.
     handle: EngineHandle,
-    /// Monitor and tile textures.
-    textures: Textures,
-    /// T-bar and transition selection.
-    switch: SwitchState,
-    /// The add-query form.
-    query_form: QueryForm,
-    /// How prompts are read (the lexicon and what the detector sees),
-    /// built from the same config as the engine's, so the form reads
-    /// prompts exactly as the engine will.
-    prompts: PromptReader,
-    /// The output form.
-    output_form: OutputForm,
+    /// What the window draws and reads.
+    console: Console,
     /// Replies not yet arrived, with their command names.
     pending: Vec<(&'static str, PendingReply)>,
     /// The latest notice.
     notice: Option<Notice>,
-    /// Program aspect ratio.
-    aspect: f32,
     /// Termination signals; when one has come the window closes.
     quit: QuitSignal,
 }
@@ -108,7 +90,7 @@ impl std::fmt::Debug for OperatorApp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OperatorApp")
             .field("pending", &self.pending.len())
-            .field("textures", &self.textures)
+            .field("console", &self.console)
             .finish_non_exhaustive()
     }
 }
@@ -119,17 +101,9 @@ impl OperatorApp {
         Self {
             handle: engine.handle(),
             engine: Some(engine),
-            textures: Textures::default(),
-            switch: SwitchState::new(config.switcher.to_transition()),
-            query_form: QueryForm::default(),
-            prompts: PromptReader::of(config),
-            output_form: OutputForm::new(
-                config.output.rtmp_url.as_deref(),
-                config.output.record_path.as_deref(),
-            ),
+            console: Console::new(config),
             pending: Vec::new(),
             notice: None,
-            aspect: config.output.width as f32 / config.output.height.max(1) as f32,
             quit: QuitSignal::new(),
         }
     }
@@ -185,62 +159,18 @@ impl OperatorApp {
     /// termination signal came (closing shuts the engine down).
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        if self.quit.requested() {
+        let quitting = self.quit.requested();
+        if quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         let snap = self.handle.snapshot();
         self.poll();
-        let ids: Vec<ShotId> = snap.shots.iter().map(|s| s.id.clone()).collect();
-        let typing = ctx.egui_wants_keyboard_input();
-        let events = ctx.input(|i| i.events.clone());
-        let mut commands: Vec<EngineCommand> = keys::actions(&events, typing)
-            .into_iter()
-            .filter_map(|a| keys::command(a, &ids))
-            .collect();
         let mut notice = self.notice.as_ref().map(|n| (n.text.clone(), n.error));
         if let Some(stopped) = stopped_notice(&snap) {
             notice = Some(stopped);
         }
-        egui::Panel::bottom("status").show(ui, |ui| {
-            panels::status_bar(ui, &snap, notice.as_ref().map(|(t, e)| (t.as_str(), *e)));
-        });
-        egui::Panel::right("side")
-            .default_size(380.0)
-            .resizable(true)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    commands.extend(panels::director(ui, &snap));
-                    ui.separator();
-                    commands.extend(panels::queries(
-                        ui,
-                        &snap,
-                        &mut self.query_form,
-                        &self.prompts,
-                    ));
-                    ui.separator();
-                    commands.extend(panels::output(ui, &snap, &mut self.output_form));
-                });
-            });
-        egui::CentralPanel::default().show(ui, |ui| {
-            let height = (ui.available_height() * 0.5).clamp(160.0, 640.0);
-            commands.extend(switching::show(
-                ui,
-                &snap,
-                &mut self.switch,
-                &mut self.textures,
-                self.aspect,
-                height,
-            ));
-            ui.separator();
-            commands.extend(multiview::show(ui, &snap, &mut self.textures, self.aspect));
-        });
-        self.textures.retain(|name| {
-            name.starts_with("monitor/")
-                || name
-                    .strip_prefix("tile/")
-                    .is_some_and(|id| ids.iter().any(|s| s.0 == id))
-        });
-        for command in commands {
+        let notice = notice.as_ref().map(|(t, e)| (t.as_str(), *e));
+        for command in self.console.frame(ui, &snap, notice, quitting) {
             self.post(command);
         }
         ctx.request_repaint_after(REPAINT);
@@ -266,7 +196,7 @@ impl Drop for OperatorApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ac_core::QueryId;
+    use ac_core::{QueryId, ShotId};
     use ac_engine::{EngineOptions, MonitorSettings};
     use ac_sources::SourceConfig;
     use ac_switcher::SwitchError;
@@ -368,6 +298,114 @@ mod tests {
         assert!(app.engine.is_none());
         app.shutdown();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.frame(ui));
+    }
+
+    /// A file removed when dropped, so a failing test leaves no recording
+    /// behind.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_close_request_while_recording_asks_and_the_engine_keeps_running() {
+        use crate::headless::tests::{have, temp_path};
+        use crate::ui::close_guard::Question;
+        use ac_engine::OutputState;
+        use egui_kittest::{Harness, kittest::Queryable};
+        if !(have("ffmpeg") && have("ffprobe")) {
+            eprintln!("skipped: ffmpeg is not installed");
+            return;
+        }
+        let mut config = StudioConfig::with_source(
+            "stage",
+            SourceConfig::Synthetic {
+                width: 160,
+                height: 90,
+                fps: 30.0,
+                subjects: 1,
+            },
+        );
+        config.output.width = 160;
+        config.output.height = 90;
+        config.output.encoder = ac_engine::EncoderSetting::Libx264;
+        config.monitors = MonitorSettings::disabled();
+        let engine = Engine::start_with(config.clone(), EngineOptions::default()).unwrap();
+        let handle = engine.handle();
+        handle
+            .wait_until(Duration::from_secs(10), |s| {
+                s.shots.first().is_some_and(|w| w.available)
+            })
+            .expect("the source delivers frames");
+        let path = temp_path("close-guard.mp4");
+        // Dropped after the app, which finishes the recording first.
+        let _scratch = Scratch(path.clone());
+        handle
+            .send(EngineCommand::StartOutput {
+                rtmp_url: None,
+                record_path: Some(path.clone()),
+            })
+            .unwrap();
+        handle
+            .wait_until(Duration::from_secs(20), |s| {
+                s.output.state == OutputState::Running
+            })
+            .expect("the recording runs");
+        let quit = QuitSignal::new();
+        let app = OperatorApp::new(engine, &config).with_quit(quit.clone());
+        // The app asks for a repaint every 30 ms, so the harness never
+        // settles: it runs a counted number of frames instead.
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1440.0, 900.0))
+            .build_ui_state(|ui, app: &mut OperatorApp| app.frame(ui), app);
+        // The window's close button.
+        let request_close = |h: &mut Harness<'_, OperatorApp>| {
+            h.input_mut()
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .events
+                .push(egui::ViewportEvent::Close);
+        };
+        let commands = |h: &Harness<'_, OperatorApp>| {
+            h.output().viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .clone()
+        };
+        request_close(&mut h);
+        h.step();
+        assert!(commands(&h).contains(&egui::ViewportCommand::CancelClose));
+        h.run_steps(2);
+        h.get_by_label(Question::Close.title());
+        // The show goes on: the engine ticks and records, the dialog waits.
+        let asked = handle.snapshot();
+        let later = handle
+            .wait_until(Duration::from_secs(10), |s| {
+                s.tick > asked.tick + 15 && s.output.frames_pushed > asked.output.frames_pushed
+            })
+            .expect("the engine keeps ticking and recording");
+        h.run_steps(2);
+        assert!(h.state().engine.is_some());
+        assert!(later.running);
+        assert_eq!(later.output.state, OutputState::Running);
+        h.get_by_label(Question::Close.title());
+        // A termination signal still closes, unasked: the app sends Close,
+        // and the close request it comes back as goes through.
+        quit.signal();
+        h.step();
+        assert!(commands(&h).contains(&egui::ViewportCommand::Close));
+        assert!(h.query_by_label(Question::Close.title()).is_none());
+        request_close(&mut h);
+        h.step();
+        assert!(!commands(&h).contains(&egui::ViewportCommand::CancelClose));
+        // Closing shuts the engine down, which finishes the recording.
+        h.state_mut().shutdown();
+        assert!(h.state().engine.is_none());
+        let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+        assert!(size > 0, "the recording was finished");
     }
 
     #[test]
