@@ -1,5 +1,5 @@
 //! The JSON summary of a headless run: plain serializable data, built by
-//! `summarize` in the parent module from the run's snapshots.
+//! `summarize` in `report` from the run's snapshots.
 //!
 //! Every value is rounded for reading (milliseconds to one decimal,
 //! normalized coordinates to four, scores to two) and absent values are

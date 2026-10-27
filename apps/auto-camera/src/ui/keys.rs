@@ -7,6 +7,12 @@
 //! | Enter | auto: run the selected transition to preview   |
 //! | Esc   | give the keyboard back to the shortcuts        |
 //!
+//! During a transition the number keys stage the next shot for its end,
+//! Space cuts the transition short (the shot it brings in, which the
+//! preview monitor shows, lands on program at once) and Enter queues a take
+//! of the next shot; the switcher has the rules ([`ac_switcher`]). While
+//! the T-bar holds a transition, Space is refused with a notice.
+//!
 //! Shortcuts must never fire by accident during a show, so they are ignored
 //! while a widget has keyboard focus (typing a prompt must not cut, Enter
 //! ending a number must not run a transition; the window says

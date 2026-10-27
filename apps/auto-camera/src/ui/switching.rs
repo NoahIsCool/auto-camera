@@ -11,6 +11,16 @@
 //! back to the start abandons the transition. The UI therefore keeps the
 //! lever position itself ([`SwitchState::tbar`]) and only sends positions.
 //! The selected transition is likewise UI state, sent when it changes.
+//!
+//! Cut and Auto stay live while a transition runs, as the switcher takes
+//! presses then too ([`ac_switcher`]): a shot staged meanwhile waits for the
+//! end, Auto queues a take of it, and Cut cuts the transition short, landing
+//! the shot the preview monitor shows. The preview caption names the
+//! waiting shot and says whether a take of it is queued ([`queue_caption`]),
+//! so the operator sees what will happen when the transition ends. While
+//! the T-bar holds a transition the switcher refuses Cut, since the lever
+//! would be left mid-travel, so CUT is disabled and says why
+//! ([`cut_enabled`]); the lever finishes or abandons the transition.
 
 use ac_engine::{EngineCommand, EngineSnapshot};
 use ac_switcher::{Transition, TransitionKind};
@@ -153,6 +163,11 @@ fn monitor(
         {
             caption.push_str(&format!("  ·  transition {}", percent(*opacity)));
         }
+        if which == Monitor::Preview
+            && let Some(queued) = queue_caption(snap)
+        {
+            caption.push_str(&format!("  ·  {queued}"));
+        }
         ui.label(RichText::new(caption).strong().color(color));
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
         let painter = ui.painter_at(rect.expand(3.0));
@@ -183,6 +198,28 @@ fn monitor(
     });
 }
 
+/// The preview caption's note on the shot waiting for the running
+/// transition to end, if one is (`next Speaker 1 Medium · take queued`).
+pub fn queue_caption(snap: &EngineSnapshot) -> Option<String> {
+    let queued = snap.switcher.queued.as_ref()?;
+    let name = shot_name(snap, Some(&queued.shot));
+    Some(if queued.take {
+        format!("next {name} · take queued")
+    } else {
+        format!("next {name}")
+    })
+}
+
+/// Hover text of a CUT button disabled because the T-bar holds the
+/// transition.
+const TBAR_HOLDS: &str = "The T-bar holds the transition: finish it or pull it back";
+
+/// Whether CUT can be pressed: something is on preview and the T-bar does
+/// not hold the running transition (see the module docs).
+pub fn cut_enabled(snap: &EngineSnapshot) -> bool {
+    snap.switcher.preview.is_some() && !snap.switcher.tbar_held
+}
+
 /// Cut, Auto, the transition selector and the T-bar.
 fn controls(
     ui: &mut Ui,
@@ -192,16 +229,20 @@ fn controls(
     commands: &mut Vec<EngineCommand>,
 ) {
     ui.add_space(20.0);
-    let ready = snap.switcher.preview.is_some() && !snap.switcher.in_transition;
+    // During a transition the preview holds its incoming shot, so both stay
+    // enabled: the switcher queues or cuts short (see the module docs).
+    let ready = snap.switcher.preview.is_some();
     let big = vec2(CONTROLS_WIDTH, 30.0);
-    if ui
+    let mut cut = ui
         .add_enabled(
-            ready,
+            cut_enabled(snap),
             egui::Button::new(RichText::new("CUT").strong()).min_size(big),
         )
-        .on_hover_text("Space")
-        .clicked()
-    {
+        .on_hover_text("Space · during a transition, cuts it short");
+    if snap.switcher.tbar_held {
+        cut = cut.on_disabled_hover_text(TBAR_HOLDS);
+    }
+    if cut.clicked() {
         commands.push(EngineCommand::Cut);
     }
     if ui
@@ -209,7 +250,7 @@ fn controls(
             ready,
             egui::Button::new(RichText::new("AUTO").strong()).min_size(big),
         )
-        .on_hover_text("Enter")
+        .on_hover_text("Enter · during a transition, queues a take of the next shot")
         .clicked()
     {
         commands.push(EngineCommand::Auto);
@@ -263,6 +304,8 @@ fn label_of(kind: TransitionKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::ui::fixtures::snapshot;
+    use ac_core::ShotId;
+    use ac_switcher::Queued;
 
     /// A mix of 0.8 s, lever at rest.
     fn state() -> SwitchState {
@@ -318,6 +361,48 @@ mod tests {
         for (k, l) in KINDS {
             assert_eq!(label_of(k), l);
         }
+    }
+
+    #[test]
+    fn the_preview_caption_names_the_queued_shot() {
+        let mut snap = snapshot();
+        assert_eq!(queue_caption(&snap), None);
+        let wide = snap.shots[0].id.clone();
+        let name = shot_name(&snap, Some(&wide));
+        snap.switcher.queued = Some(Queued {
+            shot: wide.clone(),
+            take: false,
+        });
+        assert_eq!(queue_caption(&snap), Some(format!("next {name}")));
+        snap.switcher.queued = Some(Queued {
+            shot: wide,
+            take: true,
+        });
+        assert_eq!(
+            queue_caption(&snap),
+            Some(format!("next {name} · take queued"))
+        );
+        snap.switcher.queued = Some(Queued {
+            shot: ShotId("gone".into()),
+            take: true,
+        });
+        assert_eq!(
+            queue_caption(&snap).as_deref(),
+            Some("next gone · take queued"),
+            "a shot no longer listed is named by its id"
+        );
+    }
+
+    #[test]
+    fn cut_is_disabled_while_the_tbar_holds_the_transition() {
+        let mut snap = snapshot();
+        assert!(!cut_enabled(&snap), "nothing on preview");
+        snap.switcher.preview = Some(snap.shots[0].id.clone());
+        assert!(cut_enabled(&snap));
+        snap.switcher.in_transition = true;
+        assert!(cut_enabled(&snap), "an automatic transition is cut short");
+        snap.switcher.tbar_held = true;
+        assert!(!cut_enabled(&snap));
     }
 
     #[test]

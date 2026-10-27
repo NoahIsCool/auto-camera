@@ -5,8 +5,12 @@
 //! panels, monitors, multiview), and posts every command the operator asked
 //! for. Commands are posted, not sent: their replies are polled on later
 //! frames ([`OperatorApp::poll`]), so a slow command never freezes the
-//! window, and errors surface as a notice in the status bar. The window
-//! repaints at about the monitor rate while the engine runs.
+//! window, and errors surface as a notice in the status bar. A take queued
+//! during a transition is answered when it is queued; if the switcher drops
+//! it when the transition ends (its shot is no longer available), the
+//! snapshot counts the drop and says why, and the window raises the same
+//! notice a refused command would ([`dropped_notice`]). The window repaints
+//! at about the monitor rate while the engine runs.
 //!
 //! Closing the window shuts the engine down, which finishes a running
 //! recording before the process exits; while the output is live the
@@ -52,10 +56,22 @@ pub fn notice_for(
         Ok(CommandReply::OutputStarting) => Some(("output starting".into(), false)),
         Ok(CommandReply::OutputStopping) => Some(("output finishing".into(), false)),
         Ok(CommandReply::Done) => match command {
-            "set_preview" | "cut" | "auto" | "set_tbar" | "accept_suggestion" => None,
+            "set_preview" | "cut" | "cut_to" | "auto" | "set_tbar" | "accept_suggestion" => None,
             other => Some((format!("{other}: done"), false)),
         },
     }
+}
+
+/// The notice for a queued take the switcher dropped since the window had
+/// seen `seen` drops, shown like a refused command; `None` when there is no
+/// new drop.
+pub fn dropped_notice(snap: &ac_engine::EngineSnapshot, seen: u64) -> Option<(String, bool)> {
+    let switcher = &snap.switcher;
+    if switcher.dropped_takes <= seen {
+        return None;
+    }
+    let reason = switcher.last_dropped.clone()?;
+    notice_for("queued take", &Err(CommandError::Switch(reason)))
 }
 
 /// The notice for an engine that is no longer running, with the reason when
@@ -82,6 +98,9 @@ pub struct OperatorApp {
     pending: Vec<(&'static str, PendingReply)>,
     /// The latest notice.
     notice: Option<Notice>,
+    /// Queued takes the switcher had dropped as of the newest snapshot
+    /// read, so each drop raises one notice.
+    dropped_seen: u64,
     /// Termination signals; when one has come the window closes.
     quit: QuitSignal,
 }
@@ -98,8 +117,10 @@ impl std::fmt::Debug for OperatorApp {
 impl OperatorApp {
     /// An app driving `engine`, which was started from `config`.
     pub fn new(engine: Engine, config: &StudioConfig) -> Self {
+        let handle = engine.handle();
         Self {
-            handle: engine.handle(),
+            dropped_seen: handle.snapshot().switcher.dropped_takes,
+            handle,
             engine: Some(engine),
             console: Console::new(config),
             pending: Vec::new(),
@@ -146,6 +167,18 @@ impl OperatorApp {
         }
     }
 
+    /// Raises a notice for a take the switcher dropped since the last frame.
+    fn note_dropped(&mut self, snap: &ac_engine::EngineSnapshot) {
+        if let Some((text, error)) = dropped_notice(snap, self.dropped_seen) {
+            self.notice = Some(Notice {
+                text,
+                error,
+                at: Instant::now(),
+            });
+        }
+        self.dropped_seen = snap.switcher.dropped_takes;
+    }
+
     /// Stops the engine (idempotent).
     fn shutdown(&mut self) {
         if let Some(engine) = self.engine.take()
@@ -165,6 +198,7 @@ impl OperatorApp {
         }
         let snap = self.handle.snapshot();
         self.poll();
+        self.note_dropped(&snap);
         let mut notice = self.notice.as_ref().map(|n| (n.text.clone(), n.error));
         if let Some(stopped) = stopped_notice(&snap) {
             notice = Some(stopped);
@@ -204,6 +238,7 @@ mod tests {
     #[test]
     fn routine_replies_are_silent_and_errors_are_shown() {
         assert_eq!(notice_for("cut", &Ok(CommandReply::Done)), None);
+        assert_eq!(notice_for("cut_to", &Ok(CommandReply::Done)), None);
         assert_eq!(notice_for("set_tbar", &Ok(CommandReply::Done)), None);
         assert_eq!(
             notice_for("pin", &Ok(CommandReply::Done)),
@@ -406,6 +441,21 @@ mod tests {
         assert!(h.state().engine.is_none());
         let size = std::fs::metadata(&path).map_or(0, |m| m.len());
         assert!(size > 0, "the recording was finished");
+    }
+
+    #[test]
+    fn a_dropped_take_is_shown_once_like_a_refused_command() {
+        let mut snap = super::super::fixtures::snapshot();
+        assert_eq!(dropped_notice(&snap, 0), None);
+        snap.switcher.dropped_takes = 2;
+        snap.switcher.last_dropped = Some(SwitchError::Unavailable(ShotId("stage/wide".into())));
+        let (text, error) = dropped_notice(&snap, 1).unwrap();
+        assert!(error, "{text}");
+        assert_eq!(
+            text,
+            "queued take: switcher: shot ShotId(\"stage/wide\") is not available"
+        );
+        assert_eq!(dropped_notice(&snap, 2), None, "already shown");
     }
 
     #[test]
