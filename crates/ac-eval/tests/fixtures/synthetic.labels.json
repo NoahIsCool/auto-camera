@@ -1,0 +1,248 @@
+{
+  "schema_version": 1,
+  "clip": {
+    "id": "synthetic-stage",
+    "sha256": "29fe29b0417bb95406753d5e17343d128b73d2a568f90640b420627335b09411",
+    "camera": "cam-centre",
+    "width": 1920,
+    "height": 1080,
+    "fps": {
+      "num": 30000,
+      "den": 1001
+    },
+    "frame_count": 60
+  },
+  "exclusions": [
+    {
+      "id": "backdrop-photo",
+      "polygon": [
+        {
+          "x": 0.7,
+          "y": 0.05
+        },
+        {
+          "x": 0.95,
+          "y": 0.05
+        },
+        {
+          "x": 0.95,
+          "y": 0.4
+        },
+        {
+          "x": 0.7,
+          "y": 0.4
+        }
+      ]
+    },
+    {
+      "id": "audience",
+      "polygon": [
+        {
+          "x": 0.0,
+          "y": 0.85
+        },
+        {
+          "x": 1.0,
+          "y": 0.85
+        },
+        {
+          "x": 1.0,
+          "y": 1.0
+        },
+        {
+          "x": 0.0,
+          "y": 1.0
+        }
+      ]
+    }
+  ],
+  "tracks": [
+    {
+      "id": 1,
+      "tags": [
+        "pastor"
+      ]
+    },
+    {
+      "id": 2,
+      "tags": [
+        "guitarist",
+        "worship leader"
+      ]
+    },
+    {
+      "id": 3,
+      "tags": []
+    }
+  ],
+  "roles": [
+    {
+      "track": 1,
+      "role": "speaker",
+      "start_frame": 0,
+      "end_frame": 30
+    },
+    {
+      "track": 2,
+      "role": "singer",
+      "start_frame": 30,
+      "end_frame": 60
+    },
+    {
+      "track": 1,
+      "role": "speaker",
+      "start_frame": 45,
+      "end_frame": 60
+    }
+  ],
+  "keyframes": [
+    {
+      "frame": 0,
+      "pts_ns": 0,
+      "people": [
+        {
+          "track": 1,
+          "bbox": {
+            "x": 0.45,
+            "y": 0.25,
+            "w": 0.1,
+            "h": 0.45
+          },
+          "visibility": 0.6,
+          "truncation": {
+            "bottom": true
+          },
+          "lines": {
+            "crown": 0.25,
+            "chin": 0.33,
+            "shoulder": 0.37,
+            "waist": 0.55
+          }
+        },
+        {
+          "track": 2,
+          "bbox": {
+            "x": 0.15,
+            "y": 0.2,
+            "w": 0.12,
+            "h": 0.7
+          },
+          "visibility": 1.0,
+          "lines": {
+            "crown": 0.2,
+            "chin": 0.28
+          }
+        }
+      ]
+    },
+    {
+      "frame": 15,
+      "pts_ns": 500500000,
+      "people": [
+        {
+          "track": 1,
+          "bbox": {
+            "x": 0.46,
+            "y": 0.25,
+            "w": 0.1,
+            "h": 0.45
+          },
+          "visibility": 0.6,
+          "truncation": {
+            "bottom": true
+          },
+          "lines": {
+            "crown": 0.25,
+            "chin": 0.33,
+            "shoulder": 0.37
+          }
+        },
+        {
+          "track": 2,
+          "bbox": {
+            "x": 0.15,
+            "y": 0.2,
+            "w": 0.12,
+            "h": 0.7
+          },
+          "visibility": 1.0
+        },
+        {
+          "track": 3,
+          "bbox": {
+            "x": 0.9,
+            "y": 0.3,
+            "w": 0.1,
+            "h": 0.6
+          },
+          "visibility": 0.5,
+          "truncation": {
+            "right": true
+          }
+        }
+      ]
+    },
+    {
+      "frame": 30,
+      "pts_ns": 1001000000,
+      "people": [
+        {
+          "track": 1,
+          "bbox": {
+            "x": 0.47,
+            "y": 0.26,
+            "w": 0.1,
+            "h": 0.44
+          },
+          "visibility": 0.6,
+          "truncation": {
+            "bottom": true
+          }
+        },
+        {
+          "track": 2,
+          "bbox": {
+            "x": 0.16,
+            "y": 0.2,
+            "w": 0.12,
+            "h": 0.7
+          },
+          "visibility": 0.9
+        },
+        {
+          "track": 3,
+          "bbox": {
+            "x": 0.8,
+            "y": 0.3,
+            "w": 0.12,
+            "h": 0.6
+          },
+          "visibility": 1.0
+        }
+      ]
+    },
+    {
+      "frame": 45,
+      "pts_ns": 1501500000,
+      "people": [
+        {
+          "track": 1,
+          "bbox": {
+            "x": 0.47,
+            "y": 0.26,
+            "w": 0.1,
+            "h": 0.44
+          },
+          "visibility": 0.6,
+          "truncation": {
+            "bottom": true
+          },
+          "lines": {
+            "crown": 0.26,
+            "waist": 0.56
+          }
+        }
+      ]
+    }
+  ]
+}
