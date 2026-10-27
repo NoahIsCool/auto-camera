@@ -51,7 +51,7 @@ source frame rates, tick timing and dropped frames.
 | Input | Action |
 |---|---|
 | click a tile | stage it on preview |
-| double-click a tile | stage it and cut it to program |
+| double-click a tile | cut it straight to program ("Cut now") |
 | right-click a subject tile | pin, hide or re-acquire the subject |
 | `1`–`9` | stage tile 1–9 on preview |
 | `Space` | cut |
@@ -63,11 +63,14 @@ A running transition does not block the controls. A shot staged during
 one waits for its end and then lands on preview (the preview caption says
 "next …"); Auto queues a take of it, which fires once, when the transition
 ends, if the shot is still available, and is otherwise dropped with a
-notice saying why. Cut cuts the transition short, landing its incoming
-shot at once, or cuts straight to a shot staged meanwhile, so a double
-click still puts a tile on air at once. The T-bar and the clock never
-share a transition: the T-bar cannot take over a running Auto, and Cut
-cannot cut short a transition the T-bar holds.
+notice saying why. Cut cuts the transition short: the shot it brings in,
+which the preview monitor shows, lands on program at once, provided it is
+still available; a shot staged meanwhile then lands on preview, and a take
+queued of it is cancelled. A double click on a tile still puts that tile
+on air at once, ending the transition in the same step. The T-bar and the
+clock never share a transition: the T-bar cannot take over a running Auto,
+and while the T-bar holds a transition CUT is disabled (the lever
+finishes or abandons it).
 
 ## Headless mode
 

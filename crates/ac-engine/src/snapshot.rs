@@ -160,6 +160,9 @@ pub struct SwitcherView {
     pub transition: Transition,
     /// A transition is running.
     pub in_transition: bool,
+    /// The T-bar holds the running transition, so Cut and Cut now are
+    /// refused until the lever finishes or abandons it.
+    pub tbar_held: bool,
     /// Overlay shot and its opacity while mixing.
     pub overlay: Option<(ShotId, f64)>,
     /// Opacity of black over the program.

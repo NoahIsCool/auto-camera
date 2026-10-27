@@ -6,9 +6,11 @@
 //! | Space | cut: preview and program swap at once          |
 //! | Enter | auto: run the selected transition to preview   |
 //!
-//! During a transition the same keys stage the next shot for its end, cut
-//! it short (or cut to the next shot) and queue a take of the next shot; the
-//! switcher has the rules ([`ac_switcher`]).
+//! During a transition the number keys stage the next shot for its end,
+//! Space cuts the transition short (the shot it brings in, which the
+//! preview monitor shows, lands on program at once) and Enter queues a take
+//! of the next shot; the switcher has the rules ([`ac_switcher`]). While
+//! the T-bar holds a transition, Space is refused with a notice.
 //!
 //! Shortcuts must never fire by accident during a show, so they are ignored
 //! while a text field has keyboard focus (typing a prompt must not cut),

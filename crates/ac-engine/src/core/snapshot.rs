@@ -85,6 +85,7 @@ impl EngineCore {
             preview: preview.cloned(),
             transition: self.switcher.transition(),
             in_transition: self.switcher.in_transition(),
+            tbar_held: self.switcher.tbar_held(),
             overlay: out.overlay,
             dip: out.dip,
             queued: self.switcher.queued().cloned(),

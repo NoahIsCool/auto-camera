@@ -62,7 +62,7 @@ pub fn notice_for(
         Ok(CommandReply::OutputStarting) => Some(("output starting".into(), false)),
         Ok(CommandReply::OutputStopping) => Some(("output finishing".into(), false)),
         Ok(CommandReply::Done) => match command {
-            "set_preview" | "cut" | "auto" | "set_tbar" | "accept_suggestion" => None,
+            "set_preview" | "cut" | "cut_to" | "auto" | "set_tbar" | "accept_suggestion" => None,
             other => Some((format!("{other}: done"), false)),
         },
     }
@@ -308,6 +308,7 @@ mod tests {
     #[test]
     fn routine_replies_are_silent_and_errors_are_shown() {
         assert_eq!(notice_for("cut", &Ok(CommandReply::Done)), None);
+        assert_eq!(notice_for("cut_to", &Ok(CommandReply::Done)), None);
         assert_eq!(notice_for("set_tbar", &Ok(CommandReply::Done)), None);
         assert_eq!(
             notice_for("pin", &Ok(CommandReply::Done)),

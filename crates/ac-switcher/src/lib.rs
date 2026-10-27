@@ -16,13 +16,16 @@
 //!
 //! # Health
 //!
-//! Every take checks the shot it puts on air at the moment it does so: Cut,
-//! Auto, a T-bar move away from rest, and a queued take when it fires (see
-//! below). An unavailable shot is never taken: a press is refused
+//! Every press that raises a shot's share of the picture checks that shot
+//! at the moment it does so: Cut, Cut now ([`Switcher::cut_to`]), Auto, a
+//! T-bar move away from rest, and a queued take when it fires (see below).
+//! An unavailable shot is never taken: a press is refused
 //! ([`SwitchError::Unavailable`]) and changes nothing, and a queued take is
-//! dropped. A running transition's incoming shot was checked when the
-//! transition started, and cutting it short only lands it sooner, so
-//! neither the clock nor a hot cut checks it again.
+//! dropped. Cutting a transition short raises its incoming shot to the whole
+//! picture at once (from nothing, in the first half of a dip), so it checks
+//! that shot like any take. Only the transition itself carries on without a
+//! re-check: its incoming shot was checked when it started, and the clock or
+//! the lever moving it along is not a press.
 //!
 //! # Pressing during a transition
 //!
@@ -43,19 +46,31 @@
 //!   so a take that could not fire now is refused at once. Pressing Auto
 //!   again changes nothing, and with nothing staged Auto has nothing to add:
 //!   the running transition already takes the preview.
-//! * **Cut** is "cut now". With nothing staged it cuts the running transition
-//!   short: its incoming shot lands on program at once. With a shot staged
-//!   it cuts straight to that shot (checked like any take), abandoning the
-//!   transition, and the old program shot moves to preview; a take queued
-//!   for that shot is spent. While the T-bar holds the transition Cut is
-//!   refused ([`SwitchError::TBarHeld`]): it would leave the lever mid-travel,
-//!   out of step with the buses.
-//! * The T-bar cannot take over an automatic transition
-//!   ([`SwitchError::Busy`]).
+//! * **Cut** cuts the running transition short: its incoming shot, the one
+//!   the preview monitor shows, lands on program at once, and the old
+//!   program shot moves to preview. A shot staged meanwhile lands on preview
+//!   in its place, as at any other end, but a take queued of it is
+//!   cancelled, not fired: Cut is the operator ending the transition now,
+//!   with nothing more to follow. Cut never puts a shot on air that the
+//!   preview bus did not show.
+//! * **Cut now** ([`Switcher::cut_to`]) puts a named shot on air in one
+//!   step, whatever is staged, and the shot it replaces moves to preview (a
+//!   shot already on air stays as it is). During a transition it is a Cut
+//!   and then, unless the named shot is the incoming one, a cut to it,
+//!   without the incoming shot ever showing alone in between. Only the
+//!   named shot is checked, since it is the only one that goes on air.
+//! * While the T-bar holds the transition, Cut and Cut now are refused
+//!   ([`SwitchError::TBarHeld`], [`Switcher::tbar_held`]): the lever would be
+//!   left mid-travel, out of step with the buses, and its next move would
+//!   jump the picture. The operator finishes or abandons the transition with
+//!   the lever. Likewise the T-bar cannot take over an automatic transition
+//!   ([`SwitchError::Busy`]), so the lever and the clock never share one.
 //!
 //! However a transition ends (by the clock, by the T-bar at either end, or by
-//! Cut), the queue is resolved at that moment. Nothing is ever queued while
-//! no transition runs, so a queued take fires at most once.
+//! Cut), the queue is resolved at that moment: the staged shot lands on
+//! preview, and a queued take fires, is dropped, or (by Cut) is cancelled.
+//! Nothing is ever queued while no transition runs, so a queued take fires
+//! at most once.
 //!
 //! # Exposure and tally
 //!
@@ -120,7 +135,7 @@ pub enum SwitchError {
     /// The T-bar cannot take over an automatic transition in progress.
     #[error("an automatic transition is in progress")]
     Busy,
-    /// Cut cannot cut short a transition the T-bar holds.
+    /// Cut and Cut now cannot cut short a transition the T-bar holds.
     #[error("the T-bar holds the transition in progress")]
     TBarHeld,
     /// The duration is not a positive number of seconds.
@@ -222,6 +237,12 @@ impl Switcher {
         self.running.is_some()
     }
 
+    /// True while the T-bar holds a transition, which refuses Cut and Cut
+    /// now (see the module docs).
+    pub fn tbar_held(&self) -> bool {
+        self.running.as_ref().is_some_and(|r| r.manual)
+    }
+
     /// The press waiting for the running transition to end.
     pub fn queued(&self) -> Option<&Queued> {
         self.queued.as_ref()
@@ -271,32 +292,52 @@ impl Switcher {
     }
 
     /// Swaps preview and program immediately; during a transition, cuts it
-    /// short or cuts to the shot staged meanwhile (see the module docs).
+    /// short, landing its incoming shot (see the module docs).
     pub fn cut(&mut self, available: impl Fn(&ShotId) -> bool) -> Result<(), SwitchError> {
-        let Some(running) = &self.running else {
-            self.checked_preview(available)?;
-            self.swap();
-            return Ok(());
-        };
-        if running.manual {
+        if self.tbar_held() {
             return Err(SwitchError::TBarHeld);
         }
-        match self.queued.take() {
-            Some(q) if !available(&q.shot) => {
-                let shot = q.shot.clone();
-                self.queued = Some(q);
-                return Err(SwitchError::Unavailable(shot));
-            }
-            Some(q) => {
-                self.running = None;
-                self.preview = self.program.replace(q.shot);
-            }
-            None => {
-                self.running = None;
-                self.swap();
-            }
+        self.checked_preview(available)?;
+        if self.running.is_some() {
+            self.cut_short();
+        } else {
+            self.swap();
         }
         Ok(())
+    }
+
+    /// Cuts `shot` straight to program ("Cut now"), whatever is staged; the
+    /// old program shot moves to preview. During a transition, cuts it short
+    /// first, in the same step (see the module docs).
+    pub fn cut_to(
+        &mut self,
+        shot: ShotId,
+        available: impl Fn(&ShotId) -> bool,
+    ) -> Result<(), SwitchError> {
+        if self.tbar_held() {
+            return Err(SwitchError::TBarHeld);
+        }
+        if !available(&shot) {
+            return Err(SwitchError::Unavailable(shot));
+        }
+        if self.running.is_some() {
+            self.cut_short();
+        }
+        if self.program.as_ref() != Some(&shot) {
+            self.preview = self.program.replace(shot);
+        }
+        Ok(())
+    }
+
+    /// Ends the running transition at once with its incoming shot on
+    /// program; a shot staged meanwhile lands on preview and a take queued
+    /// of it is cancelled.
+    fn cut_short(&mut self) {
+        self.running = None;
+        self.swap();
+        if let Some(q) = self.queued.take() {
+            self.preview = Some(q.shot);
+        }
     }
 
     /// Starts the selected transition from program to preview; during a

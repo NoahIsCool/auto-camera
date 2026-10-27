@@ -14,10 +14,13 @@
 //!
 //! Cut and Auto stay live while a transition runs, as the switcher takes
 //! presses then too ([`ac_switcher`]): a shot staged meanwhile waits for the
-//! end, Auto queues a take of it, and Cut cuts the transition short (or cuts
-//! straight to the waiting shot). The preview caption names the waiting shot
-//! and says whether a take of it is queued ([`queue_caption`]), so the
-//! operator sees what will happen when the transition ends.
+//! end, Auto queues a take of it, and Cut cuts the transition short, landing
+//! the shot the preview monitor shows. The preview caption names the
+//! waiting shot and says whether a take of it is queued ([`queue_caption`]),
+//! so the operator sees what will happen when the transition ends. While
+//! the T-bar holds a transition the switcher refuses Cut, since the lever
+//! would be left mid-travel, so CUT is disabled and says why
+//! ([`cut_enabled`]); the lever finishes or abandons the transition.
 
 use ac_engine::{EngineCommand, EngineSnapshot};
 use ac_switcher::{Transition, TransitionKind};
@@ -207,6 +210,16 @@ pub fn queue_caption(snap: &EngineSnapshot) -> Option<String> {
     })
 }
 
+/// Hover text of a CUT button disabled because the T-bar holds the
+/// transition.
+const TBAR_HOLDS: &str = "The T-bar holds the transition: finish it or pull it back";
+
+/// Whether CUT can be pressed: something is on preview and the T-bar does
+/// not hold the running transition (see the module docs).
+pub fn cut_enabled(snap: &EngineSnapshot) -> bool {
+    snap.switcher.preview.is_some() && !snap.switcher.tbar_held
+}
+
 /// Cut, Auto, the transition selector and the T-bar.
 fn controls(
     ui: &mut Ui,
@@ -220,14 +233,16 @@ fn controls(
     // enabled: the switcher queues or cuts short (see the module docs).
     let ready = snap.switcher.preview.is_some();
     let big = vec2(CONTROLS_WIDTH, 30.0);
-    if ui
+    let mut cut = ui
         .add_enabled(
-            ready,
+            cut_enabled(snap),
             egui::Button::new(RichText::new("CUT").strong()).min_size(big),
         )
-        .on_hover_text("Space · during a transition, cuts it short")
-        .clicked()
-    {
+        .on_hover_text("Space · during a transition, cuts it short");
+    if snap.switcher.tbar_held {
+        cut = cut.on_disabled_hover_text(TBAR_HOLDS);
+    }
+    if cut.clicked() {
         commands.push(EngineCommand::Cut);
     }
     if ui
@@ -376,6 +391,18 @@ mod tests {
             Some("next gone · take queued"),
             "a shot no longer listed is named by its id"
         );
+    }
+
+    #[test]
+    fn cut_is_disabled_while_the_tbar_holds_the_transition() {
+        let mut snap = snapshot();
+        assert!(!cut_enabled(&snap), "nothing on preview");
+        snap.switcher.preview = Some(snap.shots[0].id.clone());
+        assert!(cut_enabled(&snap));
+        snap.switcher.in_transition = true;
+        assert!(cut_enabled(&snap), "an automatic transition is cut short");
+        snap.switcher.tbar_held = true;
+        assert!(!cut_enabled(&snap));
     }
 
     #[test]

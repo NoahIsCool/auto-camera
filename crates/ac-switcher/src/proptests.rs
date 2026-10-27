@@ -5,7 +5,8 @@
 //! five shots (`s0..s4`), with a random set of shots that are never
 //! available (dead) and, per step, a random set of further shots that are
 //! unavailable at that step only, so a shot can fail between the press that
-//! queued a take of it and the end of the transition, when the take fires.
+//! queued a take of it and the end of the transition, when the take fires,
+//! and between the start of a transition and a Cut that cuts it short.
 //!
 //! "Program shows a shot" means the shot is on air or on its way: it is the
 //! program shot, or the incoming shot of a running transition. After every
@@ -13,6 +14,12 @@
 //!
 //! * a shot only starts being shown when it is available at that step, so
 //!   no dead shot is ever shown and no dead shot is ever lit;
+//! * no step raises the exposure of a shot that is unavailable at that
+//!   step, except a tick or a lever move carrying on the transition that
+//!   was already running, whose shots were checked when it started
+//!   ([`carried`]). Bus membership alone cannot see a press that lands a
+//!   shot already on its way, such as a Cut under the first half of a dip,
+//!   where the incoming shot goes from no exposure to the whole picture;
 //! * tally equals exposure: a shot is lit red exactly when its exposure is
 //!   above zero, and green exactly when it is on preview and not red;
 //! * exposure, worked out from the buses, equals each shot's share of the
@@ -39,6 +46,8 @@ enum Op {
     Stage(usize),
     /// Cut.
     Cut,
+    /// Cut now to shot `i`.
+    CutTo(usize),
     /// Auto.
     Auto,
     /// Move the T-bar to a position, possibly out of range.
@@ -77,6 +86,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
     prop_oneof![
         3 => (0..SHOTS).prop_map(Op::Stage),
         1 => Just(Op::Cut),
+        1 => (0..SHOTS).prop_map(Op::CutTo),
         2 => Just(Op::Auto),
         1 => (-0.2f64..1.2).prop_map(Op::TBar),
         6 => prop_oneof![4 => 0.0f64..0.5, 1 => Just(0.0)].prop_map(Op::Tick),
@@ -99,6 +109,25 @@ fn shown(s: &Switcher) -> HashSet<ShotId> {
         shots.extend(s.preview().cloned());
     }
     shots
+}
+
+/// The shots whose exposure step `op` may raise from `before` while they
+/// are unavailable: a tick carries on a running transition's incoming shot,
+/// and a lever move either shot of the transition it holds. Any other press
+/// that raises a shot must have checked it.
+fn carried(before: &Switcher, op: &Op) -> Vec<ShotId> {
+    if !before.in_transition() {
+        return Vec::new();
+    }
+    match op {
+        Op::Tick(_) => before.preview().cloned().into_iter().collect(),
+        Op::TBar(_) => [before.program(), before.preview()]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// The share of the picture `out` gives `shot`, before the dip to black.
@@ -128,6 +157,7 @@ fn apply(
             Ok(())
         }
         Op::Cut => s.cut(available),
+        Op::CutTo(i) => s.cut_to(shot(*i), available),
         Op::Auto => s.auto(available),
         Op::TBar(p) => s.set_tbar(*p, available),
         Op::Tick(dt) => {
@@ -141,11 +171,12 @@ fn apply(
     }
 }
 
-/// Checks every invariant of the module docs after one step from `before`
+/// Checks every invariant of the module docs after step `op` from `before`
 /// to `after`, where `available` held.
 fn check(
     before: &Switcher,
     after: &Switcher,
+    op: &Op,
     result: &Result<(), SwitchError>,
     available: &dyn Fn(&ShotId) -> bool,
     dead: u8,
@@ -158,11 +189,22 @@ fn check(
         prop_assert!(available(s), "{:?} went on air while unavailable", s);
     }
     let out = after.output();
+    let carried = carried(before, op);
     for i in 0..SHOTS {
         let id = shot(i);
         let exposure = after.exposure(&id);
         let tally = after.tally(&id);
         prop_assert!((0.0..=1.0).contains(&exposure), "exposure {}", exposure);
+        if exposure > before.exposure(&id) && !available(&id) {
+            prop_assert!(
+                carried.contains(&id),
+                "{:?} raised {:?} from {} to {} while unavailable",
+                op,
+                &id,
+                before.exposure(&id),
+                exposure
+            );
+        }
         prop_assert!(
             (exposure - picture_share(&out, &id)).abs() < 1e-12,
             "{:?}: exposure {} but picture {:?}",
@@ -215,7 +257,7 @@ proptest! {
             };
             let before = s.clone();
             let result = apply(&mut s, &step.op, &available);
-            check(&before, &s, &result, &available, dead)?;
+            check(&before, &s, &step.op, &result, &available, dead)?;
         }
     }
 }

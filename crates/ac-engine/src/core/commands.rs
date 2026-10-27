@@ -8,11 +8,16 @@
 //!
 //! A running transition does not make switching commands fail
 //! ([`ac_switcher`] has the rules, the T-bar's included): staging and Auto
-//! are queued for its end, and Cut cuts it short. A queued take is accepted
-//! when it is pressed and checked again when it fires, a tick or more later,
-//! where no reply is waiting; a take dropped there is counted in the
-//! snapshot with its reason ([`crate::snapshot::SwitcherView::last_dropped`]),
-//! and the window shows it as it shows a refused command.
+//! are queued for its end, Cut cuts it short, landing its incoming shot,
+//! and Cut now ([`EngineCommand::CutTo`]) puts a named shot on air in one
+//! command, so no tick can render the incoming shot alone between a Cut
+//! and a cut to the named shot. A queued take is accepted when it is
+//! pressed and checked again when it fires, a tick or more later, where no
+//! reply is waiting; a take dropped there is counted in the snapshot with
+//! its reason ([`crate::snapshot::SwitcherView::last_dropped`]), and the
+//! window shows it as it shows a refused command. A command that ends a
+//! transition and lands a shot the operator staged meanwhile notes it for
+//! the director ([`EngineCore::note_landing`]), as a tick does.
 //!
 //! Protection (on-air subjects are never removed) is refreshed before and
 //! after every command, not only at the start of a tick: a cut followed at
@@ -33,6 +38,7 @@ impl EngineCore {
     pub fn apply(&mut self, cmd: &EngineCommand) -> Result<CommandReply, CommandError> {
         use EngineCommand as C;
         self.update_protection();
+        let queued = self.switcher.queued().cloned();
         match cmd {
             C::SetPreview { shot } => {
                 if self.catalog.get(shot).is_none() {
@@ -43,6 +49,14 @@ impl EngineCore {
             C::Cut => {
                 let catalog = &self.catalog;
                 self.switcher.cut(|id| catalog.is_available(id))?;
+            }
+            C::CutTo { shot } => {
+                if self.catalog.get(shot).is_none() {
+                    return Err(CommandError::UnknownShot(shot.clone()));
+                }
+                let catalog = &self.catalog;
+                self.switcher
+                    .cut_to(shot.clone(), |id| catalog.is_available(id))?;
             }
             C::Auto => {
                 let catalog = &self.catalog;
@@ -129,6 +143,7 @@ impl EngineCore {
                 )));
             }
         }
+        self.note_landing(queued);
         self.update_protection();
         self.note_program();
         Ok(CommandReply::Done)

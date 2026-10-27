@@ -1,5 +1,5 @@
 //! Unit tests: takes, transitions, the T-bar, the queue of presses made
-//! during a transition, and tally.
+//! during a transition, Cut and Cut now cutting one short, and tally.
 
 use super::*;
 
@@ -259,8 +259,8 @@ fn cut_during_a_mix_or_dip_lands_the_incoming_shot_at_once() {
         s.set_transition(transition(kind, 2.0)).unwrap();
         s.auto(all).unwrap();
         s.tick(0.5, all);
-        // The incoming shot was checked when the transition started.
-        s.cut(|_| false).unwrap();
+        // Only the shot going on air is checked; the outgoing one may fail.
+        s.cut(all_but("wide")).unwrap();
         assert!(!s.in_transition(), "{kind:?}");
         assert_eq!(s.program(), Some(&id("pastor")));
         assert_eq!(s.preview(), Some(&id("wide")));
@@ -276,37 +276,112 @@ fn cut_during_a_mix_or_dip_lands_the_incoming_shot_at_once() {
 }
 
 #[test]
-fn cut_during_a_transition_takes_the_shot_staged_meanwhile() {
+fn cut_during_a_transition_refuses_an_incoming_shot_that_became_unavailable() {
+    for (kind, elapsed) in [(TransitionKind::Mix, 0.5), (TransitionKind::Dip, 0.3)] {
+        let mut s = staged();
+        s.set_transition(transition(kind, 2.0)).unwrap();
+        s.auto(all).unwrap();
+        s.tick(elapsed, all);
+        let before = s.clone();
+        let shown = s.exposure(&id("pastor"));
+        assert_eq!(
+            s.cut(all_but("pastor")),
+            Err(SwitchError::Unavailable(id("pastor"))),
+            "{kind:?}"
+        );
+        assert_eq!(s, before, "a refused cut changes nothing");
+        assert_eq!(s.exposure(&id("pastor")), shown);
+    }
+    // Under the first half of a dip the incoming shot is not on air at all.
+    let mut s = staged();
+    s.set_transition(transition(TransitionKind::Dip, 2.0))
+        .unwrap();
+    s.auto(all).unwrap();
+    s.tick(0.3, all);
+    assert_eq!(s.exposure(&id("pastor")), 0.0);
+    assert!(s.cut(all_but("pastor")).is_err());
+    assert_eq!(s.exposure(&id("pastor")), 0.0);
+}
+
+#[test]
+fn cut_during_a_transition_lands_its_shot_and_cancels_a_queued_take() {
     let mut s = mixing(0.2);
     s.set_preview(id("band"));
     s.auto(all).unwrap();
+    // The shot waiting for the end does not have to be available: it is
+    // not the one Cut puts on air.
+    s.cut(all_but("band")).unwrap();
+    assert!(!s.in_transition());
+    assert_eq!(s.program(), Some(&id("pastor")), "the preview bus's shot");
+    assert_eq!(s.preview(), Some(&id("band")), "the staged shot lands");
+    assert_eq!(s.queued(), None);
+    s.tick(2.0, all);
+    assert_eq!(s.program(), Some(&id("pastor")), "the take was cancelled");
+    assert!(!s.in_transition());
+    assert_eq!(s.dropped_takes(), 0, "cancelled, not dropped");
+}
+
+#[test]
+fn cut_now_puts_the_named_shot_on_air_from_any_state() {
+    // Idle: like staging the shot and cutting, but a refusal changes nothing.
+    let mut s = staged();
+    let before = s.clone();
     assert_eq!(
-        s.cut(all_but("band")),
+        s.cut_to(id("band"), all_but("band")),
         Err(SwitchError::Unavailable(id("band")))
     );
-    assert!(s.in_transition(), "a refused cut changes nothing");
-    s.cut(all).unwrap();
-    assert!(!s.in_transition());
+    assert_eq!(s, before);
+    s.cut_to(id("band"), all).unwrap();
     assert_eq!(s.program(), Some(&id("band")));
-    assert_eq!(s.preview(), Some(&id("wide")), "the old program shot");
-    assert_eq!(s.queued(), None, "the queued take is spent");
+    assert_eq!(s.preview(), Some(&id("wide")));
+    s.cut_to(id("band"), all).unwrap();
+    assert_eq!(s.program(), Some(&id("band")), "already on air");
+    assert_eq!(s.preview(), Some(&id("wide")), "nothing changes");
+
+    // During a mix with a take queued: the mix and the take both end, and
+    // only the named shot needs to be available.
+    let mut s = mixing(0.2);
+    s.set_preview(id("drums"));
+    s.auto(all).unwrap();
+    s.cut_to(id("band"), |x| x.0 == "band").unwrap();
+    assert!(!s.in_transition());
+    assert_eq!(s.queued(), None);
+    assert_eq!(s.program(), Some(&id("band")));
+    assert_eq!(s.preview(), Some(&id("pastor")), "the shot it replaced");
     s.tick(2.0, all);
     assert_eq!(s.program(), Some(&id("band")));
+
+    // Back to the outgoing shot: the mix is abandoned.
+    let mut s = mixing(0.2);
+    s.cut_to(id("wide"), all).unwrap();
+    assert_eq!(s.program(), Some(&id("wide")));
+    assert_eq!(s.preview(), Some(&id("pastor")));
+    // To the incoming shot: the same as Cut.
+    let mut s = mixing(0.2);
+    let mut t = s.clone();
+    s.cut_to(id("pastor"), all).unwrap();
+    t.cut(all).unwrap();
+    assert_eq!(s, t);
 }
 
 #[test]
 fn the_tbar_and_the_clock_do_not_share_a_transition() {
     let mut s = mixing(0.2);
+    assert!(!s.tbar_held());
     let before = s.clone();
     assert_eq!(s.set_tbar(0.5, all), Err(SwitchError::Busy));
     assert_eq!(s, before);
     let mut s = staged();
     s.set_tbar(0.5, all).unwrap();
+    assert!(s.tbar_held());
     s.tick(5.0, all);
     assert!(s.in_transition(), "the clock does not move the T-bar");
     let before = s.clone();
     assert_eq!(s.cut(all), Err(SwitchError::TBarHeld));
+    assert_eq!(s.cut_to(id("band"), all), Err(SwitchError::TBarHeld));
     assert_eq!(s, before);
+    s.set_tbar(1.0, all).unwrap();
+    assert!(!s.tbar_held());
 }
 
 #[test]

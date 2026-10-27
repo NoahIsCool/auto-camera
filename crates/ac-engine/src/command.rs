@@ -25,8 +25,14 @@ pub enum EngineCommand {
         shot: ShotId,
     },
     /// Swap preview and program at once; during a transition, cut it short,
-    /// or cut to the shot staged meanwhile.
+    /// landing the shot it brings in.
     Cut,
+    /// Cut `shot` straight to program ("Cut now"), whatever is staged and
+    /// whether or not a transition runs, in one step.
+    CutTo {
+        /// The shot.
+        shot: ShotId,
+    },
     /// Run the selected transition from program to preview; during a
     /// transition, queue a take of the shot staged meanwhile for its end.
     Auto,
@@ -120,6 +126,7 @@ impl EngineCommand {
         match self {
             EngineCommand::SetPreview { .. } => "set_preview",
             EngineCommand::Cut => "cut",
+            EngineCommand::CutTo { .. } => "cut_to",
             EngineCommand::Auto => "auto",
             EngineCommand::SetTBar { .. } => "set_tbar",
             EngineCommand::SetTransition { .. } => "set_transition",
@@ -206,6 +213,9 @@ mod tests {
                 shot: ShotId("a".into()),
             },
             EngineCommand::Cut,
+            EngineCommand::CutTo {
+                shot: ShotId("a".into()),
+            },
             EngineCommand::Auto,
             EngineCommand::SetTBar { position: 0.5 },
             EngineCommand::SetTransition {

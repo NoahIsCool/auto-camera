@@ -13,13 +13,14 @@
 //! the shot is limited and, when it looks the same as another of its
 //! subject's shots, which one.
 //!
-//! Interaction: a click stages the shot on preview; a double click stages
-//! and cuts it to program. During a transition a click stages the shot for
-//! its end, and a double click still cuts it to program at once (the
-//! switcher cuts to a shot staged meanwhile). The right-click menu of a
-//! subject shot pins, hides or re-acquires its subject. Clicks become
-//! [`EngineCommand`]s that the caller sends; this module never talks to the
-//! engine itself.
+//! Interaction: a click stages the shot on preview; a double click cuts it
+//! to program at once ("Cut now", [`EngineCommand::CutTo`]). During a
+//! transition a click stages the shot for its end, and a double click still
+//! cuts it to program at once, ending the transition in the same command,
+//! so the transition's incoming shot never shows alone in between. The
+//! right-click menu of a subject shot pins, hides or re-acquires its
+//! subject. Clicks become [`EngineCommand`]s that the caller sends; this
+//! module never talks to the engine itself.
 
 use ac_core::ShotId;
 use ac_director::CandidateKind;
@@ -90,15 +91,15 @@ pub fn tally_color(tally: Tally) -> Option<Color32> {
 /// Commands for a click (`clicked`) or double click on the tile of `shot`.
 ///
 /// egui reports the first click of a double click as a click too, so a
-/// double click arrives as a preview on one frame and preview + cut on the
-/// next; staging again first keeps the cut correct even if the first click
-/// was missed.
+/// double click arrives as a preview on one frame and a cut on the next.
+/// The cut names its shot, so it is correct even if the first click was
+/// missed, and it is one command: the engine may tick between two commands
+/// of one frame.
 pub fn click_commands(shot: &ShotId, clicked: bool, double_clicked: bool) -> Vec<EngineCommand> {
-    let preview = EngineCommand::SetPreview { shot: shot.clone() };
     if double_clicked {
-        vec![preview, EngineCommand::Cut]
+        vec![EngineCommand::CutTo { shot: shot.clone() }]
     } else if clicked {
-        vec![preview]
+        vec![EngineCommand::SetPreview { shot: shot.clone() }]
     } else {
         Vec::new()
     }
@@ -314,10 +315,12 @@ mod tests {
         );
         assert_eq!(
             click_commands(&s, true, true),
-            [
-                EngineCommand::SetPreview { shot: s.clone() },
-                EngineCommand::Cut
-            ]
+            [EngineCommand::CutTo { shot: s.clone() }]
+        );
+        assert_eq!(
+            click_commands(&s, false, true),
+            [EngineCommand::CutTo { shot: s.clone() }],
+            "the first click was missed"
         );
     }
 
