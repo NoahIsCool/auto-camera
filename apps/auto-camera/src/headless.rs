@@ -5,7 +5,8 @@
 //! setup fails with a message instead of hanging:
 //!
 //! 1. **Start** the engine on the wall clock with monitors and multiview
-//!    tiles off (nobody is watching).
+//!    tiles off (nobody is watching), and with `--trace` its trace writer
+//!    first, so that the trace has every tick from the first.
 //! 2. **Signal**: wait for a wide shot to become available. A headless run
 //!    has no operator, so unless the director is in Auto mode (which
 //!    establishes a shot by itself) the first wide is cut to program.
@@ -24,7 +25,8 @@
 //! 5. **Run** for the requested time, sampling snapshots to log program
 //!    changes, the largest subject count and each shot's crop size range.
 //! 6. **Stop** the output and wait for the recording to be finalized, then
-//!    shut the engine down, which joins every thread and reaps ffmpeg.
+//!    shut the engine down, which joins every thread and reaps ffmpeg, and
+//!    wait for the trace writer to write the last record.
 //!
 //! A termination signal (Ctrl-C, `SIGTERM`, `SIGHUP`) ends whichever phase
 //! is running; the engine is then shut down as after a normal run (which
@@ -42,6 +44,10 @@
 //! together than that show as one, and a crop range can miss a single
 //! tick's extreme.
 //!
+//! With `--trace`, the summary's `trace` gives the lines written, one per
+//! tick, so it equals `ticks` unless the writer fell behind (`missing`);
+//! a trace that cannot be created or written fails the run.
+//!
 //! This module runs the phases; the run's flags ([`HeadlessOptions`]) are
 //! in `flags`, and the summary's types in [`summary`] and its building
 //! from the run's snapshots in `report`.
@@ -52,6 +58,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::signals::QuitSignal;
+use crate::trace::{self, TraceFile};
 use ac_core::{Rect, ShotId};
 use ac_director::{CandidateKind, DirectorMode};
 use ac_engine::{
@@ -66,7 +73,7 @@ mod summary;
 pub use flags::HeadlessOptions;
 pub use summary::{
     DirectorSummary, MatchSummary, OutputSummary, ProgramSummary, QuerySummary, ShotSummary,
-    SourceSummary, SubjectSummary, Summary, TimingSummary,
+    SourceSummary, SubjectSummary, Summary, TimingSummary, TraceSummary,
 };
 
 use report::{Totals, failed_to_start, summarize};
@@ -105,9 +112,16 @@ pub fn run_with(
     let started = Instant::now();
     config.monitors = MonitorSettings::disabled();
     let limit = detector_limit(&config.detector);
+    let (trace, engine_options) = match trace::attach(options.trace.as_deref(), engine_options) {
+        Ok(t) => t,
+        Err(e) => return failed_to_start(path, options, started, e, None),
+    };
     let engine = match Engine::start_with(config, engine_options) {
         Ok(e) => e,
-        Err(e) => return failed_to_start(path, options, started, e.to_string()),
+        Err(e) => {
+            let (trace, _) = finish_trace(trace, 0, None);
+            return failed_to_start(path, options, started, e.to_string(), trace);
+        }
     };
     let mut sampler = Sampler::default();
     let error = drive(&engine, options, limit, &mut sampler, quit).err();
@@ -115,6 +129,7 @@ pub fn run_with(
         Ok(r) => (r.ticks, r.threads_joined, Some(r.final_snapshot), error),
         Err(e) => (0, 0, None, error.or(Some(e.to_string()))),
     };
+    let (trace, error) = finish_trace(trace, ticks, error);
     let last = sampler.last.clone().or(final_snapshot.clone());
     summarize(
         path,
@@ -124,11 +139,34 @@ pub fn run_with(
         Totals {
             ticks,
             threads_joined,
+            trace,
         },
         last.as_deref(),
         final_snapshot.as_deref(),
         &sampler,
     )
+}
+
+/// Waits for the trace writer, once the engine has stopped (its sender went
+/// with its thread), and sums the trace up against the `ticks` run. A write
+/// error fails the run unless it had already failed (`error`).
+fn finish_trace(
+    file: Option<TraceFile>,
+    ticks: u64,
+    error: Option<String>,
+) -> (Option<TraceSummary>, Option<String>) {
+    let Some(file) = file else {
+        return (None, error);
+    };
+    let path = file.path().to_owned();
+    let report = file.finish();
+    let summary = TraceSummary {
+        path,
+        records: report.lines,
+        missing: ticks.saturating_sub(report.lines),
+    };
+    let error = error.or(report.error.map(|e| format!("the trace failed: {e}")));
+    (Some(summary), error)
 }
 
 /// `why`, or why the engine died when it did (a dead engine also makes

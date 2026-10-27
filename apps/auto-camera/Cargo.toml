@@ -16,6 +16,7 @@ onnx = ["ac-engine/onnx"]
 ac-core.workspace = true
 ac-director.workspace = true
 ac-engine.workspace = true
+ac-eval.workspace = true
 ac-media.workspace = true
 ac-output.workspace = true
 ac-switcher.workspace = true

@@ -5,6 +5,10 @@
 //! sampled at a fixed frame interval. Annotated real footage plugs into the
 //! same functions once it exists.
 
+pub mod trace;
+
+pub use trace::{TRACE_VERSION, TraceError, TraceRecord, parse_trace};
+
 use ac_core::Rect;
 
 /// Fraction of frames in which the subject box lies fully inside the crop.

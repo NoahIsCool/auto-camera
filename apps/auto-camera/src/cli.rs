@@ -1,14 +1,15 @@
 //! Command-line interface.
 //!
 //! ```text
-//! auto-camera [--config PATH]                                   # operator window
-//! auto-camera [--config PATH] --headless [--seconds N] [--record PATH]
+//! auto-camera [--config PATH] [--trace PATH]                    # operator window
+//! auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
 //! ```
 //!
 //! The headless options are only accepted together with `--headless`, so a
-//! typo cannot silently open a window that records nothing. The config path
-//! defaults to the demo studio relative to the working directory, which is
-//! the repository root under `cargo run`.
+//! typo cannot silently open a window that records nothing. `--trace`
+//! works in both modes: it writes the engine's per-tick trace as JSON Lines
+//! ([`crate::trace`]). The config path defaults to the demo studio relative
+//! to the working directory, which is the repository root under `cargo run`.
 
 use std::path::PathBuf;
 
@@ -47,6 +48,10 @@ pub struct Cli {
     /// Record program to this MP4 during a headless run; it must not exist.
     #[arg(long, value_name = "PATH", requires = "headless")]
     pub record: Option<PathBuf>,
+    /// Write one JSON line per engine tick (subjects, shot targets and
+    /// crops, program and preview) to this file; it must not exist.
+    #[arg(long, value_name = "PATH")]
+    pub trace: Option<PathBuf>,
 }
 
 /// Parses a positive, finite number of seconds up to one day.
@@ -77,6 +82,17 @@ mod tests {
         assert_eq!(cli.config, PathBuf::from(DEFAULT_CONFIG));
         assert!(!cli.headless);
         assert_eq!(cli.record, None);
+        assert_eq!(cli.trace, None);
+    }
+
+    #[test]
+    fn both_modes_take_a_trace() {
+        let window = parse(&["--trace", "/tmp/t.jsonl"]).unwrap();
+        assert!(!window.headless);
+        assert_eq!(window.trace, Some(PathBuf::from("/tmp/t.jsonl")));
+        let headless = parse(&["--headless", "--trace", "t.jsonl"]).unwrap();
+        assert_eq!(headless.trace, Some(PathBuf::from("t.jsonl")));
+        assert!(parse(&["--trace"]).is_err(), "a path is required");
     }
 
     #[test]

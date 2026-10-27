@@ -24,6 +24,7 @@ mod framing;
 mod protection;
 mod shared;
 mod switching;
+mod trace;
 mod vision;
 
 /// Source and output width.

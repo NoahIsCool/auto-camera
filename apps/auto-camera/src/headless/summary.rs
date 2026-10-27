@@ -63,6 +63,8 @@ pub struct Summary {
     pub timing: TimingSummary,
     /// The output session, when one was started.
     pub output: Option<OutputSummary>,
+    /// The per-tick trace, with `--trace`.
+    pub trace: Option<TraceSummary>,
     /// Shots that should have been on program but were drawn black.
     pub render_issues: Vec<String>,
 }
@@ -258,4 +260,16 @@ pub struct OutputSummary {
     pub exit_code: Option<i32>,
     /// Newest ffmpeg error line.
     pub last_error: Option<String>,
+}
+
+/// The per-tick trace in the summary.
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceSummary {
+    /// The trace file.
+    pub path: PathBuf,
+    /// Lines written, one per tick.
+    pub records: u64,
+    /// Ticks without a line: dropped because the writer fell behind, or
+    /// never written after a write error. `records + missing` is `ticks`.
+    pub missing: u64,
 }

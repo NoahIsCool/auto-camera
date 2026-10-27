@@ -63,7 +63,7 @@ Shortcuts are ignored while a text field has focus and on key repeat.
 
 ```sh
 cargo run -p auto-camera -- --headless --seconds 5 --record /tmp/demo.mp4
-auto-camera [--config PATH] --headless [--seconds N] [--record PATH]
+auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
 ```
 
 A headless run starts the engine without a window, waits for the first
@@ -104,6 +104,28 @@ which frame. The exit status is 0 on success, 1 when the engine or the output
 failed (`ok` is false and `error` says why), 2 for usage and configuration
 errors. Recordings are never overwritten: an existing `--record` path is an
 error.
+
+### Per-tick trace
+
+`--trace PATH` (headless or in the window) writes what the engine did on
+every tick as JSON Lines, one compact JSON object per tick, for scoring
+framing offline with `ac-eval` (spec V9: containment, framing error, jerk,
+latency):
+
+```sh
+cargo run -p auto-camera -- --headless --seconds 2 --trace /tmp/demo.jsonl
+```
+
+Each line has the tick number and its PTS (`tick`, `pts_ns`), whether it
+started late and how many ticks were skipped before it (`late`,
+`skipped`), each source's newest frame and its subjects with box and track
+state, each shot's `target` (the ideal crop for its subject's box, `null`
+while the subject is lost) and its `crop` (where the smoothing actually
+drew it), and the program, preview and running transition. The schema is
+`ac_eval::TraceRecord`; its docs show a full record. The line count equals
+the summary's `ticks`, which the summary's `trace` repeats (`records`, with
+`missing` for ticks a writer that fell over half a minute behind had to
+drop). The file must not exist, as for `--record`.
 
 ## Studio configuration
 

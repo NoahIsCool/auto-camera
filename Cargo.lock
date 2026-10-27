@@ -38,6 +38,7 @@ dependencies = [
  "ac-compositor",
  "ac-core",
  "ac-director",
+ "ac-eval",
  "ac-framing",
  "ac-media",
  "ac-output",
@@ -58,6 +59,8 @@ name = "ac-eval"
 version = "0.1.0"
 dependencies = [
  "ac-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -297,6 +300,7 @@ dependencies = [
  "ac-core",
  "ac-director",
  "ac-engine",
+ "ac-eval",
  "ac-media",
  "ac-output",
  "ac-sources",

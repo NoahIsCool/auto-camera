@@ -62,7 +62,8 @@
 //! frames, so the core stays a deterministic function of its inputs.
 //!
 //! Given the same configuration, frames, results and commands, the core
-//! produces the same program, which is what the deterministic tests rely on.
+//! produces the same program, which is what the deterministic tests rely on,
+//! and the same per-tick trace record ([`EngineCore::trace_record`]).
 //! Commands are applied between ticks by [`EngineCore::apply`].
 
 use std::collections::HashMap;
@@ -91,6 +92,7 @@ mod shots;
 mod snapshot;
 #[cfg(test)]
 mod tests;
+mod trace;
 
 /// A source counts as unavailable when no new frame arrived for this long.
 pub const SOURCE_STALE_AFTER: Duration = Duration::from_secs(1);
