@@ -12,7 +12,12 @@
 //! with the engine alive) a close request is cancelled
 //! (`ViewportCommand::CancelClose`) and becomes a [`Question`], and so does
 //! Stop; only the operator's confirmation goes ahead. With no live output
-//! there is nothing to lose, and both act at once.
+//! there is nothing to lose, and both act at once. That also holds for a
+//! question still open when the output ends (the stream fails, the
+//! recording finishes, the engine dies): it is dropped, since its words
+//! ("the output is live") are no longer true, and the request it held does
+//! not act later on its own. The window never closes by itself because a
+//! stream failed; the operator closes again, and that acts at once.
 //!
 //! A termination signal (Ctrl-C, `SIGTERM`, `SIGHUP`; [`crate::signals`])
 //! is not a stray click: it comes from a terminal or a service manager that
@@ -32,9 +37,10 @@
 //! * At most one question is open. A close request replaces an open Stop
 //!   question (closing stops the output too); Stop never replaces a close
 //!   question.
-//! * A Stop question is dropped once the output is no longer live (there is
-//!   nothing left to stop); a close question stays until it is answered.
-//!   A signal drops either, since the window is closing anyway.
+//! * A question is open only while the output is live: either is dropped
+//!   once it is not (there is nothing left to lose), unanswered, so a
+//!   dropped close request never closes the window later. A signal drops
+//!   either too, since the window is closing anyway.
 //! * Once closing was confirmed, every later close request goes through:
 //!   the window's own `Close` command comes back as a close request on the
 //!   next frame, and must not be asked about again.
@@ -136,9 +142,11 @@ impl CloseGuard {
     }
 
     /// Takes in this frame's facts before anything else: whether the output
-    /// is `live` and whether a termination signal came (`quitting`).
+    /// is `live` and whether a termination signal came (`quitting`). Either
+    /// fact drops the open question unanswered: without a live output there
+    /// is nothing to ask about, and with a signal the window is closing.
     pub fn observe(&mut self, live: bool, quitting: bool) {
-        if quitting || (!live && self.asking == Some(Question::Stop)) {
+        if quitting || !live {
             self.asking = None;
         }
     }
@@ -239,13 +247,30 @@ mod tests {
         let mut guard = CloseGuard::default();
         assert_eq!(guard.close_requested(true, false), Verdict::KeepOpen);
         assert_eq!(guard.question(), Some(Question::Close));
-        // Unanswered, it keeps asking, also when the output ends.
-        guard.observe(false, false);
+        // Unanswered, it keeps asking while the output is live.
+        guard.observe(true, false);
         assert_eq!(guard.question(), Some(Question::Close));
         assert_eq!(guard.answer(Answer::Cancel), None);
         assert_eq!(guard.question(), None);
         // Cancelling confirmed nothing: the next request asks again.
         assert_eq!(guard.close_requested(true, false), Verdict::KeepOpen);
+    }
+
+    #[test]
+    fn a_close_question_is_dropped_once_the_output_ends() {
+        let mut guard = CloseGuard::default();
+        assert_eq!(guard.close_requested(true, false), Verdict::KeepOpen);
+        guard.observe(false, false);
+        assert_eq!(guard.question(), None, "nothing left to lose");
+        // Dropped unanswered, it confirmed nothing: a late answer does
+        // nothing, and a request while live again asks again.
+        assert_eq!(guard.answer(Answer::Confirm), None);
+        assert_eq!(guard, CloseGuard::default());
+        assert_eq!(guard.close_requested(true, false), Verdict::KeepOpen);
+        // With the output over, closing again acts at once.
+        guard.observe(false, false);
+        assert_eq!(guard.close_requested(false, false), Verdict::Close);
+        assert_eq!(guard.question(), None);
     }
 
     #[test]

@@ -31,8 +31,9 @@
 //! [`CloseGuard`] before anything is drawn; while the output is live it is
 //! cancelled and becomes a question, drawn over the window at the end of
 //! the frame. A confirmed close sends `Close`; a confirmed Stop sends
-//! `StopOutput`. Termination signals reach the console as `quitting`, and
-//! with it every close goes through.
+//! `StopOutput`. A question whose output ends first goes away unanswered,
+//! and the window stays open. Termination signals reach the console as
+//! `quitting`, and with it every close goes through.
 
 use ac_core::ShotId;
 use ac_engine::{EngineCommand, EngineSnapshot, PromptReader, StudioConfig};

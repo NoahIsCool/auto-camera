@@ -383,6 +383,42 @@ fn a_close_request_during_output_asks_first() {
 }
 
 #[test]
+fn the_close_question_goes_when_the_output_ends_first() {
+    let mut failed = on_air();
+    failed.output.state = OutputState::Failed("rtmp gone".into());
+    let mut finished = on_air();
+    finished.output.state = OutputState::Finished;
+    let mut dead = on_air();
+    dead.running = false;
+    for (end, ended) in [("failed", failed), ("finished", finished), ("dead", dead)] {
+        let mut h = window(on_air());
+        request_close(&mut h);
+        h.step();
+        h.run();
+        h.get_by_label(Question::Close.title());
+        // Nothing is live before the operator answers: the dialog would
+        // say something untrue, so it goes, and the window stays open.
+        h.state_mut().snap = ended;
+        h.step();
+        assert!(
+            !viewport_commands(&h).contains(&ViewportCommand::Close),
+            "{end}"
+        );
+        h.run();
+        assert!(h.query_by_label(Question::Close.title()).is_none(), "{end}");
+        assert!(!paused(&h), "{end}: the shortcuts are back");
+        assert_eq!(sent(&mut h), [], "{end}");
+        // Closing again acts at once.
+        request_close(&mut h);
+        h.step();
+        assert!(
+            !viewport_commands(&h).contains(&ViewportCommand::CancelClose),
+            "{end}"
+        );
+    }
+}
+
+#[test]
 fn without_live_output_or_after_a_signal_the_window_closes_at_once() {
     let mut h = window(snapshot());
     request_close(&mut h);
