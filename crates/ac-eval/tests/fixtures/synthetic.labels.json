@@ -12,9 +12,10 @@
     },
     "frame_count": 60
   },
+  "box_extent": "visible",
   "exclusions": [
     {
-      "id": "backdrop-photo",
+      "id": "imag-screen",
       "polygon": [
         {
           "x": 0.7,

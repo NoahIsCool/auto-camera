@@ -2,7 +2,7 @@
 //! boxes past the picture's edges, and every row error with its line.
 
 use super::*;
-use crate::labels::{CameraId, ClipId, FrameRate};
+use crate::labels::{BoxExtent, CameraId, ClipId, FrameRate};
 
 /// The manifest of a 1000x500 clip at 10 fps with `frames` frames, so
 /// pixel boxes divide into short decimals.
@@ -41,6 +41,7 @@ fn rows_become_people_on_keyframes() {
     let labels = import("1,7,100,50,200,400,1,1,0.75\n3,2,0,0,100,100\n").unwrap();
     assert_eq!(labels.schema_version, SCHEMA_VERSION);
     assert_eq!(labels.clip, clip(5));
+    assert_eq!(labels.box_extent, BoxExtent::Full);
     let ids: Vec<u32> = labels.tracks.iter().map(|t| t.id.0).collect();
     assert_eq!(ids, [2, 7]);
     assert!(labels.tracks.iter().all(|t| t.tags.is_empty()));
@@ -84,28 +85,103 @@ fn people_on_a_keyframe_are_in_track_order() {
 }
 
 #[test]
-fn ignored_entries_and_other_classes_are_skipped() {
+fn every_person_class_is_imported_whatever_its_flag() {
     let text = "\
 # frame, id, left, top, width, height, consider, class, visibility
 
-1,1,0,0,100,100,0,1,1
-1,2,0,0,100,100,1,7,1
-1,3,0,0,100,100,1,12,1
-1,4,0,0,100,100,1,1,1
+1,1,0,0,100,100,0,1,0.4
+1,2,100,0,100,100,0,2,1
+1,3,200,0,100,100,0,7,1
+1,4,300,0,100,100,1,7,1
+1,5,400,0,100,100,1,1,1
+1,6,0,0,1000,500,0,3,1
+1,8,500,0,100,100,0,8,1
+1,9,0,200,1000,300,0,9,1
+1,12,600,0,100,100,0,12,1
+1,13,700,0,100,100,1
 ";
     let labels = import(text).unwrap();
+    // Pedestrians, people on vehicles and static people are people, even
+    // where MOT's own evaluation ignores them; vehicles, occluders,
+    // distractors and reflections are not. A row without a class is a
+    // pedestrian.
     let ids: Vec<u32> = labels.tracks.iter().map(|t| t.id.0).collect();
-    assert_eq!(ids, [4]);
-    assert_eq!(labels.keyframes[0].people.len(), 1);
+    assert_eq!(ids, [1, 2, 3, 4, 5, 13]);
+    let people = &labels.keyframes[0].people;
+    assert_eq!(people.len(), 6);
+    assert_eq!(people[0].visibility, 0.4);
+}
+
+#[test]
+fn classes_are_whole_numbers() {
+    assert_row_error(
+        "1,1,0,0,10,10,1,4.25,1",
+        1,
+        "column 8 (class) is 4.25, not a whole number",
+    );
+    assert_row_error("1,1,0,0,10,10,1,0,1", 1, "class 0 is not a MOT class");
 }
 
 #[test]
 fn minus_one_marks_absent_columns() {
-    // MOT15: confidence 1, then unused world coordinates.
-    let labels = import("2, 4, 10, 20, 30, 40, 1, -1, -1, -1").unwrap();
+    let labels = import("2, 4, 10, 20, 30, 40, 1, -1, -1").unwrap();
     let person = &labels.keyframes[1].people[0];
     assert_eq!(person.track, TrackId(4));
     assert_eq!(person.visibility, 1.0);
+}
+
+#[test]
+fn ten_columns_are_mot15_with_world_coordinates() {
+    // MOT15: the consider flag, then world coordinates, unused or filled
+    // in as in the 3D MOT 2015 sequences. There is no class or visibility.
+    let text = "\
+1,1,100,50,200,400,1,-1,-1,-1
+2,1,110,50,200,400,1,4.3,3.5,0
+3,1,120,50,200,400,0,7,0.25,1
+";
+    let labels = import(text).unwrap();
+    let people: Vec<(u32, f64)> = labels
+        .keyframes
+        .iter()
+        .flat_map(|k| k.people.iter().map(|p| (p.track.0, p.visibility)))
+        .collect();
+    assert_eq!(people, [(1, 1.0), (1, 1.0), (1, 1.0)]);
+    assert_eq!(labels.keyframes[1].people[0].bbox.x, 0.11);
+}
+
+#[test]
+fn fractional_pixel_boxes_survive_json_unchanged() {
+    // Sub-pixel boxes on a 1920x1080 picture need every digit of their
+    // normalized coordinates.
+    let mut manifest = clip(400);
+    (manifest.width, manifest.height) = (1920, 1080);
+    let text: String = (1..=400)
+        .map(|frame| {
+            let x = 3.0 + f64::from(frame) * 1.37;
+            let h = 100.0 + f64::from(frame) * 0.29;
+            format!(
+                "{frame},1,{x},17.5,{},{h},1,1,1\n",
+                51.0 + f64::from(frame) / 7.0
+            )
+        })
+        .collect();
+    let labels = import_mot(&text, manifest).unwrap();
+    let json = labels.to_json();
+    let back = LabelFile::from_json(&json).unwrap();
+    assert_eq!(back, labels);
+    assert_eq!(back.to_json(), json);
+}
+
+#[test]
+fn occluded_people_keep_their_whole_outline() {
+    // MOT draws a person 70% hidden behind something at full size, and the
+    // file says so instead of marking a hidden side.
+    let labels = import("1,1,100,50,200,400,1,1,0.3").unwrap();
+    assert_eq!(labels.box_extent, BoxExtent::Full);
+    let person = &labels.keyframes[0].people[0];
+    assert_eq!(person.bbox, Rect::new(0.1, 0.1, 0.2, 0.8));
+    assert_eq!(person.visibility, 0.3);
+    assert!(person.truncation.is_none());
 }
 
 #[test]

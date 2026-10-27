@@ -36,17 +36,23 @@
 //! person visible in it outside the exclusion zones, each as a
 //! [`PersonBox`] naming its track. Nobody listed means nobody there, which
 //! is what lets a scorer count false detections. Boxes use the normalized
-//! coordinates of [`ac_core::Rect`] and cover the visible part of the whole
-//! person, as an [`Extent::Person`](ac_core::Extent::Person) detection
-//! does. Each box says:
+//! coordinates of [`ac_core::Rect`]. What a box covers where something in
+//! front hides part of the person is stated once for the file, as its
+//! [`BoxExtent`], so a scorer comparing boxes with detections knows which
+//! kind it has. Files labelled for this project box the visible part of
+//! the whole person ([`BoxExtent::Visible`]), as an
+//! [`Extent::Person`](ac_core::Extent::Person) detection does; ground
+//! truth imported from the MOT Challenge ([`crate::mot`]) boxes the whole
+//! person, hidden parts included ([`BoxExtent::Full`]). Each box says:
 //!
 //! * its *visibility*, the fraction of the whole person that can be seen
 //!   (`0.0..=1.0`, the MOT Challenge convention), lowered by occlusion and
 //!   by the picture's edges alike;
 //! * its [`Truncation`], the sides at which the body continues beyond the
-//!   box, hidden by the frame edge or by something in front (a lectern, a
-//!   drum kit). It is the ground truth for `ac_framing`'s "looks truncated"
-//!   guess, and a truncated person is never fully visible;
+//!   box, hidden by the frame edge or, in a `visible` file, by something in
+//!   front (a lectern, a drum kit). It is the ground truth for
+//!   `ac_framing`'s "looks truncated" guess, and a truncated person is
+//!   never fully visible;
 //! * its [`BodyLines`]: the heights of the crown, chin, tops of the
 //!   shoulders and waist. `ac_framing` infers these from the box by the
 //!   7.5-head canon to cut person shots; labelled lines measure that guess.
@@ -70,7 +76,11 @@
 //! matches no labelled person is neither a hit nor a false alarm; a real
 //! person walking in front of a zone is still labelled. A picture of a
 //! person (a photo on the backdrop) is not a person: it is left unlabelled
-//! and outside any zone, so detecting it counts as a false alarm.
+//! and outside any zone, so detecting it counts as a false alarm; so is a
+//! reflection or a mannequin. MOT Challenge evaluation ignores detections
+//! of reflections and person-like objects instead, so on ground truth
+//! imported from it a scorer counts more false alarms than MOT's own
+//! figures do.
 //!
 //! # Versioning
 //!
@@ -123,6 +133,8 @@ pub struct LabelFile {
     pub schema_version: u32,
     /// The video the labels were drawn on.
     pub clip: ClipManifest,
+    /// What the boxes cover where a person is partly hidden.
+    pub box_extent: BoxExtent,
     /// Areas of the camera's picture whose people are not labelled.
     pub exclusions: Vec<ExclusionZone>,
     /// Every person labelled anywhere in the clip.
@@ -221,6 +233,25 @@ impl fmt::Display for FrameRate {
     }
 }
 
+/// What the boxes of a file cover where something in front of a person
+/// hides part of them; see the module docs.
+///
+/// Either way the picture's edges cut a box: no box reaches outside the
+/// picture, and [`Truncation`] marks a side cut by an edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoxExtent {
+    /// The visible part of the person: a box ends where the occluder
+    /// begins, and [`Truncation`] marks the hidden side. The convention of
+    /// files labelled for this project and of person detections.
+    Visible,
+    /// The estimated outline of the whole person, hidden parts included,
+    /// as MOT Challenge annotators draw it: an occluded person's box is
+    /// larger than what can be seen of them, and [`Truncation`] marks only
+    /// the picture's edges.
+    Full,
+}
+
 /// An area of the camera's picture whose people are not labelled; see the
 /// module docs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,6 +262,7 @@ pub struct ExclusionZone {
     pub id: String,
     /// Vertices in normalized picture coordinates, in drawing order; at
     /// least three, enclosing a non-zero area.
+    #[serde(with = "json::strict_polygon")]
     pub polygon: Vec<Point>,
 }
 
@@ -290,8 +322,10 @@ pub struct Keyframe {
 pub struct PersonBox {
     /// Which person.
     pub track: TrackId,
-    /// The visible part of the whole person, in normalized coordinates
-    /// inside the picture.
+    /// The person, in normalized coordinates inside the picture: the
+    /// visible part or the whole outline, as the file's [`BoxExtent`]
+    /// says.
+    #[serde(with = "json::StrictRect")]
     pub bbox: Rect,
     /// Fraction of the whole person that can be seen, `0.0..=1.0`.
     pub visibility: f64,

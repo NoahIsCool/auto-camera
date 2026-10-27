@@ -44,6 +44,7 @@ fn sample() -> LabelFile {
             fps: FrameRate::new(30, 1),
             frame_count: 90,
         },
+        box_extent: BoxExtent::Visible,
         exclusions: vec![ExclusionZone {
             id: "audience".into(),
             polygon: vec![point(0.0, 0.9), point(1.0, 0.9), point(1.0, 1.0)],

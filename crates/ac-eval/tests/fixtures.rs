@@ -6,17 +6,20 @@
 //! files at run time.
 
 use ac_core::Rect;
-use ac_eval::labels::{CameraId, ClipId, ClipManifest, FrameRate, RoleInterval, RoleTag, TrackId};
+use ac_eval::labels::{
+    BoxExtent, CameraId, ClipId, ClipManifest, FrameRate, RoleInterval, RoleTag, TrackId,
+};
 use ac_eval::{FieldErrors, LabelFile, import_mot};
 use serde_json::{Value, json};
 
 /// A synthetic label file in canonical form: a 60-frame NTSC-rate clip
-/// with two exclusion zones, three tracks, three role intervals and four
-/// keyframes.
+/// with two exclusion zones (a screen repeating the stage and the
+/// audience), three tracks, three role intervals and four keyframes.
 const LABELS: &str = include_str!("fixtures/synthetic.labels.json");
 
 /// MOT ground truth for three frames of a 1920x1080 clip, with one
-/// ignored entry and one static person.
+/// distractor and one static person, both flagged for MOT's evaluation to
+/// ignore.
 const MOT_GT: &str = include_str!("fixtures/three_frames.gt.txt");
 
 /// The fixture, parsed.
@@ -50,6 +53,8 @@ fn the_fixture_round_trips_unchanged() {
     assert!(pastor.truncation.bottom && !pastor.truncation.top);
     assert_eq!(pastor.lines.shoulder, Some(0.37));
     assert_eq!(labels.tracks[1].tags[1], RoleTag("worship leader".into()));
+    assert_eq!(labels.box_extent, BoxExtent::Visible);
+    assert_eq!(labels.exclusions[0].id, "imag-screen");
 }
 
 #[test]
@@ -136,9 +141,11 @@ fn mot_ground_truth_imports_on_a_three_frame_fixture() {
         frame_count: 3,
     };
     let labels = import_mot(MOT_GT, clip).unwrap();
-    // Track 3 is an ignored entry and track 4 a static person: skipped.
+    assert_eq!(labels.box_extent, BoxExtent::Full);
+    // Track 3 is a distractor, not a person, and skipped; track 4 is a
+    // static person, imported although MOT's evaluation ignores it.
     let ids: Vec<u32> = labels.tracks.iter().map(|t| t.id.0).collect();
-    assert_eq!(ids, [1, 2]);
+    assert_eq!(ids, [1, 2, 4]);
     let frames: Vec<(u64, u64, Vec<u32>)> = labels
         .keyframes
         .iter()
@@ -151,7 +158,7 @@ fn mot_ground_truth_imports_on_a_three_frame_fixture() {
         frames,
         [
             (0, 0, vec![1, 2]),
-            (1, 33_333_333, vec![1, 2]),
+            (1, 33_333_333, vec![1, 2, 4]),
             (2, 66_666_666, vec![1]),
         ]
     );
@@ -171,6 +178,10 @@ fn mot_ground_truth_imports_on_a_three_frame_fixture() {
     let walker = &labels.keyframes[1].people[1];
     assert!((walker.bbox.right() - 1.0).abs() < 1e-12);
     assert_eq!(walker.visibility, 96.0 / 288.0);
+
+    let seated = &labels.keyframes[1].people[2];
+    assert_eq!(seated.bbox, Rect::new(0.15625, 0.5, 0.05, 0.2));
+    assert_eq!(seated.visibility, 1.0);
 
     // The labelled visibility is kept when nothing caps it.
     assert_eq!(labels.keyframes[2].people[0].visibility, 0.75);

@@ -10,7 +10,10 @@ repository.workspace = true
 [dependencies]
 ac-core.workspace = true
 serde.workspace = true
-serde_json = "1.0"
+# Exact float parsing: a canonical label file read and written again must
+# give back the same bytes, and pixel boxes divided by picture sizes use all
+# 17 significant digits, which default parsing can get wrong by one ULP.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_path_to_error = "0.1"
 thiserror.workspace = true
 

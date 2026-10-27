@@ -34,6 +34,36 @@ fn written_files_read_back_and_rewrite_unchanged() {
 }
 
 #[test]
+fn coordinates_of_seventeen_digits_round_trip_exactly() {
+    // Pixel boxes divided by picture sizes need all 17 significant digits,
+    // and a parser that rounds the last one changes the file.
+    let mut labels = sample();
+    let guitarist = &mut labels.keyframes[0].people[1];
+    guitarist.bbox = Rect::new(
+        2.0 / 1920.0,
+        7.0 / 1080.0,
+        251.0 / 1920.0,
+        0.11379629629629631,
+    );
+    guitarist.visibility = 1.0 / 3.0;
+    let text = labels.to_json();
+    assert!(text.contains("0.0010416666666666667"), "{text}");
+    let back = LabelFile::from_json(&text).unwrap();
+    assert_eq!(back, labels);
+    assert_eq!(back.to_json(), text);
+
+    // Every fraction of the common picture sizes reads back as written.
+    for size in [1920_u32, 1080, 1280, 720, 3840, 2160, 7, 13] {
+        for n in 0..=size {
+            let value = f64::from(n) / f64::from(size);
+            let written = serde_json::to_string(&value).unwrap();
+            let read: f64 = serde_json::from_str(&written).unwrap();
+            assert_eq!(read.to_bits(), value.to_bits(), "{n}/{size} as {written}");
+        }
+    }
+}
+
+#[test]
 fn empty_truncation_and_lines_are_left_out() {
     let value = sample_value();
     let people = &value["keyframes"][0]["people"];
@@ -100,6 +130,24 @@ fn text_that_is_not_a_json_object_is_rejected_at_the_root() {
 }
 
 #[test]
+fn every_file_states_what_its_boxes_cover() {
+    let mut value = sample_value();
+    assert_eq!(value["box_extent"], json!("visible"));
+    value["box_extent"] = json!("full");
+    assert_eq!(read(&value).map(|l| l.box_extent), Ok(BoxExtent::Full));
+
+    value["box_extent"] = json!("partial");
+    assert_unreadable(
+        &value.to_string(),
+        "box_extent",
+        "unknown variant `partial`",
+    );
+
+    value.as_object_mut().unwrap().remove("box_extent");
+    assert_unreadable(&value.to_string(), ".", "missing field `box_extent`");
+}
+
+#[test]
 fn shape_errors_name_the_field() {
     let mut value = sample_value();
     value["keyframes"][1]["people"][0]
@@ -137,6 +185,35 @@ fn misspelt_fields_are_errors_not_defaults() {
         &value.to_string(),
         "keyframes[0].people[0].lines.shoulders",
         "unknown field `shoulders`",
+    );
+
+    // Boxes and polygon vertices are `ac_core` types, read here just as
+    // strictly.
+    let mut value = sample_value();
+    value["keyframes"][0]["people"][0]["bbox"]["conf"] = json!(0.9);
+    assert_unreadable(
+        &value.to_string(),
+        "keyframes[0].people[0].bbox.conf",
+        "unknown field `conf`",
+    );
+
+    let mut value = sample_value();
+    value["exclusions"][0]["polygon"][2]["z"] = json!(3);
+    assert_unreadable(
+        &value.to_string(),
+        "exclusions[0].polygon[2].z",
+        "unknown field `z`",
+    );
+
+    let mut value = sample_value();
+    value["exclusions"][0]["polygon"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("y");
+    assert_unreadable(
+        &value.to_string(),
+        "exclusions[0].polygon[1]",
+        "missing field `y`",
     );
 }
 

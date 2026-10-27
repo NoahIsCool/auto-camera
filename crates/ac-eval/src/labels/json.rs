@@ -15,12 +15,22 @@
 //!
 //! The first two steps stop at their first error, the third reports all.
 //!
+//! Unknown fields are errors everywhere in the file, inside boxes and
+//! polygon vertices too. Those are [`ac_core`]'s [`Rect`] and [`Point`],
+//! whose own serde forms ignore unknown keys, so the label types read and
+//! write them through the strict mirrors [`StrictRect`] and
+//! [`strict_polygon`], which have the same fields.
+//!
 //! [`LabelFile::to_json`] writes the canonical form: two-space indents,
 //! fields in declaration order, empty truncations and body lines left out
 //! and a final newline. Reading a canonical file and writing it again gives
-//! back the same bytes, so label files diff cleanly under review.
+//! back the same bytes, so label files diff cleanly under review. That
+//! holds for every coordinate because numbers are written with the fewest
+//! digits that read back as the same `f64`, and read exactly (serde_json's
+//! `float_roundtrip`), not to within one unit in the last place.
 
-use serde::Deserialize;
+use ac_core::{Point, Rect};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{FieldError, FieldErrors, LabelFile, SCHEMA_VERSION};
 
@@ -56,6 +66,59 @@ impl LabelFile {
             .expect("label files have only string keys and plain values");
         text.push('\n');
         text
+    }
+}
+
+/// The serde form of a box in a label file: [`Rect`]'s fields, unknown
+/// keys rejected.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Rect", deny_unknown_fields)]
+pub(super) struct StrictRect {
+    /// Left edge.
+    x: f64,
+    /// Top edge.
+    y: f64,
+    /// Width.
+    w: f64,
+    /// Height.
+    h: f64,
+}
+
+/// The serde form of a polygon vertex in a label file: [`Point`]'s
+/// fields, unknown keys rejected.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Point", deny_unknown_fields)]
+struct StrictPoint {
+    /// Horizontal position.
+    x: f64,
+    /// Vertical position.
+    y: f64,
+}
+
+/// One vertex of a polygon, read and written as a [`StrictPoint`].
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+struct Vertex(#[serde(with = "StrictPoint")] Point);
+
+/// The serde form of a polygon in a label file: a list of
+/// [`StrictPoint`]s.
+pub(super) mod strict_polygon {
+    use super::*;
+
+    /// Writes the vertices in order.
+    pub(in crate::labels) fn serialize<S: Serializer>(
+        polygon: &[Point],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(polygon.iter().map(|&point| Vertex(point)))
+    }
+
+    /// Reads the vertices in order.
+    pub(in crate::labels) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Point>, D::Error> {
+        let vertices = Vec::<Vertex>::deserialize(deserializer)?;
+        Ok(vertices.into_iter().map(|Vertex(point)| point).collect())
     }
 }
 
