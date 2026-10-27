@@ -2,6 +2,7 @@
 
 mod summary;
 
+use super::report::round;
 use super::*;
 use ac_core::{ShotSize, TrackState};
 use ac_engine::{
@@ -10,6 +11,7 @@ use ac_engine::{
 };
 use ac_media::SourceInfo;
 use ac_sources::SourceConfig;
+use std::path::PathBuf;
 
 /// A small synthetic studio with ground-truth discovery and no director.
 fn studio() -> StudioConfig {
