@@ -6,6 +6,10 @@
 //! | Space | cut: preview and program swap at once          |
 //! | Enter | auto: run the selected transition to preview   |
 //!
+//! During a transition the same keys stage the next shot for its end, cut
+//! it short (or cut to the next shot) and queue a take of the next shot; the
+//! switcher has the rules ([`ac_switcher`]).
+//!
 //! Shortcuts must never fire by accident during a show, so they are ignored
 //! while a text field has keyboard focus (typing a prompt must not cut),
 //! on key repeat (holding Space must not cut back and forth), and while

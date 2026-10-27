@@ -11,8 +11,9 @@
 //!   overridden every tick.
 //! - **Auto**: the suggestion is staged every tick and takes are executed.
 //!
-//! Staging is skipped during a transition, since the switcher refuses to
-//! change preview while one runs.
+//! Staging is skipped during a transition. The switcher would queue it for
+//! the transition's end, where it would replace a shot the operator staged
+//! meanwhile; the director stages on a tick after the end instead.
 
 use std::time::Duration;
 
@@ -96,12 +97,17 @@ impl EngineCore {
         self.decision = decision;
     }
 
-    /// Puts `shot` on preview unless it is there; false if that failed.
+    /// Puts `shot` on preview unless it is there; false, changing nothing,
+    /// while `busy` with a transition (see the module docs).
     pub(super) fn stage(&mut self, shot: &ShotId, busy: bool) -> bool {
         if self.switcher.preview() == Some(shot) {
             return true;
         }
-        !busy && self.switcher.set_preview(shot.clone()).is_ok()
+        if busy {
+            return false;
+        }
+        self.switcher.set_preview(shot.clone());
+        true
     }
 
     /// Takes `shot` to program: a cut, or the selected transition.

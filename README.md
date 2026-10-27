@@ -59,6 +59,16 @@ source frame rates, tick timing and dropped frames.
 
 Shortcuts are ignored while a text field has focus and on key repeat.
 
+A running transition does not block the controls. A shot staged during
+one waits for its end and then lands on preview (the preview caption says
+"next …"); Auto queues a take of it, which fires once, when the transition
+ends, if the shot is still available, and is otherwise dropped with a
+notice saying why. Cut cuts the transition short, landing its incoming
+shot at once, or cuts straight to a shot staged meanwhile, so a double
+click still puts a tile on air at once. The T-bar and the clock never
+share a transition: the T-bar cannot take over a running Auto, and Cut
+cannot cut short a transition the T-bar holds.
+
 ## Headless mode
 
 ```sh
@@ -317,7 +327,7 @@ than for a show; choosing a model per query comes later.
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
 | `ac-framing` | Ideal crops (fill rule for objects, body cut lines for whole people, zoom-limit flags) and per-shot smoothing |
 | `ac-director` | Shot scoring, suggestions and opt-in auto-takes |
-| `ac-switcher` | Preview/program, cut/auto/T-bar transitions |
+| `ac-switcher` | Preview/program, cut/auto/T-bar transitions, the take queued during one |
 | `ac-compositor` | CPU program compositor |
 | `ac-output` | One ffmpeg encode to RTMP and fragmented MP4 |
 | `ac-eval` | Framing-quality metrics |

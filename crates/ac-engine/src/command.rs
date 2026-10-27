@@ -19,14 +19,16 @@ use thiserror::Error;
 /// A request to change engine state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineCommand {
-    /// Stage `shot` on preview.
+    /// Stage `shot` on preview; during a transition, when it ends.
     SetPreview {
         /// The shot.
         shot: ShotId,
     },
-    /// Swap preview and program at once.
+    /// Swap preview and program at once; during a transition, cut it short,
+    /// or cut to the shot staged meanwhile.
     Cut,
-    /// Run the selected transition from program to preview.
+    /// Run the selected transition from program to preview; during a
+    /// transition, queue a take of the shot staged meanwhile for its end.
     Auto,
     /// Move the T-bar to `position` in `0.0..=1.0`.
     SetTBar {
@@ -96,7 +98,8 @@ pub enum EngineCommand {
         /// The profile.
         profile: ContentProfile,
     },
-    /// Stage the director's suggestion on preview and run Auto to it.
+    /// Stage the director's suggestion on preview and run Auto to it
+    /// (queued like [`EngineCommand::Auto`] during a transition).
     AcceptSuggestion,
     /// Start the program encoder. Destinations default to the config's.
     StartOutput {

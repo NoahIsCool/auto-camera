@@ -6,6 +6,14 @@
 //! frames is never taken to program. Output and shutdown commands belong to
 //! the runtime, which owns the encoder and the threads.
 //!
+//! A running transition does not make switching commands fail
+//! ([`ac_switcher`] has the rules, the T-bar's included): staging and Auto
+//! are queued for its end, and Cut cuts it short. A queued take is accepted
+//! when it is pressed and checked again when it fires, a tick or more later,
+//! where no reply is waiting; a take dropped there is counted in the
+//! snapshot with its reason ([`crate::snapshot::SwitcherView::last_dropped`]),
+//! and the window shows it as it shows a refused command.
+//!
 //! Protection (on-air subjects are never removed) is refreshed before and
 //! after every command, not only at the start of a tick: a cut followed at
 //! once by removing the query must keep the subject that was just cut to
@@ -30,7 +38,7 @@ impl EngineCore {
                 if self.catalog.get(shot).is_none() {
                     return Err(CommandError::UnknownShot(shot.clone()));
                 }
-                self.switcher.set_preview(shot.clone())?;
+                self.switcher.set_preview(shot.clone());
             }
             C::Cut => {
                 let catalog = &self.catalog;
@@ -146,16 +154,16 @@ impl EngineCore {
         Ok(CommandReply::QueryAdded { id })
     }
 
-    /// Stages `shot` on preview and runs Auto to it.
+    /// Stages `shot` on preview and runs Auto to it; during a transition,
+    /// queues both for its end, unless the transition brings `shot` in
+    /// already.
     fn accept(&mut self, shot: ShotId) -> Result<(), CommandError> {
         if !self.catalog.is_available(&shot) {
             return Err(CommandError::Switch(ac_switcher::SwitchError::Unavailable(
                 shot,
             )));
         }
-        if self.switcher.preview() != Some(&shot) {
-            self.switcher.set_preview(shot)?;
-        }
+        self.switcher.set_preview(shot);
         let catalog = &self.catalog;
         self.switcher.auto(|id| catalog.is_available(id))?;
         Ok(())

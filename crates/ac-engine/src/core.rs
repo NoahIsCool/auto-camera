@@ -27,8 +27,11 @@
 //!    and store (media time = the frame's PTS).
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
 //! 5. **Framing.** Every shot's framer steps by `dt` and is rescored.
-//! 6. **Switching.** The switcher advances its transition; the director
-//!    proposes (and in Auto mode takes) a shot.
+//! 6. **Switching.** The switcher advances its transition; when one ends,
+//!    a take the operator queued during it fires if the catalog still has
+//!    its shot available, and is dropped with the reason otherwise
+//!    ([`ac_switcher`]). The director then proposes (and in Auto mode
+//!    takes) a shot.
 //! 7. **Rendering.** The compositor renders the program; monitors and
 //!    multiview tiles are rendered at their own, lower rates.
 //! 8. **Discovery requests** are issued for sources that are due (at most
@@ -423,7 +426,8 @@ impl EngineCore {
         }
         self.sync_catalog();
         self.step_framing(dt);
-        self.switcher.tick(dt);
+        let catalog = &self.catalog;
+        self.switcher.tick(dt, |id| catalog.is_available(id));
         self.note_program();
         self.run_director();
         self.note_program();

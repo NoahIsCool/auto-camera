@@ -14,9 +14,12 @@
 //! subject's shots, which one.
 //!
 //! Interaction: a click stages the shot on preview; a double click stages
-//! and cuts it to program. The right-click menu of a subject shot pins,
-//! hides or re-acquires its subject. Clicks become [`EngineCommand`]s that
-//! the caller sends; this module never talks to the engine itself.
+//! and cuts it to program. During a transition a click stages the shot for
+//! its end, and a double click still cuts it to program at once (the
+//! switcher cuts to a shot staged meanwhile). The right-click menu of a
+//! subject shot pins, hides or re-acquires its subject. Clicks become
+//! [`EngineCommand`]s that the caller sends; this module never talks to the
+//! engine itself.
 
 use ac_core::ShotId;
 use ac_director::CandidateKind;

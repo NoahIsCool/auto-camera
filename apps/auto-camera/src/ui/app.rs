@@ -6,6 +6,10 @@
 //! operator asked for. Commands are posted, not sent: their replies are
 //! polled on later frames ([`OperatorApp::poll`]), so a slow command never
 //! freezes the window, and errors surface as a notice in the status bar.
+//! A take queued during a transition is answered when it is queued; if the
+//! switcher drops it when the transition ends (its shot is no longer
+//! available), the snapshot counts the drop and says why, and the window
+//! raises the same notice a refused command would ([`dropped_notice`]).
 //! The window repaints at about the monitor rate while the engine runs.
 //!
 //! Closing the window shuts the engine down, which finishes a running
@@ -64,6 +68,18 @@ pub fn notice_for(
     }
 }
 
+/// The notice for a queued take the switcher dropped since the window had
+/// seen `seen` drops, shown like a refused command; `None` when there is no
+/// new drop.
+pub fn dropped_notice(snap: &ac_engine::EngineSnapshot, seen: u64) -> Option<(String, bool)> {
+    let switcher = &snap.switcher;
+    if switcher.dropped_takes <= seen {
+        return None;
+    }
+    let reason = switcher.last_dropped.clone()?;
+    notice_for("queued take", &Err(CommandError::Switch(reason)))
+}
+
 /// The notice for an engine that is no longer running, with the reason when
 /// it died rather than stopped on request; it replaces any other notice.
 pub fn stopped_notice(snap: &ac_engine::EngineSnapshot) -> Option<(String, bool)> {
@@ -98,6 +114,9 @@ pub struct OperatorApp {
     pending: Vec<(&'static str, PendingReply)>,
     /// The latest notice.
     notice: Option<Notice>,
+    /// Queued takes the switcher had dropped as of the newest snapshot
+    /// read, so each drop raises one notice.
+    dropped_seen: u64,
     /// Program aspect ratio.
     aspect: f32,
     /// Termination signals; when one has come the window closes.
@@ -116,8 +135,10 @@ impl std::fmt::Debug for OperatorApp {
 impl OperatorApp {
     /// An app driving `engine`, which was started from `config`.
     pub fn new(engine: Engine, config: &StudioConfig) -> Self {
+        let handle = engine.handle();
         Self {
-            handle: engine.handle(),
+            dropped_seen: handle.snapshot().switcher.dropped_takes,
+            handle,
             engine: Some(engine),
             textures: Textures::default(),
             switch: SwitchState::new(config.switcher.to_transition()),
@@ -172,6 +193,18 @@ impl OperatorApp {
         }
     }
 
+    /// Raises a notice for a take the switcher dropped since the last frame.
+    fn note_dropped(&mut self, snap: &ac_engine::EngineSnapshot) {
+        if let Some((text, error)) = dropped_notice(snap, self.dropped_seen) {
+            self.notice = Some(Notice {
+                text,
+                error,
+                at: Instant::now(),
+            });
+        }
+        self.dropped_seen = snap.switcher.dropped_takes;
+    }
+
     /// Stops the engine (idempotent).
     fn shutdown(&mut self) {
         if let Some(engine) = self.engine.take()
@@ -190,6 +223,7 @@ impl OperatorApp {
         }
         let snap = self.handle.snapshot();
         self.poll();
+        self.note_dropped(&snap);
         let ids: Vec<ShotId> = snap.shots.iter().map(|s| s.id.clone()).collect();
         let typing = ctx.egui_wants_keyboard_input();
         let events = ctx.input(|i| i.events.clone());
@@ -368,6 +402,21 @@ mod tests {
         assert!(app.engine.is_none());
         app.shutdown();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.frame(ui));
+    }
+
+    #[test]
+    fn a_dropped_take_is_shown_once_like_a_refused_command() {
+        let mut snap = super::super::fixtures::snapshot();
+        assert_eq!(dropped_notice(&snap, 0), None);
+        snap.switcher.dropped_takes = 2;
+        snap.switcher.last_dropped = Some(SwitchError::Unavailable(ShotId("stage/wide".into())));
+        let (text, error) = dropped_notice(&snap, 1).unwrap();
+        assert!(error, "{text}");
+        assert_eq!(
+            text,
+            "queued take: switcher: shot ShotId(\"stage/wide\") is not available"
+        );
+        assert_eq!(dropped_notice(&snap, 2), None, "already shown");
     }
 
     #[test]
