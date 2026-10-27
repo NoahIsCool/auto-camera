@@ -348,6 +348,6 @@ No Rust module may be over 600 lines unless it is a test module (a
 `#[cfg(test)]`); CI checks it with a standard-library script and its tests:
 
 ```sh
-python3 scripts/module_size.py               # lists any module over budget
-python3 -m unittest discover -s scripts
+python3 -B scripts/module_size.py            # lists any module over budget
+python3 -B -m unittest discover -s scripts   # -B: no __pycache__ in the tree
 ```

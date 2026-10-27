@@ -127,6 +127,36 @@ class ModuleSizeTest(unittest.TestCase):
         self.tree.write("crates/demo/src/inner.rs", "#![cfg(test)]\n" + lines(900))
         self.assertEqual(self.tree.offenders(), [])
 
+    def test_a_file_level_cfg_test_after_docs_and_other_attributes_is_exempt(self):
+        names = ["docs", "block", "attrs", "all"]
+        self.tree.write("crates/demo/src/lib.rs", "".join(f"mod {n};\n" for n in names))
+        heads = [
+            "//! Test helpers, compiled for tests only.\n//!\n// A plain comment.\n\n#![cfg(test)]\n",
+            "/*! Helpers /* nested */ for tests. */\n#![ cfg ( test ) ]\n",
+            '#![allow(dead_code)]\n#![doc = "a ] and a ["]\n#![cfg(test)]\n',
+            '//! Fixtures.\n#![cfg(all(test, feature = "x"))]\n',
+        ]
+        for name, head in zip(names, heads):
+            self.tree.write(f"crates/demo/src/{name}.rs", head + lines(900))
+        self.assertEqual(self.tree.offenders(), [])
+        self.assertEqual(self.tree.counted(), ["crates/demo/src/lib.rs"])
+
+    def test_a_cfg_test_that_is_not_a_leading_inner_attribute_does_not_exempt(self):
+        names = ["after_item", "commented", "not_test", "outer", "unclosed"]
+        self.tree.write("crates/demo/src/lib.rs", "".join(f"mod {n};\n" for n in names))
+        heads = [
+            "//! Docs.\nuse std::fmt;\n#![cfg(test)]\n",
+            "// #![cfg(test)]\n/* #![cfg(test)] */\n",
+            "//! Docs.\n#![cfg(not(test))]\n",
+            "//! Docs.\n#[cfg(test)]\nfn helper() {}\n",
+            '#![doc = "never closed\n',
+        ]
+        for name, head in zip(names, heads):
+            self.tree.write(f"crates/demo/src/{name}.rs", head + lines(601))
+        self.assertEqual(
+            sorted(self.tree.offenders()), [f"crates/demo/src/{n}.rs" for n in sorted(names)]
+        )
+
     def test_other_cfgs_and_stray_attributes_do_not_exempt(self):
         self.tree.write(
             "crates/demo/src/lib.rs",

@@ -15,8 +15,10 @@ A file is a test module, and exempt, when
   the children of a `tests.rs` (such as `core/tests/framing.rs`);
 * its `mod` item carries `#[cfg(test)]` (or `#[cfg(all(test, ...))]`), as in
   `#[cfg(test)] mod testkit;` or `#[cfg(test)] #[path = "x_tests.rs"]
-  mod tests;`, or the file starts with `#![cfg(test)]`; the children of
-  such a module are test modules too.
+  mod tests;`, or the file's own inner attributes, which Rust allows only
+  before its first item (after comments and `//!` docs), include
+  `#![cfg(test)]` (or `#![cfg(all(test, ...))]`); the children of such a
+  module are test modules too.
 
 Only `mod name;` items at the top level of a file are followed (not the
 file children of an inline module, nor the children of a `#[path]`
@@ -43,8 +45,8 @@ MOD_ITEM = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_
 OUTER_ATTR = re.compile(r"^#\[(.*)\]$")
 #: A `#[path = "..."]` attribute's content; group 1 is the path.
 PATH_ATTR = re.compile(r'^path\s*=\s*"([^"]+)"$')
-#: A file-level `#![cfg(test)]`.
-INNER_CFG_TEST = re.compile(r"^#!\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+#: The opening of an inner attribute, `#![`, with any spacing.
+INNER_ATTR_OPEN = re.compile(r"#!\s*\[")
 #: File names whose children live beside them rather than in a directory of
 #: their own (crate roots and `mod.rs`).
 DIR_OWNERS = {"lib.rs", "main.rs", "mod.rs", "build.rs"}
@@ -115,6 +117,73 @@ def is_cfg_test(attr):
     return False
 
 
+def skip_block_comment(text, start):
+    """The index just past the block comment opening at `start` in `text`
+    (Rust block comments nest), or `len(text)` when it never closes."""
+    depth, i = 0, start
+    while i < len(text):
+        pair = text[i : i + 2]
+        if pair == "/*":
+            depth += 1
+            i += 2
+        elif pair == "*/":
+            depth -= 1
+            i += 2
+            if depth == 0:
+                return i
+        else:
+            i += 1
+    return len(text)
+
+
+def attribute_end(text, start):
+    """The index of the `]` that closes the attribute whose `[` is at
+    `start` in `text`, skipping nested brackets and string literals, or
+    `None` when it never closes."""
+    depth, i = 0, start
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < len(text) and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def file_is_cfg_test(text):
+    """True when the source `text` compiles its whole file only for tests:
+    one of its inner attributes is `#![cfg(test)]` (or `cfg(all(...))` with
+    `test`). Inner attributes come before the first item, among comments
+    and `//!` or `/*! */` docs, so the scan stops at the first thing that is
+    none of these."""
+    i = 0
+    while True:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if text.startswith("//", i):
+            newline = text.find("\n", i)
+            i = len(text) if newline < 0 else newline + 1
+        elif text.startswith("/*", i):
+            i = skip_block_comment(text, i)
+        elif opening := INNER_ATTR_OPEN.match(text, i):
+            bracket = opening.end() - 1
+            end = attribute_end(text, bracket)
+            if end is None:
+                return False
+            if is_cfg_test(text[bracket + 1 : end]):
+                return True
+            i = end + 1
+        else:
+            return False
+
+
 def test_only_modules(path, text):
     """The files of the modules that `path` (with source `text`) declares
     for tests only, by `#[cfg(test)]` on their top-level `mod` items."""
@@ -162,7 +231,7 @@ def check(root, limit=LIMIT):
     test_dirs = set()
     for f, data in texts.items():
         text = data.decode("utf-8", errors="replace")
-        if INNER_CFG_TEST.match(text.lstrip()):
+        if file_is_cfg_test(text):
             test_files.add(f)
         for module in test_only_modules(f, text):
             test_files.add(module)
