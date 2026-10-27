@@ -28,7 +28,12 @@
 //! * A row is a person when its class (column 8 of the first layout) is
 //!   one of MOT's people: pedestrian (1), person on a vehicle (2) or static
 //!   person (7). A row without a class, MOT15's included, is a pedestrian.
-//!   `-1` in the class or visibility column means absent.
+//!   `-1` in the class or visibility column means absent. CVAT numbers
+//!   classes by its own label list instead (`labels.txt`, from 1), so its
+//!   export imports as meant only when that list is MOT's or holds a
+//!   single label for people: otherwise any label numbered 1, 2 or 7 is
+//!   imported as people whatever it names, and people under another
+//!   number are dropped.
 //! * People are imported whatever their consider flag (column 7). MOT's
 //!   own evaluation does not count entries flagged 0, nor people on
 //!   vehicles and static people, among the people to find, but a label
