@@ -1,13 +1,23 @@
 //! Everything the operator window draws and reads, one snapshot at a time.
 //!
 //! [`Console`] owns the window's own state (textures, the T-bar, the forms,
-//! the close guard). Given the newest snapshot it draws one frame (status
-//! bar, side panels, monitors, multiview, and the guard's question when
-//! one is open) and returns the commands the operator asked for. It never
-//! talks to the engine: [`super::app::OperatorApp`] feeds it snapshots and
-//! posts its commands. So the whole window is tested here, headless,
-//! through its accessibility tree, on snapshots built by a real engine
-//! core.
+//! the close guard, the status bar's notice). Given the newest snapshot it
+//! draws one frame (status bar, side panels, monitors, multiview, and the
+//! guard's question when one is open) and returns the commands the
+//! operator asked for. It never talks to the engine:
+//! [`super::app::OperatorApp`] feeds it snapshots and the notices of the
+//! replies that arrived, and posts its commands. So the whole window is
+//! tested here, headless, through its accessibility tree, on snapshots
+//! built by a real engine core, and on a live core that the tests tick
+//! themselves (`tests/switching.rs`).
+//!
+//! # Notices
+//!
+//! The status bar shows one notice ([`super::notices`]). The console raises
+//! the reply notices it is handed, then reads the snapshot, which raises
+//! one for a take the switcher dropped since the last frame (a queued take
+//! is answered when it is queued, so its drop is only in the snapshots),
+//! and clears a notice that has been shown long enough, by egui's clock.
 //!
 //! # Keyboard focus
 //!
@@ -42,6 +52,7 @@ use eframe::egui::{self, Ui};
 use super::close_guard::{self, CloseGuard, Question, Verdict};
 use super::keys;
 use super::multiview;
+use super::notices::Notices;
 use super::panels::{self, OutputForm};
 use super::query_form::QueryForm;
 use super::switching::{self, SwitchState};
@@ -64,13 +75,17 @@ pub struct Console {
     output_form: OutputForm,
     /// Asks before closing or stopping a live output.
     guard: CloseGuard,
+    /// The status bar's notice and the dropped takes already noticed.
+    notices: Notices,
     /// Program aspect ratio.
     aspect: f32,
 }
 
 impl Console {
-    /// The console of a studio started from `config`.
-    pub fn new(config: &StudioConfig) -> Self {
+    /// The console of a studio started from `config`, whose snapshot is
+    /// `first` as the window opens (the takes it already counts as dropped
+    /// raise no notice).
+    pub fn new(config: &StudioConfig, first: &EngineSnapshot) -> Self {
         Self {
             textures: Textures::default(),
             switch: SwitchState::new(config.switcher.to_transition()),
@@ -81,21 +96,35 @@ impl Console {
                 config.output.record_path.as_deref(),
             ),
             guard: CloseGuard::default(),
+            notices: Notices::new(first),
             aspect: config.output.width as f32 / config.output.height.max(1) as f32,
         }
     }
 
-    /// Draws one frame of `snap` into `ui`, with `notice` in the status bar;
-    /// returns the commands the operator asked for. `quitting` says a
+    /// The notice the status bar shows for `snap`, and whether it reports
+    /// a failure.
+    pub fn notice(&self, snap: &EngineSnapshot) -> Option<(String, bool)> {
+        self.notices.shown(snap)
+    }
+
+    /// Draws one frame of `snap` into `ui` and returns the commands the
+    /// operator asked for. `raised` are the notices of the replies that
+    /// arrived since the last frame, oldest first. `quitting` says a
     /// termination signal came, so a close request goes through unasked.
     pub fn frame(
         &mut self,
         ui: &mut Ui,
         snap: &EngineSnapshot,
-        notice: Option<(&str, bool)>,
+        raised: Vec<(String, bool)>,
         quitting: bool,
     ) -> Vec<EngineCommand> {
         let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
+        for (text, error) in raised {
+            self.notices.raise(text, error, now);
+        }
+        self.notices.observe(snap, now);
+        let notice = self.notice(snap);
         let events = ctx.input(|i| i.events.clone());
         if keys::drops_focus(&events) {
             ctx.memory_mut(|m| {
@@ -118,6 +147,7 @@ impl Console {
             .filter_map(|a| keys::command(a, &ids))
             .collect();
         egui::Panel::bottom("status").show(ui, |ui| {
+            let notice = notice.as_ref().map(|(text, error)| (text.as_str(), *error));
             panels::status_bar(ui, snap, paused, notice);
         });
         egui::Panel::right("side")

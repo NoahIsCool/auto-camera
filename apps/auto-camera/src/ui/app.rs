@@ -2,15 +2,12 @@
 //!
 //! Each frame [`OperatorApp`] takes the newest engine snapshot (an `Arc`,
 //! never blocking the engine), has the [`Console`] draw it (shortcuts,
-//! panels, monitors, multiview), and posts every command the operator asked
-//! for. Commands are posted, not sent: their replies are polled on later
-//! frames ([`OperatorApp::poll`]), so a slow command never freezes the
-//! window, and errors surface as a notice in the status bar. A take queued
-//! during a transition is answered when it is queued; if the switcher drops
-//! it when the transition ends (its shot is no longer available), the
-//! snapshot counts the drop and says why, and the window raises the same
-//! notice a refused command would ([`dropped_notice`]). The window repaints
-//! at about the monitor rate while the engine runs.
+//! panels, monitors, multiview, the status bar's notice), and posts every
+//! command the operator asked for. Commands are posted, not sent: their
+//! replies are polled on later frames ([`OperatorApp::poll`]), so a slow
+//! command never freezes the window, and the notices they deserve go to
+//! the console with the next frame ([`super::notices`]). The window
+//! repaints at about the monitor rate while the engine runs.
 //!
 //! Closing the window shuts the engine down, which finishes a running
 //! recording before the process exits; while the output is live the
@@ -18,73 +15,17 @@
 //! (Ctrl-C in the terminal, `SIGTERM`, `SIGHUP`; [`crate::signals`]) closes
 //! the window the same way, without asking.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use ac_engine::{
-    CommandError, CommandReply, Engine, EngineCommand, EngineHandle, PendingReply, StudioConfig,
-};
+use ac_engine::{Engine, EngineCommand, EngineHandle, PendingReply, StudioConfig};
 use eframe::egui;
 
 use super::console::Console;
+use super::notices::notice_for;
 use crate::signals::QuitSignal;
 
-/// How long a notice stays in the status bar.
-const NOTICE_FOR: Duration = Duration::from_secs(8);
 /// Repaint interval while running (about 30 Hz, the monitor rate).
 const REPAINT: Duration = Duration::from_millis(30);
-
-/// A message for the operator.
-#[derive(Debug, Clone)]
-struct Notice {
-    /// Text.
-    text: String,
-    /// It reports a failure.
-    error: bool,
-    /// When it was raised.
-    at: Instant,
-}
-
-/// The notice for a command's reply, if it deserves one. Routine switching
-/// replies are silent; every error is shown.
-pub fn notice_for(
-    command: &str,
-    reply: &Result<CommandReply, CommandError>,
-) -> Option<(String, bool)> {
-    match reply {
-        Err(e) => Some((format!("{command}: {e}"), true)),
-        Ok(CommandReply::QueryAdded { id }) => Some((format!("query {} added", id.0), false)),
-        Ok(CommandReply::OutputStarting) => Some(("output starting".into(), false)),
-        Ok(CommandReply::OutputStopping) => Some(("output finishing".into(), false)),
-        Ok(CommandReply::Done) => match command {
-            "set_preview" | "cut" | "cut_to" | "auto" | "set_tbar" | "accept_suggestion" => None,
-            other => Some((format!("{other}: done"), false)),
-        },
-    }
-}
-
-/// The notice for a queued take the switcher dropped since the window had
-/// seen `seen` drops, shown like a refused command; `None` when there is no
-/// new drop.
-pub fn dropped_notice(snap: &ac_engine::EngineSnapshot, seen: u64) -> Option<(String, bool)> {
-    let switcher = &snap.switcher;
-    if switcher.dropped_takes <= seen {
-        return None;
-    }
-    let reason = switcher.last_dropped.clone()?;
-    notice_for("queued take", &Err(CommandError::Switch(reason)))
-}
-
-/// The notice for an engine that is no longer running, with the reason when
-/// it died rather than stopped on request; it replaces any other notice.
-pub fn stopped_notice(snap: &ac_engine::EngineSnapshot) -> Option<(String, bool)> {
-    if snap.running {
-        return None;
-    }
-    Some(match &snap.fatal {
-        Some(why) => (format!("the engine has stopped: {why}"), true),
-        None => ("the engine has stopped".into(), true),
-    })
-}
 
 /// The operator window; see the module docs.
 pub struct OperatorApp {
@@ -96,11 +37,6 @@ pub struct OperatorApp {
     console: Console,
     /// Replies not yet arrived, with their command names.
     pending: Vec<(&'static str, PendingReply)>,
-    /// The latest notice.
-    notice: Option<Notice>,
-    /// Queued takes the switcher had dropped as of the newest snapshot
-    /// read, so each drop raises one notice.
-    dropped_seen: u64,
     /// Termination signals; when one has come the window closes.
     quit: QuitSignal,
 }
@@ -119,12 +55,10 @@ impl OperatorApp {
     pub fn new(engine: Engine, config: &StudioConfig) -> Self {
         let handle = engine.handle();
         Self {
-            dropped_seen: handle.snapshot().switcher.dropped_takes,
+            console: Console::new(config, &handle.snapshot()),
             handle,
             engine: Some(engine),
-            console: Console::new(config),
             pending: Vec::new(),
-            notice: None,
             quit: QuitSignal::new(),
         }
     }
@@ -141,8 +75,9 @@ impl OperatorApp {
         self.pending.push((name, self.handle.post(command)));
     }
 
-    /// Collects arrived replies and raises notices for them.
-    fn poll(&mut self) {
+    /// Collects arrived replies; returns the notices they deserve, oldest
+    /// first.
+    fn poll(&mut self) -> Vec<(String, bool)> {
         let mut raised = Vec::new();
         self.pending.retain(|(name, reply)| match reply.try_get() {
             Some(r) => {
@@ -151,32 +86,7 @@ impl OperatorApp {
             }
             None => true,
         });
-        for (text, error) in raised {
-            self.notice = Some(Notice {
-                text,
-                error,
-                at: Instant::now(),
-            });
-        }
-        if self
-            .notice
-            .as_ref()
-            .is_some_and(|n| n.at.elapsed() > NOTICE_FOR)
-        {
-            self.notice = None;
-        }
-    }
-
-    /// Raises a notice for a take the switcher dropped since the last frame.
-    fn note_dropped(&mut self, snap: &ac_engine::EngineSnapshot) {
-        if let Some((text, error)) = dropped_notice(snap, self.dropped_seen) {
-            self.notice = Some(Notice {
-                text,
-                error,
-                at: Instant::now(),
-            });
-        }
-        self.dropped_seen = snap.switcher.dropped_takes;
+        raised
     }
 
     /// Stops the engine (idempotent).
@@ -197,14 +107,8 @@ impl OperatorApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         let snap = self.handle.snapshot();
-        self.poll();
-        self.note_dropped(&snap);
-        let mut notice = self.notice.as_ref().map(|n| (n.text.clone(), n.error));
-        if let Some(stopped) = stopped_notice(&snap) {
-            notice = Some(stopped);
-        }
-        let notice = notice.as_ref().map(|(t, e)| (t.as_str(), *e));
-        for command in self.console.frame(ui, &snap, notice, quitting) {
+        let raised = self.poll();
+        for command in self.console.frame(ui, &snap, raised, quitting) {
             self.post(command);
         }
         ctx.request_repaint_after(REPAINT);
@@ -230,33 +134,10 @@ impl Drop for OperatorApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ac_core::{QueryId, ShotId};
+    use ac_core::ShotId;
     use ac_engine::{EngineOptions, MonitorSettings};
     use ac_sources::SourceConfig;
-    use ac_switcher::SwitchError;
-
-    #[test]
-    fn routine_replies_are_silent_and_errors_are_shown() {
-        assert_eq!(notice_for("cut", &Ok(CommandReply::Done)), None);
-        assert_eq!(notice_for("cut_to", &Ok(CommandReply::Done)), None);
-        assert_eq!(notice_for("set_tbar", &Ok(CommandReply::Done)), None);
-        assert_eq!(
-            notice_for("pin", &Ok(CommandReply::Done)),
-            Some(("pin: done".into(), false))
-        );
-        assert_eq!(
-            notice_for(
-                "add_query",
-                &Ok(CommandReply::QueryAdded {
-                    id: QueryId("singer".into())
-                })
-            ),
-            Some(("query singer added".into(), false))
-        );
-        let (text, error) =
-            notice_for("auto", &Err(CommandError::Switch(SwitchError::NoPreview))).unwrap();
-        assert!(error && text.starts_with("auto: "), "{text}");
-    }
+    use std::time::Instant;
 
     /// Runs frames until every posted command was answered, then fails with
     /// the notice if the last answer was an error (a refused command fails
@@ -268,8 +149,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(app.pending.is_empty(), "commands were not answered");
-        if let Some(n) = &app.notice {
-            assert!(!n.error, "{}", n.text);
+        if let Some((text, error)) = app.console.notice(&app.handle.snapshot()) {
+            assert!(!error, "{text}");
         }
     }
 
@@ -441,34 +322,5 @@ mod tests {
         assert!(h.state().engine.is_none());
         let size = std::fs::metadata(&path).map_or(0, |m| m.len());
         assert!(size > 0, "the recording was finished");
-    }
-
-    #[test]
-    fn a_dropped_take_is_shown_once_like_a_refused_command() {
-        let mut snap = super::super::fixtures::snapshot();
-        assert_eq!(dropped_notice(&snap, 0), None);
-        snap.switcher.dropped_takes = 2;
-        snap.switcher.last_dropped = Some(SwitchError::Unavailable(ShotId("stage/wide".into())));
-        let (text, error) = dropped_notice(&snap, 1).unwrap();
-        assert!(error, "{text}");
-        assert_eq!(
-            text,
-            "queued take: switcher: shot ShotId(\"stage/wide\") is not available"
-        );
-        assert_eq!(dropped_notice(&snap, 2), None, "already shown");
-    }
-
-    #[test]
-    fn a_dead_engine_is_shown_with_its_reason() {
-        let mut snap = super::super::fixtures::snapshot();
-        assert_eq!(stopped_notice(&snap), None);
-        snap.running = false;
-        assert_eq!(
-            stopped_notice(&snap),
-            Some(("the engine has stopped".into(), true))
-        );
-        snap.fatal = Some("the engine thread panicked: boom".into());
-        let (text, error) = stopped_notice(&snap).unwrap();
-        assert!(error && text.ends_with("panicked: boom"), "{text}");
     }
 }

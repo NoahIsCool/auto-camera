@@ -53,9 +53,9 @@ source frame rates, tick timing and dropped frames.
 | click a tile | stage it on preview |
 | double-click a tile | cut it straight to program ("Cut now") |
 | right-click a subject tile | pin, hide or re-acquire the subject |
-| `1`–`9` | stage tile 1–9 on preview |
-| `Space` | cut |
-| `Enter` | auto transition |
+| `1`–`9` | stage tile 1–9 on preview (during a transition, for its end) |
+| `Space` | cut (during a transition, cut it short) |
+| `Enter` | auto transition (during one, queue a take of the shot staged meanwhile) |
 | `Esc` | leave a focused field or control, so the shortcuts work again |
 
 Shortcuts are paused while a field or control has the keyboard (a prompt or
@@ -75,8 +75,8 @@ still available; a shot staged meanwhile then lands on preview, and a take
 queued of it is cancelled. A double click on a tile still puts that tile
 on air at once, ending the transition in the same step. The T-bar and the
 clock never share a transition: the T-bar cannot take over a running Auto,
-and while the T-bar holds a transition CUT is disabled (the lever
-finishes or abandons it).
+and while the T-bar holds a transition CUT is disabled and `Space` is
+refused with a notice (the lever finishes or abandons it).
 
 ## Headless mode
 

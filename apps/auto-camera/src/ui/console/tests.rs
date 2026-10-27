@@ -2,7 +2,11 @@
 //! (keys, clicks, drags) through egui's test harness, with widgets found in
 //! the AccessKit tree. No renderer, GPU or display is involved, and the
 //! snapshots come from a real engine core ([`crate::ui::fixtures`]), so
-//! these run anywhere `cargo test` does.
+//! these run anywhere `cargo test` does. Here each test sets the snapshot
+//! the window draws and checks the commands it sends; [`switching`] sends
+//! them to a live core instead, to see what goes on air.
+
+mod switching;
 
 use super::*;
 use crate::ui::close_guard::KEEP_RUNNING;
@@ -10,9 +14,11 @@ use crate::ui::fixtures::{self, nine_tiles, snapshot};
 use crate::ui::multiview::tile_name;
 use ac_director::DirectorMode;
 use ac_engine::OutputState;
-use ac_switcher::TransitionKind;
+use ac_switcher::{SwitchError, TransitionKind};
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Key, Modifiers, ViewportCommand, ViewportEvent, ViewportId, pos2, vec2};
+use eframe::egui::{
+    Event, Key, Modifiers, PointerButton, ViewportCommand, ViewportEvent, ViewportId, pos2, vec2,
+};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 
@@ -45,7 +51,7 @@ struct Window {
 /// A window the size of the app's default, drawing `snap`.
 fn window(snap: EngineSnapshot) -> Harness<'static, Window> {
     let state = Window {
-        console: Console::new(&fixtures::config()),
+        console: Console::new(&fixtures::config(), &snap),
         snap,
         quitting: false,
         sent: Vec::new(),
@@ -54,7 +60,7 @@ fn window(snap: EngineSnapshot) -> Harness<'static, Window> {
         .with_size(vec2(1440.0, 900.0))
         .build_ui_state(
             |ui, w: &mut Window| {
-                let sent = w.console.frame(ui, &w.snap, None, w.quitting);
+                let sent = w.console.frame(ui, &w.snap, Vec::new(), w.quitting);
                 w.sent.extend(sent);
             },
             state,
@@ -67,8 +73,33 @@ fn sent(h: &mut Harness<'_, Window>) -> Vec<EngineCommand> {
 }
 
 /// Presses `key` and runs until the window settles.
-fn press(h: &mut Harness<'_, Window>, key: Key) {
+fn press<S>(h: &mut Harness<'_, S>, key: Key) {
     h.key_press(key);
+    h.run();
+}
+
+/// Double-clicks the centre of the node labelled `label` the way a mouse
+/// does, two clicks 50 ms apart with each press and release on a frame of
+/// its own, and runs until the window settles. (The harness's own clicks
+/// are a step, 250 ms, apart: too slow for egui to count two as a double
+/// click.)
+fn double_click<S>(h: &mut Harness<'_, S>, label: &str) {
+    let at = h.get_by_label(label).rect().center();
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    let start = h.ctx.input(|i| i.time);
+    for (i, pressed) in [true, false, true, false].into_iter().enumerate() {
+        h.input_mut().time = Some(start + 0.05 * (i + 1) as f64);
+        h.input_mut().events.push(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    // Back to the harness's own clock, which goes on from here.
+    h.input_mut().time = None;
     h.run();
 }
 
@@ -90,7 +121,7 @@ fn viewport_commands(h: &Harness<'_, Window>) -> Vec<ViewportCommand> {
 }
 
 /// True when the shortcuts are paused, as the status bar says.
-fn paused(h: &Harness<'_, Window>) -> bool {
+fn paused<S>(h: &Harness<'_, S>) -> bool {
     h.query_by_label(keys::PAUSED).is_some()
 }
 
@@ -157,6 +188,76 @@ fn a_click_on_a_tile_stages_it() {
             shot: snap.shots[4].id.clone()
         }]
     );
+}
+
+#[test]
+fn a_double_click_on_a_tile_cuts_it_now() {
+    let snap = nine_tiles();
+    let mut h = window(snap.clone());
+    let shot = snap.shots[6].id.clone();
+    double_click(&mut h, &tile_name(6, &snap.shots[6]));
+    // The first click stages it, as egui reports it as a click too; the
+    // second is one Cut now that names the shot, so nothing the engine
+    // does between the two can make it cut something else.
+    assert_eq!(
+        sent(&mut h),
+        [
+            EngineCommand::SetPreview { shot: shot.clone() },
+            EngineCommand::CutTo { shot }
+        ]
+    );
+    // Two single clicks (a step apart) are two stagings, never a cut.
+    let other = snap.shots[2].id.clone();
+    let name = tile_name(2, &snap.shots[2]);
+    h.get_by_label(&name).click();
+    h.run();
+    h.get_by_label(&name).click();
+    h.run();
+    let staged = EngineCommand::SetPreview { shot: other };
+    assert_eq!(sent(&mut h), [staged.clone(), staged]);
+}
+
+/// The status bar's text for a take of `shot` the switcher dropped because
+/// the shot was no longer available.
+fn dropped_text(shot: &ShotId) -> String {
+    format!("queued take: switcher: shot {shot:?} is not available")
+}
+
+#[test]
+fn a_dropped_take_raises_one_notice_until_it_expires() {
+    let mut h = window(snapshot());
+    let wide = h.state().snap.shots[0].id.clone();
+    let text = dropped_text(&wide);
+    assert!(h.query_by_label(&text).is_none());
+    // The switcher dropped a queued take: the window says why, as it
+    // would for a refused command, without any command of its own.
+    h.state_mut().snap.switcher.dropped_takes = 1;
+    h.state_mut().snap.switcher.last_dropped = Some(SwitchError::Unavailable(wide));
+    h.run();
+    assert_eq!(h.get_by_label(&text).accesskit_node().role(), Role::Label);
+    assert_eq!(sent(&mut h), []);
+    // It stays for NOTICE_FOR (egui's clock: a step is 250 ms), then goes,
+    // and the same count does not raise it again.
+    let steps = (crate::ui::notices::NOTICE_FOR.as_secs_f64() / 0.25) as usize;
+    h.run_steps(steps - 2);
+    h.get_by_label(&text);
+    h.run_steps(4);
+    assert!(h.query_by_label(&text).is_none());
+    // The next drop raises it again.
+    h.state_mut().snap.switcher.dropped_takes = 2;
+    h.run();
+    h.get_by_label(&text);
+}
+
+#[test]
+fn drops_counted_before_the_window_opened_raise_no_notice() {
+    let mut snap = snapshot();
+    let wide = snap.shots[0].id.clone();
+    snap.switcher.dropped_takes = 3;
+    snap.switcher.last_dropped = Some(SwitchError::Unavailable(wide.clone()));
+    let mut h = window(snap);
+    h.run();
+    assert!(h.query_by_label(&dropped_text(&wide)).is_none());
 }
 
 #[test]
