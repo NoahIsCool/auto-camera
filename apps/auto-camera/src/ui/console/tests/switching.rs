@@ -366,7 +366,7 @@ fn a_double_click_during_a_mix_puts_the_tile_on_air_at_once() {
 }
 
 #[test]
-fn while_the_tbar_holds_a_mix_cut_is_disabled_and_space_is_refused() {
+fn while_the_tbar_holds_a_mix_cut_is_disabled_and_space_and_double_clicks_are_refused() {
     let mut h = studio();
     press(&mut h, Key::Num1);
     press(&mut h, Key::Space);
@@ -400,4 +400,58 @@ fn while_the_tbar_holds_a_mix_cut_is_disabled_and_space_is_refused() {
     let snap = h.state().snapshot();
     assert!(snap.switcher.tbar_held);
     assert_eq!(snap.switcher.program, Some(shot_of(&h, 0)));
+    // A double click on tile 3 is refused the same way: its first click
+    // stages "c" for the end of the mix, and its Cut now is refused, so
+    // "c" does not go on air and the window says why.
+    let (a, b, c) = (shot_of(&h, 0), shot_of(&h, 1), shot_of(&h, 2));
+    let tile = tile_of(&h, 2);
+    double_click(&mut h, &tile);
+    let sent = std::mem::take(&mut h.state_mut().sent);
+    assert_eq!(
+        sent,
+        [
+            (
+                EngineCommand::SetPreview { shot: c.clone() },
+                Ok(CommandReply::Done)
+            ),
+            (
+                EngineCommand::CutTo { shot: c.clone() },
+                Err(CommandError::Switch(SwitchError::TBarHeld))
+            ),
+        ]
+    );
+    h.run();
+    h.get_by_label("cut_to: switcher: the T-bar holds the transition in progress");
+    let snap = h.state().snapshot();
+    assert!(snap.switcher.tbar_held);
+    assert!(snap.switcher.in_transition);
+    assert_eq!(snap.switcher.program, Some(a.clone()));
+    assert_eq!(snap.switcher.preview, Some(b.clone()));
+    assert_eq!(
+        snap.switcher.queued,
+        Some(Queued {
+            shot: c.clone(),
+            take: false
+        })
+    );
+    h.get_by_label_contains(&format!("next {}", snap.shots[2].name));
+    // The lever finishes the mix: "b" is on air and "c" lands on preview.
+    h.drag_at(rail.center());
+    h.hover_at(pos2(rail.center().x, rail.center().y - 10.0));
+    h.hover_at(pos2(rail.center().x, rail.top() + 1.0));
+    h.drop_at(pos2(rail.center().x, rail.top() + 1.0));
+    h.run();
+    let moves = accepted(&mut h);
+    assert!(
+        moves
+            .iter()
+            .all(|m| matches!(m, EngineCommand::SetTBar { .. })),
+        "{moves:?}"
+    );
+    let snap = h.state().snapshot();
+    assert!(!snap.switcher.in_transition, "{:?}", snap.switcher);
+    assert!(!snap.switcher.tbar_held);
+    assert_eq!(snap.switcher.program, Some(b));
+    assert_eq!(snap.switcher.preview, Some(c));
+    assert_eq!(snap.switcher.queued, None);
 }

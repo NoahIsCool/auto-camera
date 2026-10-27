@@ -17,8 +17,13 @@
 //! to program at once ("Cut now", [`EngineCommand::CutTo`]). During a
 //! transition a click stages the shot for its end, and a double click still
 //! cuts it to program at once, ending the transition in the same command,
-//! so the transition's incoming shot never shows alone in between. The
-//! right-click menu of a subject shot pins, hides or re-acquires its
+//! so the transition's incoming shot never shows alone in between. The one
+//! exception is a transition the T-bar holds: the switcher refuses Cut now
+//! then, as it refuses Cut
+//! ([`SwitchError::TBarHeld`](ac_switcher::SwitchError::TBarHeld)), and
+//! the window shows the refusal as a notice, so the double click only
+//! stages the shot (its first click) for the end of the transition, which
+//! the lever finishes or abandons. The right-click menu of a subject shot pins, hides or re-acquires its
 //! subject. Clicks become [`EngineCommand`]s that the caller sends; this
 //! module never talks to the engine itself.
 //!

@@ -75,8 +75,10 @@ still available; a shot staged meanwhile then lands on preview, and a take
 queued of it is cancelled. A double click on a tile still puts that tile
 on air at once, ending the transition in the same step. The T-bar and the
 clock never share a transition: the T-bar cannot take over a running Auto,
-and while the T-bar holds a transition CUT is disabled and `Space` is
-refused with a notice (the lever finishes or abandons it).
+and while the T-bar holds a transition CUT is disabled, and `Space` and a
+double click on a tile are refused with a notice (the lever finishes or
+abandons it; the double click's first click still stages the tile for the
+end).
 
 ## Headless mode
 
