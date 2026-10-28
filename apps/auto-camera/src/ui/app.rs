@@ -11,8 +11,8 @@
 //! everything it sent shows ([`Console::answered`]): the engine applies
 //! commands at the start of a tick and publishes that tick's snapshot at
 //! its end, so the snapshot read after the last reply may still predate
-//! them, but the next tick's cannot. The window repaints at about the monitor rate while
-//! the engine runs.
+//! them, but the next tick's cannot. The window repaints at about the
+//! monitor rate while the engine runs.
 //!
 //! Closing the window shuts the engine down, which finishes a running
 //! recording before the process exits; while the output is live the
