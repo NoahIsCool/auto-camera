@@ -250,6 +250,48 @@ fn a_take_queued_behind_an_abandoned_transition_is_the_one_take() {
 }
 
 #[test]
+fn a_take_queued_behind_an_abandoned_transition_can_fire_as_a_cut() {
+    // The medium on program. At 30-33 a T-bar move towards the close-up
+    // ends, and the take of the wide queued meanwhile fires as a cut (the
+    // selected transition): at 34 the wide is program. Abandoned, the move
+    // leaves the medium on program until the cut sends it to preview;
+    // completed, it puts the close-up there, and the cut sends that to
+    // preview instead.
+    let close = shot("cam/1/close", Some(1), Rect::new(0.35, 0.185, 0.3, 0.3));
+    let run = |preview: &str| {
+        let mut trace = timeline(60, |f| if f < 34 { "cam/1/medium" } else { "cam/wide" });
+        for r in &mut trace {
+            r.shots.push(close.clone());
+        }
+        mixing(&mut trace[30..34], "cam/1/close", "cam/1/medium", 0.5);
+        for r in &mut trace[34..] {
+            r.switcher.preview = Some(ShotId(preview.into()));
+        }
+        trace
+    };
+    let found = |trace: &[TraceRecord]| -> Vec<(usize, String)> {
+        takes(trace)
+            .into_iter()
+            .map(|t| (t.record, t.to.0))
+            .collect()
+    };
+    let abandoned = run("cam/1/medium");
+    assert_eq!(found(&abandoned), [(34, "cam/wide".to_owned())]);
+    // The close-up never reached program: no jump cut onto it, and no
+    // 0.4 s stint of it.
+    let r = switching(&abandoned, Content::Talk);
+    for name in ["switching.jump_cuts", "switching.dwell_violations"] {
+        let m = r.metric(name, None).unwrap();
+        assert_eq!((m.value(), m.verdict), (Some(0.0), Verdict::Pass), "{name}");
+    }
+    let completed = run("cam/1/close");
+    assert_eq!(
+        found(&completed),
+        [(30, "cam/1/close".to_owned()), (34, "cam/wide".to_owned())]
+    );
+}
+
+#[test]
 fn availability_needs_the_shot_a_fresh_frame_and_a_tracking_subject() {
     let mut r = at(0, "cam/1/medium");
     let medium = ShotId("cam/1/medium".into());

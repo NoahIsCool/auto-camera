@@ -14,14 +14,18 @@
 //! transition (one program and one preview shot) whose next tick still
 //! has the old program shot never changed program (the T-bar went back to
 //! the start, or a cut went back to the outgoing shot), and its head
-//! stays the program shot throughout. A transition still running when the
-//! trace ends is taken to complete. A *take* is a tick whose head differs
-//! from the previous tick's and is a shot ([`takes`]): a cut, the start of
-//! a mix or dip that completes, a cut made during a transition. It runs
-//! *from* the previous head *to* the new one. A *stint* is a maximal run of
-//! ticks with one head ([`stints`]); it lasts from its first tick's PTS to
-//! the next tick's (the last tick's when the trace ends first, and the
-//! stint is then *open*).
+//! stays the program shot throughout. So is a run whose next tick has a
+//! third shot on program and the old program shot on preview: a take
+//! queued during the move fired as a cut when the move was abandoned,
+//! which sends the old program shot to preview (after a completed
+//! transition the same cut sends the incoming one there). A transition
+//! still running when the trace ends is taken to complete. A *take* is a
+//! tick whose head differs from the previous tick's and is a shot
+//! ([`takes`]): a cut, the start of a mix or dip that completes, a cut
+//! made during a transition. It runs *from* the previous head *to* the new
+//! one. A *stint* is a maximal run of ticks with one head ([`stints`]); it
+//! lasts from its first tick's PTS to the next tick's (the last tick's
+//! when the trace ends first, and the stint is then *open*).
 //!
 //! * `switching.jump_cuts`: takes between two shots of one source whose
 //!   crops (the outgoing shot's on the tick before, the incoming one's on
@@ -154,9 +158,10 @@ pub fn heads(trace: &[TraceRecord]) -> Vec<Option<&ShotId>> {
         while i + 1 < trace.len() && same_transition(&trace[first], &trace[i + 1]) {
             i += 1;
         }
-        let abandoned = trace
-            .get(i + 1)
-            .is_some_and(|next| next.switcher.program == s.program);
+        let abandoned = trace.get(i + 1).is_some_and(|next| {
+            let n = &next.switcher;
+            n.program == s.program || (n.program != s.preview && n.preview == s.program)
+        });
         let head = if abandoned { &s.program } else { &s.preview };
         found.extend(std::iter::repeat_n(head.as_ref(), i + 1 - first));
         i += 1;
