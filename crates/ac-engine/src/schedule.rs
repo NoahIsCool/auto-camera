@@ -31,7 +31,10 @@
 //! `n · period`); only the clock readings at which ticks are due move. A
 //! cooldown stops jitter from shifting it back and forth, and a source at a
 //! slightly different rate (29.97 against 30) drifts back into collision only
-//! every few tens of seconds, costing one skipped frame each time.
+//! every few tens of seconds, costing one skipped frame each time. The ticks
+//! can sit midway between one source's frames only: every other source is
+//! aligned by its presentation buffer instead ([`crate::presentation`]),
+//! which picks frames by PTS for the tick's due time ([`TickDecision::Tick`]).
 //!
 //! [`RateMeter`] measures event rates (source frame rates) over a sliding
 //! window of media time, and [`TickTimer`] keeps tick-duration statistics.
@@ -50,6 +53,9 @@ pub enum TickDecision {
         index: u64,
         /// Media time of the tick: `index · period`.
         media_time: Duration,
+        /// Clock reading at which the tick was due: the origin (moved by
+        /// every [`TickSchedule::delay`]) plus `index · period`.
+        due: Duration,
         /// The tick started more than half a period after it was due.
         late: bool,
         /// Ticks skipped just before this one because the thread fell behind.
@@ -112,6 +118,7 @@ impl TickSchedule {
         TickDecision::Tick {
             index,
             media_time: due - self.origin,
+            due,
             late: now.saturating_sub(due) > self.period / 2,
             skipped,
         }
@@ -283,9 +290,10 @@ mod tests {
             TickDecision::Tick {
                 index,
                 media_time,
+                due,
                 late,
                 ..
-            } => assert!(index == 1 && media_time == P && !late),
+            } => assert!(index == 1 && media_time == P && due == ms(60) && !late),
             other => panic!("expected a tick, got {other:?}"),
         }
     }
@@ -351,11 +359,13 @@ mod tests {
                 TickDecision::Tick {
                     index,
                     media_time,
+                    due,
                     late,
                     skipped,
                 } => {
                     assert_eq!(index, i);
                     assert_eq!(media_time, ms(40 * i));
+                    assert_eq!(due, now, "due on the clock, after the origin");
                     assert!(!late && skipped == 0);
                 }
                 other => panic!("expected a tick, got {other:?}"),
@@ -391,12 +401,13 @@ mod tests {
             TickDecision::Tick {
                 index,
                 media_time,
+                due,
                 skipped,
                 ..
             } => {
                 assert_eq!(skipped, 24);
                 assert_eq!(index, 25);
-                assert_eq!(media_time, ms(1000));
+                assert_eq!((media_time, due), (ms(1000), ms(1000)));
             }
             other => panic!("expected a tick, got {other:?}"),
         }

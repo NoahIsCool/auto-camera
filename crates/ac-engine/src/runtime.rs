@@ -35,7 +35,7 @@
 //!
 //! | From → to | Channel | Policy |
 //! |---|---|---|
-//! | source → engine | [`ac_media::LatestFrame`] inside the source | newest frame only |
+//! | source → engine | [`ac_media::LatestFrame`] inside the source | newest frame only, read at every wake; a source other than the phase reference keeps up to 4 in its [`PresentationBuffer`] |
 //! | engine → worker | [`Slot`](crate::mailbox::Slot) per worker | newest request only |
 //! | worker → engine | `mpsc` channel | drained every tick; stale results dropped |
 //! | worker → engine | `mpsc` channel per worker | one "loaded" message, read every tick |
@@ -85,6 +85,7 @@ use crate::detectors::Detectors;
 use crate::discovery::{DiscoveryResult, DiscoveryWorker};
 use crate::mailbox::Latest;
 use crate::output::OutputController;
+use crate::presentation::{PresentationBuffer, buffers_for};
 use crate::schedule::TickTimer;
 use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 
@@ -198,6 +199,9 @@ struct Runtime {
     core: EngineCore,
     /// Sources, in config order, each under its supervisor.
     sources: Vec<Box<dyn VideoSource>>,
+    /// Presentation buffers, by source: `None` for the phase reference,
+    /// which is read as it is ([`crate::presentation`]).
+    presenters: Vec<Option<PresentationBuffer>>,
     /// The detector sidecar the workers share, if any. Declared before the
     /// workers so that, when a panic unwinds the thread, it is dropped
     /// first too (see [`Runtime::shutdown`]).
@@ -286,6 +290,10 @@ impl Engine {
         let runtime = Runtime {
             core,
             sources,
+            presenters: buffers_for(
+                config.sources.iter().map(|e| e.source_id()),
+                audio_source.unwrap_or(0),
+            ),
             sidecar,
             workers,
             results,

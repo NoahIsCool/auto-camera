@@ -113,7 +113,9 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 
-/// A source counts as unavailable when no new frame arrived for this long.
+/// A source counts as unavailable when no new frame arrived for this long;
+/// its presentation buffer, if it has one, then stops presenting it too
+/// ([`crate::presentation`]).
 pub const SOURCE_STALE_AFTER: Duration = Duration::from_secs(1);
 
 /// What the runtime knows about a source on one tick.
@@ -121,7 +123,9 @@ pub const SOURCE_STALE_AFTER: Duration = Duration::from_secs(1);
 pub struct SourceFeed {
     /// Health reported by the source.
     pub state: SourceState,
-    /// The source's newest frame (possibly the same as last tick).
+    /// The frame to show: the source's newest, or for a source other than
+    /// the phase reference the one its presentation buffer picked for the
+    /// tick ([`crate::presentation`]); possibly the same as last tick.
     pub frame: Option<VideoFrame>,
     /// The source's detector is still loading (false without a detector);
     /// see the module docs.

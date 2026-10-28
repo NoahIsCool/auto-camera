@@ -11,6 +11,12 @@
 //! first source) goes to the [`PhaseLock`], which delays the schedule when
 //! ticks collide with that source's frames (see [`crate::schedule`]).
 //!
+//! Only the phase reference is fed its newest frame as it is, though: every
+//! other source's newest frame is offered to its
+//! [`PresentationBuffer`](crate::presentation::PresentationBuffer) whenever
+//! the thread wakes, between ticks too, and the core is fed the frame that
+//! buffer presents for the tick's due time (see [`crate::presentation`]).
+//!
 //! Commands are applied in order at tick start, and only on this thread:
 //! `StartOutput` and `StopOutput` go to the
 //! [`OutputController`](crate::output::OutputController) and every other
@@ -71,23 +77,25 @@ impl Runtime {
         let mut schedule = TickSchedule::new(self.clock.now(), self.period, self.max_lag);
         let mut phase = PhaseLock::new(self.period);
         loop {
-            let (media_time, late, skipped) = match schedule.poll(self.clock.now()) {
+            let (media_time, due, late, skipped) = match schedule.poll(self.clock.now()) {
                 TickDecision::Wait(d) => {
+                    self.collect_frames();
                     self.clock.sleep(d.min(WAIT_SLICE));
                     continue;
                 }
                 TickDecision::Tick {
                     media_time,
+                    due,
                     late,
                     skipped,
                     ..
-                } => (media_time, late, skipped),
+                } => (media_time, due, late, skipped),
             };
             let started = Instant::now();
             if self.apply_commands() {
                 break;
             }
-            let reference = self.tick(media_time, skipped);
+            let reference = self.tick(media_time, due, skipped);
             if let Some(by) = phase.observe(reference) {
                 schedule.delay(by);
             }
@@ -144,21 +152,44 @@ impl Runtime {
         })
     }
 
-    /// One tick: feed the core, dispatch discovery, push the program
-    /// (owing the encoder a repeat for each of the `skipped` ticks before).
-    /// Returns the sequence number and PTS of the frame the tick read from
-    /// the phase reference (the program audio source, else the first
-    /// source), for the [`PhaseLock`].
-    fn tick(&mut self, media_time: Duration, skipped: u64) -> Option<(u64, Duration)> {
+    /// Offers every source's newest frame to its presentation buffer, if
+    /// it has one, stamped with the clock reading now.
+    fn collect_frames(&mut self) {
+        let now = self.clock.now();
+        for (s, buffer) in self.sources.iter().zip(&mut self.presenters) {
+            if let Some(buffer) = buffer
+                && let Some(frame) = s.latest()
+            {
+                buffer.offer(frame, now);
+            }
+        }
+    }
+
+    /// One tick, due at clock reading `due`: feed the core, dispatch
+    /// discovery, push the program (owing the encoder a repeat for each of
+    /// the `skipped` ticks before). Returns the sequence number and PTS of
+    /// the frame the tick read from the phase reference (the program audio
+    /// source, else the first source), for the [`PhaseLock`].
+    fn tick(
+        &mut self,
+        media_time: Duration,
+        due: Duration,
+        skipped: u64,
+    ) -> Option<(u64, Duration)> {
         self.output.poll();
+        self.collect_frames();
         let results: Vec<DiscoveryResult> = self.results.try_iter().collect();
         let feeds: Vec<SourceFeed> = self
             .sources
             .iter()
             .zip(&mut self.workers)
-            .map(|(s, w)| SourceFeed {
+            .zip(&mut self.presenters)
+            .map(|((s, w), p)| SourceFeed {
                 state: s.state(),
-                frame: s.latest(),
+                frame: match p {
+                    Some(buffer) => buffer.present(due).into_frame(),
+                    None => s.latest(),
+                },
                 detector_loading: w.as_mut().is_some_and(DiscoveryWorker::is_loading),
                 error: s.error(),
                 // After `frame` (fields are evaluated in order), so it

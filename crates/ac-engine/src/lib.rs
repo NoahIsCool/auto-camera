@@ -54,6 +54,7 @@ pub mod detectors;
 pub mod discovery;
 pub mod mailbox;
 pub mod output;
+pub mod presentation;
 pub mod queries;
 pub mod runtime;
 pub mod schedule;
