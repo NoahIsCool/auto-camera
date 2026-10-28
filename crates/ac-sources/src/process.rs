@@ -15,6 +15,8 @@
 //! * The registry lock is held only to move `Child` handles in and out (and
 //!   for non-blocking `try_wait`); spawning, killing and blocking waits happen
 //!   outside it.
+//! * Every child's stderr goes to the app's log, through a drain thread
+//!   that ends with the child ([`crate::logs`]).
 
 use std::io::{self, Read};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
@@ -63,19 +65,23 @@ impl Children {
         Self::default()
     }
 
-    /// Starts `command` with stdin and stderr closed and stdout piped, and
-    /// registers it. `Ok(None)` when the registry is closed, in which case
-    /// no process is left running.
+    /// Starts `command` with stdin closed, stdout piped and stderr piped to
+    /// the log, and registers it. `Ok(None)` when the registry is closed,
+    /// in which case no process is left running.
     pub(crate) fn spawn(&self, command: &mut Command) -> io::Result<Option<Spawned>> {
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
         let Some(stdout) = child.stdout.take() else {
             reap(child);
             return Err(io::Error::other("child has no stdout pipe"));
         };
+        if let Err(e) = crate::logs::forward(&mut child, command) {
+            reap(child);
+            return Err(e);
+        }
         let mut reg = lock(&self.inner);
         if reg.closed {
             drop(reg);

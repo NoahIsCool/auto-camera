@@ -35,7 +35,9 @@
 //!   [`stream`] monitor turns them into [`StreamState`]s (connecting,
 //!   connected, reconnecting with the attempt number, down) and measures
 //!   the stream's bitrate from per-packet mux statistics. A reconnection
-//!   clears the stream's error.
+//!   clears the stream's error. Every line also goes to the app's log as a
+//!   `tracing` event (target `ac_output::ffmpeg`, at ffmpeg's severity,
+//!   stream key redacted); the crate installs no subscriber.
 //! * **Broadcast-legal picture.** Full-range RGBA is converted to limited-range
 //!   BT.709 `yuv420p` and tagged as such in the container and the H.264 VUI;
 //!   no B-frames; a fixed GOP of `keyframe_seconds * fps` frames.

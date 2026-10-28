@@ -34,6 +34,7 @@ pub mod config;
 pub mod ffmpeg;
 pub mod file;
 pub mod frame_rate;
+mod logs;
 mod pool;
 pub mod probe;
 mod process;
