@@ -100,10 +100,10 @@ the end with the queries they answer:
 
 (abridged). Each query's `matches` is the prompt feedback of the window:
 what the newest applied detector pass of each source found for it, and on
-which frame. The exit status is 0 on success, 1 when the engine or the output
-failed (`ok` is false and `error` says why), 2 for usage and configuration
-errors. Recordings are never overwritten: an existing `--record` path is an
-error.
+which frame. The exit status is 0 on success, 1 when the engine, the output
+or the trace failed (`ok` is false and `error` says why), 2 for usage and
+configuration errors. Recordings are never overwritten: an existing
+`--record` path is an error.
 
 ### Per-tick trace
 
@@ -125,7 +125,9 @@ drew it), and the program, preview and running transition. The schema is
 `ac_eval::TraceRecord`; its docs show a full record. The line count equals
 the summary's `ticks`, which the summary's `trace` repeats (`records`, with
 `missing` for ticks a writer that fell over half a minute behind had to
-drop). The file must not exist, as for `--record`.
+drop). The file must not exist, as for `--record`; a run whose engine does
+not start removes its empty trace, so the same command works once the cause
+is fixed.
 
 ## Studio configuration
 
@@ -342,7 +344,7 @@ than for a show; choosing a model per query comes later.
 | `ac-switcher` | Preview/program, cut/auto/T-bar transitions |
 | `ac-compositor` | CPU program compositor |
 | `ac-output` | One ffmpeg encode to RTMP and fragmented MP4 |
-| `ac-eval` | Framing-quality metrics |
+| `ac-eval` | Framing-quality metrics, and the per-tick trace schema (`TraceRecord`) the engine emits and they score |
 | `ac-engine` | The runtime that wires them together (ADR 0002) |
 | `apps/auto-camera` | Operator window and headless runner |
 

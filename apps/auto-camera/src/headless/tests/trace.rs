@@ -1,5 +1,6 @@
-//! Headless runs with `--trace`: a line for every tick, and a trace file
-//! that cannot be created failing the run before the engine starts.
+//! Headless runs with `--trace`: a line for every tick, a trace file that
+//! cannot be created failing the run before the engine starts, and no
+//! empty trace left behind by an engine that does not start.
 
 use super::*;
 
@@ -77,22 +78,29 @@ fn a_trace_that_cannot_be_created_fails_the_run_at_once() {
 }
 
 #[test]
-fn a_run_whose_engine_does_not_start_still_closes_its_trace() {
+fn a_run_whose_engine_does_not_start_leaves_no_trace_behind() {
     let path = temp_path("unstarted.jsonl");
     // A studio without sources is refused when the engine starts.
     let mut config = studio();
     config.sources.clear();
-    let s = run(
-        config,
-        Path::new("studio.toml"),
-        &traced(30.0, &path),
-        &QuitSignal::new(),
-    );
-    let text = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
-    assert!(!s.ok);
-    assert!(s.error.unwrap().starts_with("the engine did not start"));
-    let trace = s.trace.expect("the trace file was made");
-    assert_eq!((trace.records, trace.missing), (0, 0));
-    assert!(text.is_empty());
+    for attempt in 1..=2 {
+        let s = run(
+            config.clone(),
+            Path::new("studio.toml"),
+            &traced(30.0, &path),
+            &QuitSignal::new(),
+        );
+        let leftover = path.exists();
+        let _ = std::fs::remove_file(&path);
+        assert!(!s.ok);
+        // The engine's own error, on the second attempt too: the first one
+        // left nothing at the path to be refused.
+        let error = s.error.unwrap();
+        assert!(
+            error.starts_with("the engine did not start") && !error.contains("the trace"),
+            "attempt {attempt}: {error}"
+        );
+        assert!(!leftover, "attempt {attempt} left its empty trace");
+        assert!(s.trace.is_none());
+    }
 }

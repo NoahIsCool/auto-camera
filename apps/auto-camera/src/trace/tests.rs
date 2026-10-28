@@ -1,5 +1,6 @@
 //! The trace writer: one line per record, never over an existing file, a
-//! write error that ends the trace, and an engine traced through [`attach`].
+//! write error that ends the trace, an empty trace discarded, and an engine
+//! traced through [`attach`].
 
 use std::io;
 use std::time::Duration;
@@ -72,6 +73,40 @@ fn an_existing_file_is_never_overwritten() {
     std::fs::remove_file(&path).unwrap();
     let nowhere = temp_path("no-such-dir").join("trace.jsonl");
     assert!(TraceFile::create(&nowhere).is_err());
+}
+
+#[test]
+fn discarding_removes_an_empty_trace_and_keeps_one_with_lines() {
+    let path = temp_path("empty.jsonl");
+    let (file, tx) = TraceFile::create(&path).unwrap();
+    drop(tx);
+    assert_eq!(
+        file.discard_if_empty(),
+        TraceReport {
+            lines: 0,
+            error: None
+        }
+    );
+    assert!(!path.exists(), "the empty trace is removed");
+    // So the path can be traced to again.
+    let (file, tx) = TraceFile::create(&path).unwrap();
+    tx.send(record(1)).unwrap();
+    drop(tx);
+    assert_eq!(file.discard_if_empty().lines, 1);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(ac_eval::parse_trace(&text), Ok(vec![record(1)]));
+    // A file that is gone by then cannot be removed, and says so.
+    let (file, tx) = TraceFile::create(&path).unwrap();
+    drop(tx);
+    std::fs::remove_file(&path).unwrap();
+    let report = file.discard_if_empty();
+    assert_eq!(report.lines, 0);
+    let error = report.error.unwrap();
+    assert!(
+        error.starts_with("cannot remove the empty trace"),
+        "{error}"
+    );
 }
 
 /// A writer that takes `room` bytes, then fails every write; its flush

@@ -20,7 +20,8 @@
 //! In either mode `--trace PATH` writes the engine's per-tick trace as JSON
 //! Lines ([`trace`]): the file is created before the engine starts, the
 //! engine is given its channel, and the app waits for the last line once
-//! the engine has stopped.
+//! the engine has stopped. A run whose engine does not start removes the
+//! empty file, so that the same command works once the cause is fixed.
 //!
 //! Exit status: 0 on success, 1 when the engine, the output or the trace
 //! failed, 2 for usage and configuration errors, 130 after a termination
@@ -93,18 +94,23 @@ fn run_window(config: StudioConfig, trace: Option<&Path>, quit: &QuitSignal) -> 
         }
     };
     let result = ui::run(config, options, quit.clone());
-    // The window's engine has stopped, and its trace sender with it.
-    let trace_error = trace.and_then(|t| t.finish().error);
+    // The window's engine has stopped, and its trace sender with it. A
+    // window that failed, most often because its engine did not start,
+    // leaves no empty trace behind.
+    let report = trace.map(|t| match result {
+        Ok(()) => t.finish(),
+        Err(_) => t.discard_if_empty(),
+    });
+    let trace_error = report.and_then(|r| r.error);
+    if let Err(e) = &result {
+        eprintln!("auto-camera: {e}");
+    }
     if let Some(e) = &trace_error {
         eprintln!("auto-camera: {e}");
     }
     match result {
         Ok(()) if quit.requested() => ExitCode::from(signals::INTERRUPTED),
         Ok(()) if trace_error.is_none() => ExitCode::SUCCESS,
-        Ok(()) => ExitCode::FAILURE,
-        Err(e) => {
-            eprintln!("auto-camera: {e}");
-            ExitCode::FAILURE
-        }
+        _ => ExitCode::FAILURE,
     }
 }

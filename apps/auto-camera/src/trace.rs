@@ -3,7 +3,7 @@
 //! The engine thread hands one record per tick to a bounded channel and
 //! never waits on it ([`ac_engine::trace`]). A [`TraceFile`] owns the other
 //! end: a writer thread (`ac-trace`) that takes the records in order and
-//! writes each as one line ([`ac_eval::TraceRecord::to_json_line`]) through
+//! writes each as one line ([`ac_engine::TraceRecord::to_json_line`]) through
 //! a buffer, so the disk's pace never reaches the master clock. The channel
 //! holds [`QUEUE`] records, half a minute of ticks at 30 fps; a writer
 //! further behind than that loses records, and the gap shows in the
@@ -21,7 +21,12 @@
 //! Both modes start their engine with [`EngineOptions`] from [`attach`],
 //! which creates the file and puts the channel in the options: a headless
 //! run before its first phase, the window before it opens. Each waits for
-//! [`TraceFile::finish`] once its engine has stopped.
+//! [`TraceFile::finish`] once its engine has stopped, or, when the engine
+//! did not start (or the window did not open), for
+//! [`TraceFile::discard_if_empty`], which removes a file left without a
+//! line. Since the path must not exist, an empty file left behind would
+//! make the same command fail again with "File exists" once the real cause
+//! is fixed, and hide that cause.
 
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
@@ -84,6 +89,26 @@ impl TraceFile {
             lines: 0,
             error: Some("the trace writer panicked".into()),
         })
+    }
+
+    /// [`finish`](Self::finish) for a run that failed before it began (an
+    /// engine that did not start, a window that did not open), then removes
+    /// the file if it holds no line, so that it does not block the next run
+    /// (see the module docs). A file with lines (an engine that ticked
+    /// before its window failed) is kept. The report's error is the
+    /// writer's, or why the empty file could not be removed.
+    pub fn discard_if_empty(self) -> TraceReport {
+        let path = self.path.clone();
+        let mut report = self.finish();
+        if report.lines == 0
+            && let Err(e) = std::fs::remove_file(&path)
+        {
+            report.error = report.error.or(Some(format!(
+                "cannot remove the empty trace {}: {e}",
+                path.display()
+            )));
+        }
+        report
     }
 }
 

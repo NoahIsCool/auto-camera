@@ -33,14 +33,13 @@ pub(super) struct Totals {
     pub(super) trace: Option<TraceSummary>,
 }
 
-/// The summary of a run whose engine never started, with its `trace` if
-/// the trace file was created.
+/// The summary of a run whose engine never started, which leaves no trace
+/// file behind.
 pub(super) fn failed_to_start(
     path: &Path,
     options: &HeadlessOptions,
     started: Instant,
     error: String,
-    trace: Option<TraceSummary>,
 ) -> Summary {
     summarize(
         path,
@@ -50,7 +49,7 @@ pub(super) fn failed_to_start(
         Totals {
             ticks: 0,
             threads_joined: 0,
-            trace,
+            trace: None,
         },
         None,
         None,

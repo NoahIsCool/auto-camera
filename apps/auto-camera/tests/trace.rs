@@ -1,7 +1,9 @@
 //! `--trace` end to end: the built binary runs the demo studio (synthetic,
 //! no camera, model or network) headless for 2 s and writes one JSON line
-//! per tick, as many as the summary's tick count.
+//! per tick, as many as the summary's tick count; and a studio whose engine
+//! does not start, headless or in the window, leaves no trace behind.
 
+use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -28,14 +30,28 @@ fn temp_path(name: &str) -> PathBuf {
 }
 
 /// Runs the demo headless for `seconds` with `--trace trace`, and returns
-/// its exit status, summary (stdout) and log (stderr). A run that takes
-/// longer than [`LIMIT`] is killed, so a hang fails the test instead of
-/// outliving it.
+/// its exit status, summary (stdout) and log (stderr).
 fn run_demo(seconds: &str, trace: &Path) -> (ExitStatus, String, String) {
+    run_app(
+        [
+            OsStr::new("--config"),
+            OsStr::new(DEMO),
+            OsStr::new("--headless"),
+            OsStr::new("--seconds"),
+            OsStr::new(seconds),
+            OsStr::new("--trace"),
+            trace.as_os_str(),
+        ]
+        .as_slice(),
+    )
+}
+
+/// Runs the app with `args`, and returns its exit status, stdout and
+/// stderr. A run that takes longer than [`LIMIT`] is killed, so a hang
+/// fails the test instead of outliving it.
+fn run_app(args: &[&OsStr]) -> (ExitStatus, String, String) {
     let mut child = Command::new(APP)
-        .args(["--config", DEMO, "--headless", "--seconds", seconds])
-        .arg("--trace")
-        .arg(trace)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -104,4 +120,55 @@ fn an_existing_trace_file_is_refused() {
     let error = summary["error"].as_str().unwrap();
     assert!(error.contains("cannot create the trace"), "{error}");
     assert_eq!(text, "keep me\n");
+}
+
+#[test]
+fn an_engine_that_does_not_start_leaves_no_trace_to_refuse_the_next_run() {
+    // A file source whose file does not exist: the engine fails to open it
+    // when it starts, so the window mode exits before any window opens.
+    let studio = temp_path("unstartable.toml");
+    let missing = temp_path("missing.mp4");
+    std::fs::write(
+        &studio,
+        format!(
+            "[[sources]]\nid = \"stage\"\nkind = \"file\"\npath = {:?}\n\n[detector]\nkind = \"none\"\n",
+            missing.display().to_string()
+        ),
+    )
+    .unwrap();
+    let path = temp_path("unstarted.jsonl");
+    // Twice in each mode: the first run must not leave a file that the
+    // second refuses, hiding the real cause.
+    let mut runs = Vec::new();
+    for headless in [true, true, false, false] {
+        let mut args = vec![OsStr::new("--config"), studio.as_os_str()];
+        if headless {
+            args.extend([
+                OsStr::new("--headless"),
+                OsStr::new("--seconds"),
+                OsStr::new("1"),
+            ]);
+        }
+        args.extend([OsStr::new("--trace"), path.as_os_str()]);
+        let (status, summary, log) = run_app(&args);
+        let leftover = path.exists();
+        let _ = std::fs::remove_file(&path);
+        runs.push((headless, status, summary, log, leftover));
+    }
+    std::fs::remove_file(&studio).unwrap();
+    for (run, (headless, status, summary, log, leftover)) in runs.into_iter().enumerate() {
+        let case = format!("run {run} (headless {headless})");
+        assert_eq!(status.code(), Some(1), "{case}: {log}");
+        let error = if headless {
+            let summary: serde_json::Value =
+                serde_json::from_str(&summary).expect("a JSON summary");
+            assert!(summary["trace"].is_null(), "{case}: {summary}");
+            summary["error"].as_str().unwrap().to_owned()
+        } else {
+            log
+        };
+        assert!(error.contains("cannot open"), "{case}: {error}");
+        assert!(!error.contains("the trace"), "{case}: {error}");
+        assert!(!leftover, "{case} left its empty trace");
+    }
 }

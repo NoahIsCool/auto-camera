@@ -14,7 +14,7 @@
 //! # Delivery
 //!
 //! The channel is a bounded `std::sync::mpsc::sync_channel`, and the engine
-//! thread never waits on it ([`Tracer`]):
+//! thread never waits on it (its `Tracer` only ever tries to send):
 //!
 //! * a full channel (the writer is a whole channel behind) drops the
 //!   record, so the master clock never waits for a disk. Records are

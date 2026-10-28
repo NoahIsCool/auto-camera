@@ -46,7 +46,9 @@
 //!
 //! With `--trace`, the summary's `trace` gives the lines written, one per
 //! tick, so it equals `ticks` unless the writer fell behind (`missing`);
-//! a trace that cannot be created or written fails the run.
+//! a trace that cannot be created or written fails the run. A run whose
+//! engine does not start removes its empty trace file and reports no
+//! `trace`, so that the path is free when the command is run again.
 //!
 //! This module runs the phases; the run's flags ([`HeadlessOptions`]) are
 //! in `flags`, and the summary's types in [`summary`] and its building
@@ -114,13 +116,18 @@ pub fn run_with(
     let limit = detector_limit(&config.detector);
     let (trace, engine_options) = match trace::attach(options.trace.as_deref(), engine_options) {
         Ok(t) => t,
-        Err(e) => return failed_to_start(path, options, started, e, None),
+        Err(e) => return failed_to_start(path, options, started, e),
     };
     let engine = match Engine::start_with(config, engine_options) {
         Ok(e) => e,
         Err(e) => {
-            let (trace, _) = finish_trace(trace, 0, None);
-            return failed_to_start(path, options, started, e.to_string(), trace);
+            // Nothing ticked, so the trace is empty: remove it, so that the
+            // same command works once the cause is fixed.
+            let error = match trace.and_then(|t| t.discard_if_empty().error) {
+                Some(why) => format!("{e}; the trace failed: {why}"),
+                None => e.to_string(),
+            };
+            return failed_to_start(path, options, started, error);
         }
     };
     let mut sampler = Sampler::default();

@@ -1,9 +1,16 @@
-//! Framing-quality metrics.
+//! Framing-quality metrics, and the per-tick trace they score.
 //!
 //! The rebuild gates releases on measured framing quality, not just plumbing
 //! tests. These metrics score a crop path against ground-truth subject boxes
 //! sampled at a fixed frame interval. Annotated real footage plugs into the
 //! same functions once it exists.
+//!
+//! [`trace`] is the public schema of the engine's per-tick trace
+//! ([`TraceRecord`], one JSON line per tick), which `ac-engine` emits and
+//! the app's `--trace` writes: the subject boxes, targets and crops of a
+//! real run, for scoring offline. The schema lives here, below the engine,
+//! so that scorers read a trace without the runtime; this crate depends
+//! only on `ac-core`, `serde` and `serde_json` (a test checks it).
 
 pub mod trace;
 

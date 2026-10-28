@@ -63,7 +63,7 @@ pub struct Summary {
     pub timing: TimingSummary,
     /// The output session, when one was started.
     pub output: Option<OutputSummary>,
-    /// The per-tick trace, with `--trace`.
+    /// The per-tick trace, with `--trace` and an engine that started.
     pub trace: Option<TraceSummary>,
     /// Shots that should have been on program but were drawn black.
     pub render_issues: Vec<String>,
