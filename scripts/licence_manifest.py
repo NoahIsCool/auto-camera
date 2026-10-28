@@ -4,31 +4,43 @@
 cargo-deny (`deny.toml`) checks the licence of every crate. It cannot see
 the parts the app runs, links or loads that do not come from crates.io: the
 ffmpeg programs, the ONNX Runtime library that `ort` links in, model
-weights and the detector sidecar's Python packages. Their licences are in
-`docs/licence-manifest.md`, and this check keeps that file complete: it
-finds each such component from what the repository itself declares, and
-every one must have a valid row in the manifest's table.
+weights, and the detector sidecar's interpreter and Python packages. Their
+licences are in `docs/licence-manifest.md`, and this check keeps that file
+complete: it finds each such component from what the repository itself
+declares, and every one must have a valid row in the manifest's table.
 
 A component is found, and named by an id, by these rules:
 
-* `pypi:<name>`: each requirement of a `sidecars/*/requirements.txt`, and
-  of the files it includes with `-r`, named as pip compares names (lower
-  case, each run of `-`, `_` and `.` as one `-`). A requirement with no
-  project name, a bare URL or path, is a problem: it cannot be named.
+* `pypi:<name>`: each project pip would install from a
+  `sidecars/*/requirements.txt`, named as pip compares names (lower case,
+  each run of `-`, `_` and `.` as one `-`). The file is read as pip 24
+  reads it (see `requirement_names`): its requirements and editables
+  (`-e`), those of the files it includes (`-r`), and those that a
+  constraints file (`-c`) includes, since pip only limits the versions of
+  what a constraints file names. A project the check cannot name is a
+  problem: a bare URL or path (write `name @ url`), an editable with no
+  `#egg=` name, and a line whose options pip would reject or ignore.
 * `model:<folder>`: each model path in the `[detector]` table of a studio
   config, `config/*.toml` or `config/*.json` (`model`, `text_encoder`,
   `tokenizer`, and the argument of `--model` in `command`), named by the
   folder it is or is in: a last path component with an extension is a
   file, and its folder is its parent.
+* `native:<program>`: the program the `[detector]` table of a studio
+  config runs (the first element of its `command`), named by its file
+  name; a Python interpreter (`python`, `python3`, `python3.13`) is
+  `native:python`.
 * `native:onnxruntime`: a dependency on the `ort` crate, under any name, in
   a crate manifest under `crates/` or `apps/` (ort links ONNX Runtime into
   the binary).
 * `native:ffmpeg`: the string literal `"ffmpeg"` or `"ffprobe"` in a Rust
   source under `crates/*/src` or `apps/*/src` (the tools are run by name).
 
-The first two rules find new components by themselves. The last two cover
-the only external program and native library the app uses today; a new one
-needs a rule here.
+The first three rules find new components by themselves: every project
+pip would install from a sidecar's requirements is found or reported, and
+the check may find more than pip installs (pip reads only the first
+requirement, editable or include of a line, the check all of them). The
+last two cover the one native library the app links and the one program
+it runs under a fixed name today; a new one needs a rule here.
 
 The manifest's table is the one whose header row starts with `Id`, and its
 columns are exactly `COLUMNS` (cells may not contain `|`). A row is valid
@@ -47,7 +59,9 @@ component has a valid row, 1 when one has none or the manifest is invalid
 
 import argparse
 import json
+import optparse
 import re
+import shlex
 import sys
 import tomllib
 from pathlib import Path, PurePosixPath
@@ -68,10 +82,37 @@ DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 REQUIREMENT_NAME = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?=\s*(?:$|[\[(<>=!~;@,]))"
 )
-#: A `-r FILE` / `--requirement FILE` include; group 1 is the file.
-INCLUDE = re.compile(r"(?:-r|--requirement)(?:\s+|=)(\S+)")
+#: The options pip 24 takes in a requirements file
+#: (`pip._internal.req.req_file`): the spellings of each, and whether it
+#: takes a value. Only `-r`, `-c` and `-e` read or install anything; pip
+#: rejects a line with any other option.
+PIP_OPTIONS = (
+    (("-i", "--index-url", "--pypi-url"), True),
+    (("--extra-index-url",), True),
+    (("--no-index",), False),
+    (("-c", "--constraint"), True),
+    (("-r", "--requirement"), True),
+    (("-e", "--editable"), True),
+    (("-f", "--find-links"), True),
+    (("--no-binary",), True),
+    (("--only-binary",), True),
+    (("--prefer-binary",), False),
+    (("--require-hashes",), False),
+    (("--pre",), False),
+    (("--trusted-host",), True),
+    (("--use-feature",), True),
+    (("--global-option",), True),
+    (("--hash",), True),
+    (("-C", "--config-settings"), True),
+)
 #: A pip comment: `#` at the start of a line or after white space.
-COMMENT = re.compile(r"(?:^|\s)#.*")
+COMMENT = re.compile(r"(?:^|\s+)#.*")
+#: The `#egg=` name of an editable; group 1 is the name and any extras.
+EGG = re.compile(r"[#&]egg=([^&]*)")
+#: An include that pip downloads instead of reading a file.
+URL = re.compile(r"(?:http|https|file):", re.IGNORECASE)
+#: The file name of a Python interpreter: `python`, `python3`, `python3.13`.
+PYTHON = re.compile(r"python[0-9.]*")
 #: String literals naming the ffmpeg tools in Rust source.
 FFMPEG_LITERAL = re.compile(r'"(?:ffmpeg|ffprobe)"')
 #: An id in backquotes in the Id column; group 1 is the id.
@@ -91,34 +132,134 @@ def shown(path, root):
     return path.relative_to(root) if path.is_relative_to(root) else path
 
 
-def requirement_names(path, root, problems, seen=None):
-    """The project names that the requirements file `path` lists, and those
-    of the files it includes with `-r`, as `(name, file)` pairs. Comments,
-    blank lines and other options are skipped. An include that does not
-    exist, and a requirement without a project name (a bare URL or path),
-    go to `problems`, the file named relative to `root`. `seen` stops
-    include cycles."""
-    seen = set() if seen is None else seen
-    if path in seen:
-        return []
-    seen.add(path)
-    found = []
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        line = COMMENT.sub("", raw).strip()
-        where = f"{shown(path, root)}:{number}"
-        if not line:
+class OptionError(Exception):
+    """An option of a requirements line that pip would reject."""
+
+
+class LineOptions(optparse.OptionParser):
+    """pip's parser for the options of one requirements line: the options
+    of `PIP_OPTIONS`, spelled as optparse allows (`-rFILE`, `-r FILE`,
+    `--requirement=FILE`, and a long option cut short where that is
+    unambiguous, as `--edit URL`), each value option collecting its values
+    in order. Raises `OptionError` where optparse would exit."""
+
+    def __init__(self):
+        super().__init__(add_help_option=False)
+        for flags, takes_value in PIP_OPTIONS:
+            self.add_option(*flags, action="append" if takes_value else "store_true")
+
+    def error(self, msg):
+        """Raises `OptionError` with optparse's message instead of exiting."""
+        raise OptionError(msg)
+
+
+def logical_lines(text):
+    """The lines of the requirements file `text` as pip reads them, as
+    `(line number, line)` pairs: a line ending in `\\` joined to the next
+    (except a comment line, which ends the join), then comments removed,
+    white space stripped and blank lines dropped. A joined line has the
+    number of its first line. As in pip, a comment on a line ending in
+    `\\` takes the lines joined to it along."""
+    joined, pending, first = [], [], None
+    for number, line in enumerate(text.splitlines(), 1):
+        comment = COMMENT.match(line)
+        if line.endswith("\\") and not comment:
+            if not pending:
+                first = number
+            pending.append(line.strip("\\"))
             continue
-        if line.startswith("-"):
-            if include := INCLUDE.fullmatch(line):
-                target = path.parent / include.group(1)
-                if target.is_file():
-                    found += requirement_names(target, root, problems, seen)
-                else:
-                    problems.append(f"{where}: includes {include.group(1)}, which does not exist")
-        elif name := REQUIREMENT_NAME.match(line):
-            found.append((normalize(name.group(0)), path))
+        if comment:
+            line = f" {line}"  # stays a comment once joined
+        if pending:
+            joined.append((first, "".join(pending) + line))
+            pending = []
         else:
-            problems.append(f"{where}: no project name in {line!r}; write it as `name @ url`")
+            joined.append((number, line))
+    if pending:
+        joined.append((first, "".join(pending)))
+    stripped = [(number, COMMENT.sub("", line).strip()) for number, line in joined]
+    return [(number, line) for number, line in stripped if line]
+
+
+def split_options(line):
+    """`line` split as pip splits it: the requirement, the words before the
+    first word that starts with `-`, and the options, the words from it on
+    (words are separated by single spaces)."""
+    words = line.split(" ")
+    start = next((i for i, word in enumerate(words) if word.startswith("-")), len(words))
+    return " ".join(words[:start]), " ".join(words[start:])
+
+
+def editable_name(value):
+    """The project name of the editable `value` (the argument of `-e`): the
+    name of its `#egg=` fragment, the only place pip finds one before it
+    installs (it takes a local path or a VCS URL there, not `name @ url`),
+    or None."""
+    egg = EGG.search(value)
+    name = egg and REQUIREMENT_NAME.match(egg.group(1))
+    return name.group(0) if name else None
+
+
+def requirement_names(path, root, problems, seen=None, constraints=False):
+    """The project names that pip would install from the requirements file
+    `path`, as `(name, file)` pairs; `constraints` reads it as a
+    constraints file (`-c`), whose own requirements and editables pip does
+    not install. Each line is read as pip reads it (`logical_lines`,
+    `split_options`, `LineOptions`); its requirement, each editable, and
+    each include are all read, where pip reads only the first of them.
+    What cannot be named or read goes to `problems`, the file named
+    relative to `root`: a requirement without a project name (a bare URL
+    or path), an editable without an `#egg=` name, an include that is a
+    URL or does not exist, options pip would reject, and words pip would
+    ignore after an option. `seen` holds the files read, resolved and with
+    how they were read, so include cycles stop whatever path names them."""
+    seen = set() if seen is None else seen
+    path = path.resolve()
+    if (path, constraints) in seen:
+        return []
+    seen.add((path, constraints))
+    found = []
+    for number, line in logical_lines(path.read_text(encoding="utf-8")):
+        where = f"{shown(path, root)}:{number}"
+        requirement, options = split_options(line)
+        try:
+            opts, ignored = LineOptions().parse_args(shlex.split(options))
+        except ValueError as e:
+            problems.append(f"{where}: cannot split the options {options!r}: {e}")
+            continue
+        except OptionError as e:
+            problems.append(f"{where}: pip rejects the line: {e}")
+            continue
+        if ignored:
+            problems.append(
+                f"{where}: pip ignores {' '.join(ignored)!r} after an option; "
+                "give each requirement its own line"
+            )
+        if requirement and not constraints:
+            if name := REQUIREMENT_NAME.match(requirement):
+                found.append((normalize(name.group(0)), path))
+            else:
+                problems.append(
+                    f"{where}: no project name in {requirement!r}; write it as `name @ url`"
+                )
+        for editable in [] if constraints else opts.editable or []:
+            if name := editable_name(editable):
+                found.append((normalize(name), path))
+            else:
+                problems.append(
+                    f"{where}: no project name in the editable {editable!r}; "
+                    "give it one with #egg=name"
+                )
+        includes = [(f, False) for f in opts.requirement or []]
+        includes += [(f, True) for f in opts.constraint or []]
+        for include, as_constraints in includes:
+            target = path.parent / include
+            if URL.match(include):
+                problems.append(f"{where}: includes {include}, a URL, which the check cannot read")
+            elif target.is_file():
+                found += requirement_names(target, root, problems, seen, as_constraints)
+            else:
+                problems.append(f"{where}: includes {include}, which does not exist")
     return found
 
 
@@ -150,6 +291,21 @@ def detector_model_paths(config):
             elif arg.startswith("--model="):
                 paths.append(arg.removeprefix("--model="))
     return [p for p in paths if p]
+
+
+def detector_program(config):
+    """The id of the program that the `[detector]` table of the parsed
+    studio config `config` runs, the first element of its `command`:
+    `native:` and its file name, `native:python` for a Python interpreter
+    (`PYTHON`); None without a command."""
+    detector = config.get("detector")
+    command = detector.get("command") if isinstance(detector, dict) else None
+    if not isinstance(command, list) or not command or not isinstance(command[0], str):
+        return None
+    name = PurePosixPath(command[0]).name
+    if not name:
+        return None
+    return "native:python" if PYTHON.fullmatch(name) else f"native:{name}"
 
 
 def depends_on_ort(manifest):
@@ -196,6 +352,8 @@ def components(root, problems):
             continue
         for model in detector_model_paths(config):
             add(f"model:{model_folder(model)}", path)
+        if program := detector_program(config):
+            add(program, path)
     for path in sorted([*root.glob("crates/*/Cargo.toml"), *root.glob("apps/*/Cargo.toml")]):
         try:
             manifest = tomllib.loads(path.read_text(encoding="utf-8"))

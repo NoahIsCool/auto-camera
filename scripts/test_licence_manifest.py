@@ -23,6 +23,7 @@ COMPLETE = (
     + HEADER
     + row("`native:ffmpeg`", "LGPL-2.1-or-later")
     + row("`native:onnxruntime`")
+    + row("`native:python`", "PSF-2.0")
     + row("`model:owl`, `model:sam`", "Apache-2.0", checked="partly")
     + row("`pypi:mlx`")
     + "\nNotes after the table.\n"
@@ -96,13 +97,20 @@ class LicenceManifestTest(unittest.TestCase):
     def test_a_complete_manifest_passes(self):
         self.assertEqual(
             self.tree.found(),
-            ["model:owl", "model:sam", "native:ffmpeg", "native:onnxruntime", "pypi:mlx"],
+            [
+                "model:owl",
+                "model:sam",
+                "native:ffmpeg",
+                "native:onnxruntime",
+                "native:python",
+                "pypi:mlx",
+            ],
         )
         self.assertEqual(self.tree.missing(), [])
         self.assertEqual(self.tree.problems(), [])
         status, out = self.tree.main()
         self.assertEqual(status, 0)
-        self.assertIn("5 non-crate components, each with a licence entry", out)
+        self.assertIn("6 non-crate components, each with a licence entry", out)
 
     def test_a_new_requirement_without_an_entry_fails(self):
         self.tree.write("sidecars/demo/requirements.txt", "mlx==0.32.3\nPillow>=10\n")
@@ -152,6 +160,34 @@ class LicenceManifestTest(unittest.TestCase):
         self.tree.write("apps/app/src/ui/deep.rs", 'let tool = "ffprobe";\n')
         self.assertEqual(self.tree.missing(), ["native:ffmpeg"])
 
+    def test_a_detector_program_needs_an_entry_named_by_its_file(self):
+        self.tree.write(
+            "docs/licence-manifest.md", COMPLETE.replace(row("`native:python`", "PSF-2.0"), "")
+        )
+        self.assertEqual(self.tree.missing(), ["native:python"])
+        self.tree.write(
+            "config/sidecar.toml",
+            '[detector]\nkind = "sidecar"\ncommand = ["/opt/bin/python3.13", "server.py"]\n',
+        )
+        self.assertEqual(self.tree.missing(), ["native:python"])
+        self.tree.write(
+            "config/sidecar.toml",
+            '[detector]\nkind = "sidecar"\ncommand = ["uv", "run", "--model", "../models/sam"]\n',
+        )
+        self.assertEqual(self.tree.missing(), ["native:uv"])
+        program = licence_manifest.detector_program
+        self.assertEqual(
+            program({"detector": {"command": ["../venv/bin/python"]}}), "native:python"
+        )
+        self.assertEqual(program({"detector": {"command": ["python3"]}}), "native:python")
+        self.assertEqual(program({"detector": {"command": ["./pythonista"]}}), "native:pythonista")
+        self.assertIsNone(program({"detector": {"command": []}}))
+        self.assertIsNone(program({"detector": {"command": [3, "x"]}}))
+        self.assertIsNone(program({"detector": {"command": "python3 server.py"}}))
+        self.assertIsNone(program({"detector": {"kind": "owl"}}))
+        self.assertIsNone(program({"detector": "owl"}))
+        self.assertIsNone(program({}))
+
     def test_requirement_lines_are_read_as_pip_reads_them(self):
         self.tree.write(
             "sidecars/demo/requirements.txt",
@@ -167,6 +203,133 @@ class LicenceManifestTest(unittest.TestCase):
             [c for c in self.tree.found() if c.startswith("pypi:")],
             ["pypi:foo-bar-baz", "pypi:mlx", "pypi:mlx-vlm", "pypi:numpy"],
         )
+
+    def test_editables_are_named_by_their_egg_fragment(self):
+        self.tree.write(
+            "sidecars/demo/requirements.txt",
+            "mlx\n"
+            "-e git+https://github.com/ultralytics/ultralytics@abc123#egg=ultralytics\n"
+            "--editable git+https://github.com/a/b.git#egg=Foo_Bar[x]\n"
+            "--edit=git+https://github.com/a/c.git#subdirectory=py&egg=baz\n",
+        )
+        self.assertEqual(self.tree.missing(), ["pypi:baz", "pypi:foo-bar", "pypi:ultralytics"])
+        self.assertEqual(self.tree.problems(), [])
+        status, out = self.tree.main()
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "pypi:ultralytics has no licence entry in docs/licence-manifest.md "
+            "(found in sidecars/demo/requirements.txt)",
+            out,
+        )
+
+    def test_an_editable_without_a_name_is_a_problem(self):
+        self.tree.write(
+            "sidecars/demo/requirements.txt",
+            "mlx\n-e ./vendored\n-e git+https://github.com/a/b.git\n",
+        )
+        self.assertEqual(
+            self.tree.problems(),
+            [
+                "sidecars/demo/requirements.txt:2: no project name in the editable "
+                "'./vendored'; give it one with #egg=name",
+                "sidecars/demo/requirements.txt:3: no project name in the editable "
+                "'git+https://github.com/a/b.git'; give it one with #egg=name",
+            ],
+        )
+        self.assertEqual(self.tree.main()[0], 1)
+
+    def test_includes_are_read_in_every_spelling_pip_takes(self):
+        self.tree.write(
+            "sidecars/demo/requirements.txt",
+            "-rmore.txt\n"
+            "--requirement=a.txt\n"
+            "--requirem b.txt\n"
+            "--index-url https://pypi.org/simple -r c.txt\n"
+            "-r \\\n"
+            "  d.txt\n",
+        )
+        for name in ("more", "a", "b", "c", "d"):
+            self.tree.write(f"sidecars/demo/{name}.txt", f"pkg-{name}\n")
+        self.assertEqual(
+            self.tree.missing(), [f"pypi:pkg-{n}" for n in ("a", "b", "c", "d", "more")]
+        )
+        self.assertEqual(self.tree.problems(), [])
+
+    def test_a_constraints_file_installs_only_what_it_includes(self):
+        self.tree.write("sidecars/demo/requirements.txt", "mlx\n-c constraints.txt\n")
+        self.tree.write(
+            "sidecars/demo/constraints.txt",
+            "numpy<3\n-e git+https://github.com/a/b.git#egg=bar\n-r extra.txt\n",
+        )
+        self.tree.write("sidecars/demo/extra.txt", "scipy\n")
+        self.assertEqual(
+            [c for c in self.tree.found() if c.startswith("pypi:")], ["pypi:mlx", "pypi:scipy"]
+        )
+        self.assertEqual(self.tree.problems(), [])
+        self.tree.write("sidecars/demo/requirements.txt", "mlx\n-c gone.txt\n")
+        self.assertEqual(
+            self.tree.problems(),
+            ["sidecars/demo/requirements.txt:2: includes gone.txt, which does not exist"],
+        )
+
+    def test_continued_lines_are_joined_as_pip_joins_them(self):
+        self.tree.write(
+            "sidecars/demo/requirements.txt",
+            "mlx==0.32.3 \\\n"
+            "    --hash=sha256:aaa \\\n"
+            "    --hash=sha256:bbb\n"
+            "numpy==2 --hash=sha256:ccc\n"
+            "Pillow # a comment ending in a backslash takes the next line \\\n"
+            "opencv-python\n",
+        )
+        self.assertEqual(
+            [c for c in self.tree.found() if c.startswith("pypi:")],
+            ["pypi:mlx", "pypi:numpy", "pypi:pillow"],
+        )
+        self.assertEqual(self.tree.problems(), [])
+        self.assertEqual(
+            licence_manifest.logical_lines("a \\\n# note \\\nb\n"), [(1, "a"), (3, "b")]
+        )
+
+    def test_an_option_pip_rejects_or_ignores_is_a_problem(self):
+        self.tree.write(
+            "sidecars/demo/requirements.txt",
+            "mlx\n--bogus x\n-r\n--req more.txt\n--pre ultralytics\n-e 'unclosed\n",
+        )
+        where = "sidecars/demo/requirements.txt"
+        self.assertEqual(
+            self.tree.problems(),
+            [
+                f"{where}:2: pip rejects the line: no such option: --bogus",
+                f"{where}:3: pip rejects the line: -r option requires 1 argument",
+                f"{where}:4: pip rejects the line: ambiguous option: --req "
+                "(--require-hashes, --requirement?)",
+                f"{where}:5: pip ignores 'ultralytics' after an option; "
+                "give each requirement its own line",
+                f'{where}:6: cannot split the options "-e \'unclosed": No closing quotation',
+            ],
+        )
+        self.assertEqual(self.tree.main()[0], 1)
+
+    def test_an_included_url_is_a_problem(self):
+        self.tree.write(
+            "sidecars/demo/requirements.txt", "mlx\n-r https://example.org/requirements.txt\n"
+        )
+        self.assertEqual(
+            self.tree.problems(),
+            [
+                "sidecars/demo/requirements.txt:2: includes "
+                "https://example.org/requirements.txt, a URL, which the check cannot read"
+            ],
+        )
+
+    def test_include_cycles_stop_across_folders(self):
+        self.tree.write("sidecars/demo/requirements.txt", "mlx\n-r ../other/requirements.txt\n")
+        self.tree.write("sidecars/other/requirements.txt", "numpy\n-r ../demo/./requirements.txt\n")
+        self.assertEqual(
+            [c for c in self.tree.found() if c.startswith("pypi:")], ["pypi:mlx", "pypi:numpy"]
+        )
+        self.assertEqual(self.tree.problems(), [])
 
     def test_a_missing_include_is_a_problem(self):
         self.tree.write("sidecars/demo/requirements.txt", "mlx\n-r gone.txt\n")
@@ -230,13 +393,13 @@ class LicenceManifestTest(unittest.TestCase):
         self.assertEqual(
             self.tree.problems(),
             [
-                "docs/licence-manifest.md:9: no id in backquotes in the Id column",
-                "docs/licence-manifest.md:10: `pypi:a b` is not kind:name "
+                "docs/licence-manifest.md:10: no id in backquotes in the Id column",
+                "docs/licence-manifest.md:11: `pypi:a b` is not kind:name "
                 "(kind pypi, model or native)",
-                "docs/licence-manifest.md:11: the Licence column is empty",
-                "docs/licence-manifest.md:12: the Licence source column has no https:// link",
-                "docs/licence-manifest.md:13: Checked is 'maybe', not one of yes, partly, no",
-                "docs/licence-manifest.md:14: `pypi:mlx` is already in the row on line 8",
+                "docs/licence-manifest.md:12: the Licence column is empty",
+                "docs/licence-manifest.md:13: the Licence source column has no https:// link",
+                "docs/licence-manifest.md:14: Checked is 'maybe', not one of yes, partly, no",
+                "docs/licence-manifest.md:15: `pypi:mlx` is already in the row on line 9",
             ],
         )
         self.assertEqual(self.tree.main()[0], 1)
@@ -247,7 +410,7 @@ class LicenceManifestTest(unittest.TestCase):
         self.tree.write(
             "docs/licence-manifest.md", COMPLETE.replace("\nNotes", "| `pypi:q` | x |\n\nNotes")
         )
-        self.assertEqual(self.tree.problems(), ["docs/licence-manifest.md:9: 2 cells, not 5"])
+        self.assertEqual(self.tree.problems(), ["docs/licence-manifest.md:10: 2 cells, not 5"])
 
     def test_the_table_must_have_the_documented_columns(self):
         self.tree.write(
@@ -269,7 +432,7 @@ class LicenceManifestTest(unittest.TestCase):
     def test_a_missing_manifest_fails(self):
         (self.tree.root / "docs/licence-manifest.md").unlink()
         self.assertEqual(self.tree.problems(), ["docs/licence-manifest.md: missing"])
-        self.assertEqual(len(self.tree.missing()), 5)
+        self.assertEqual(len(self.tree.missing()), 6)
         self.assertEqual(self.tree.main()[0], 1)
 
     def test_an_unused_entry_is_only_a_note(self):

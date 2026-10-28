@@ -2,7 +2,7 @@
 
 cargo-deny checks the licence of every crate the app is built from
 ([`deny.toml`](../deny.toml)) and denies AGPL, GPL and LGPL crates. This
-file covers what it cannot see: the program, native library, model
+file covers what it cannot see: the programs, native library, model
 weights and Python packages that Auto Camera runs, links or loads but that
 do not come from crates.io. [`scripts/licence_manifest.py`](../scripts/licence_manifest.py)
 finds them in the repository (its docs give the rules), and CI fails when
@@ -23,6 +23,7 @@ id in backquotes (the check prints the ids it is missing), a licence, an
 |---|---|---|---|---|
 | `native:ffmpeg` | FFmpeg: the `ffmpeg` and `ffprobe` programs | LGPL-2.1-or-later; GPL-2.0-or-later when built with `--enable-gpl` (libx264 needs it); GPL-3.0-or-later with `--enable-version3` too | [FFmpeg `LICENSE.md`](https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md) | yes |
 | `native:onnxruntime` | ONNX Runtime 1.28.0, linked into the app with `--features onnx` | MIT, and the licences of the code it includes | [`LICENSE`](https://github.com/microsoft/onnxruntime/blob/v1.28.0/LICENSE), [`ThirdPartyNotices.txt`](https://github.com/microsoft/onnxruntime/blob/v1.28.0/ThirdPartyNotices.txt) | partly |
+| `native:python` | CPython, the interpreter the SAM sidecar's `command` names (the user's own, 3.10 or newer, unpinned) | PSF-2.0; the code it includes under its own licences | [CPython `LICENSE`](https://github.com/python/cpython/blob/main/LICENSE), [incorporated software, `Doc/license.rst`](https://github.com/python/cpython/blob/main/Doc/license.rst) | yes |
 | `model:owlv2-split-onnx` | OWLv2 base patch16 ensemble weights (Google), exported to ONNX, with their tokenizer | Apache-2.0 | [scenic OWL-ViT README, License](https://github.com/google-research/scenic/blob/main/scenic/projects/owl_vit/README.md#license), [`LICENSE`](https://github.com/google-research/scenic/blob/main/LICENSE) | partly |
 | `model:sam31-mlx` | SAM 3.1 weights (Meta), converted to MLX, with their tokenizer | SAM License (Meta, last updated 19 November 2025) | [facebookresearch/sam3 `LICENSE`](https://github.com/facebookresearch/sam3/blob/main/LICENSE); copy in [`SAM_LICENSE.txt`](../sidecars/sam3-mlx/SAM_LICENSE.txt) | partly |
 | `pypi:mlx` | MLX 0.32.3 (Apple) | MIT | [`LICENSE` at v0.32.3](https://github.com/ml-explore/mlx/blob/v0.32.3/LICENSE) | yes |
@@ -90,6 +91,35 @@ components the static library contains.
 `LICENSE` and `ThirdPartyNotices.txt` (MIT asks for the notice in every
 copy). Eigen's MPL-2.0 asks that recipients of the binary be told where its
 source is; it does not extend to the app.
+
+## Python
+
+**What and where from.** The SAM sidecar is a Python program, and the
+detector's `command` starts it with an interpreter: in the example config
+`models/sam3/.venv/bin/python`, the one of the virtual environment the
+user creates (Python 3.10 or newer, from python.org, Homebrew or another
+build). Auto Camera ships none. CI runs the sidecar's tests with the
+runner's `python3`.
+
+**Licence.** CPython's `LICENSE`, read on `main`: "Python software and
+documentation are licensed under the Python Software Foundation License
+Version 2" (PSF-2.0); the file also keeps the BeOpen, CNRI and CWI
+agreements of the releases Python derives from, and code in the
+documentation is under 0BSD as well. `Doc/license.rst` lists software
+incorporated under other licences, among them expat, libffi, zlib,
+libmpdec and mimalloc, and OpenSSL (Apache-2.0 from OpenSSL 3.0), which
+`hashlib` and `ssl` use when the build has it and the macOS and Windows
+installers include.
+
+**Not covered:** which libraries a given interpreter build links or
+bundles (OpenSSL, SQLite, Tcl/Tk, readline and others), which depends on
+where it came from.
+
+**Obligations.** None while the user provides the interpreter. A bundle
+that ships one must keep the PSF licence agreement and PSF's copyright
+notice with it (clause 2 of the agreement), add a brief summary of the
+changes to a modified Python (clause 3), and include the licences of what
+that build incorporates.
 
 ## OWLv2 weights
 

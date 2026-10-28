@@ -2,8 +2,8 @@
 # the RustSec advisories against them. CI runs
 # `cargo deny --all-features --locked check advisories licenses` with
 # EmbarkStudios/cargo-deny-action (.github/workflows/ci.yml); parts that are
-# not crates (ffmpeg, ONNX Runtime, model weights, the sidecar's Python
-# packages) are in docs/licence-manifest.md instead.
+# not crates (ffmpeg, ONNX Runtime, model weights, the sidecar's interpreter
+# and Python packages) are in docs/licence-manifest.md instead.
 #
 # Schema: cargo-deny 0.20 (the version the pinned action runs). Every
 # licence not allowed below is denied, so changing this file is the one way
