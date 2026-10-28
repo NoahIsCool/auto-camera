@@ -27,7 +27,11 @@
 //!   immutable [`EngineSnapshot`] every tick. See [`runtime`] for the
 //!   threads, channels and mailboxes.
 //! * [`StudioConfig`] describes a studio (sources, queries, detector,
-//!   output, director, framing) as TOML or JSON.
+//!   output, director, framing) as TOML or JSON, in a layout named by its
+//!   `schema` key ([`SCHEMA_VERSION`]).
+//! * [`readiness`] checks a studio before a show without starting it: the
+//!   config's every problem, and the files, tools and folders it names
+//!   (`auto-camera --check`).
 //! * [`queries`] reads each query's prompt once, when it is created: the
 //!   detector is asked for the parsed phrase ("speaker upper body" asks for
 //!   "a person speaking"), and the prompt's shot words pick its framings
@@ -54,6 +58,7 @@ pub mod discovery;
 pub mod mailbox;
 pub mod output;
 pub mod queries;
+pub mod readiness;
 pub mod runtime;
 pub mod schedule;
 pub mod snapshot;
@@ -62,11 +67,13 @@ pub mod vision;
 pub use catalog::{ShotStatus, subject_shot_id, wide_shot_id};
 pub use command::{CommandError, CommandReply, EngineCommand};
 pub use config::{
-    ConfigError, DetectorSettings, EncoderSetting, MonitorSettings, OutputSettings, PresetSpec,
-    QuerySettings, SidecarSettings, SourceEntry, StudioConfig, preset_for,
+    ConfigError, DetectorSettings, EncoderSetting, LoadedConfig, MonitorSettings, OutputSettings,
+    PresetSpec, QuerySettings, SCHEMA_VERSION, SidecarSettings, SourceEntry, StudioConfig,
+    preset_for,
 };
 pub use core::{EngineCore, SourceFeed, TickOutput};
 pub use queries::{PromptReader, build_query, default_presets, read_prompt, shot_presets};
+pub use readiness::{Readiness, SystemInspector};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};
 pub use snapshot::{
     DirectorView, EngineSnapshot, MatchView, OutputState, OutputView, PassOutcome, QueryView,

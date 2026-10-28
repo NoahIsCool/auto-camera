@@ -6,11 +6,38 @@
 //! and [`OutputSettings::to_output_config`] builds one session's
 //! [`OutputConfig`] from both. [`EncoderSetting`] is the config's spelling
 //! of [`ac_output::Encoder`].
+//!
+//! # One set of ranges
+//!
+//! The encoder refuses a value outside its ranges ([`OutputConfig::validate`]:
+//! even sizes up to 7680x4320, 1..=120 fps, 100..=100000 kbit/s video,
+//! 32..=512 kbit/s audio, a keyframe every 1..=10 s). A config that passed
+//! looser checks of its own would load and then fail when the operator
+//! starts the output, possibly minutes into a show, so
+//! [`OutputSettings::validate`] asks the encoder's own check instead of
+//! repeating its numbers: it builds the session config a start would build,
+//! with a stand-in recording path when the table names no destination and
+//! a stand-in audio format so the AAC bitrate is checked whether or not
+//! `audio_source` is set. The check stays pure: whether a recording path
+//! exists, or its folder does, is asked at start (and by the readiness
+//! check, [`crate::readiness`]).
 
 use std::path::PathBuf;
 
-use ac_output::{AudioFormat, Encoder, OutputConfig};
+use ac_output::{AudioFormat, Encoder, OutputConfig, OutputError};
 use serde::{Deserialize, Serialize};
+
+/// The recording path checked when the table names no destination: any
+/// valid one, since only the other values are in question then.
+const STAND_IN_RECORDING: &str = "program.mp4";
+
+/// The audio format checked with, a valid one, so the encoder's check
+/// covers `audio_bitrate_kbps`; a session's real format comes from its
+/// source when the output starts.
+const STAND_IN_AUDIO: AudioFormat = AudioFormat {
+    sample_rate: 48_000,
+    channels: 2,
+};
 
 /// Which H.264 encoder to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -39,15 +66,15 @@ impl From<EncoderSetting> for Encoder {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OutputSettings {
-    /// Program width in pixels; even.
+    /// Program width in pixels; even, `16..=7680`.
     pub width: u32,
-    /// Program height in pixels; even.
+    /// Program height in pixels; even, `16..=4320`.
     pub height: u32,
-    /// Program frames per second; also the master clock rate.
+    /// Program frames per second, `1..=120`; also the master clock rate.
     pub fps: u32,
-    /// Video bitrate in kbit/s.
+    /// Video bitrate in kbit/s, `100..=100000`.
     pub video_bitrate_kbps: u32,
-    /// Seconds between keyframes.
+    /// Seconds between keyframes, `1..=10`; 2 suits RTMP ingest.
     pub keyframe_seconds: u32,
     /// H.264 encoder.
     pub encoder: EncoderSetting,
@@ -55,13 +82,17 @@ pub struct OutputSettings {
     /// `AC_FFMPEG`, else `ffmpeg` on `PATH` (on macOS also Homebrew's
     /// directories), so one setting serves both.
     pub ffmpeg: PathBuf,
-    /// Default RTMP URL (with stream key) for `StartOutput`.
+    /// Default RTMP URL (with stream key) for `StartOutput`; `rtmp://` or
+    /// `rtmps://`. Empty means none.
     pub rtmp_url: Option<String>,
-    /// Default recording path for `StartOutput`.
+    /// Default recording path for `StartOutput`; it must not exist when the
+    /// output starts. Empty means none. Unlike the config's other paths, a
+    /// relative one is taken from the working folder, as a path typed at
+    /// Start Output is.
     pub record_path: Option<PathBuf>,
     /// Source whose embedded audio becomes program audio; silent when unset.
     pub audio_source: Option<String>,
-    /// AAC bitrate in kbit/s.
+    /// AAC bitrate in kbit/s, `32..=512`.
     pub audio_bitrate_kbps: u32,
 }
 
@@ -84,25 +115,24 @@ impl Default for OutputSettings {
 }
 
 impl OutputSettings {
-    /// Checks sizes, rate and bitrates.
+    /// Checks every value with the encoder's own ranges, as a start would
+    /// (see the module docs); the message names the key.
     pub fn validate(&self) -> Result<(), String> {
-        let even = |v: u32| v.is_multiple_of(2) && (16..=7680).contains(&v);
-        if !even(self.width) || !even(self.height) {
-            return Err(format!(
-                "output size {}x{} must be even and within 16..=7680",
-                self.width, self.height
-            ));
-        }
-        if !(1..=120).contains(&self.fps) {
-            return Err(format!("output.fps {} is outside 1..=120", self.fps));
-        }
-        if self.video_bitrate_kbps == 0 || self.audio_bitrate_kbps == 0 {
-            return Err("output bitrates must be positive".into());
-        }
-        if !(1..=60).contains(&self.keyframe_seconds) {
-            return Err("output.keyframe_seconds must be in 1..=60".into());
-        }
-        Ok(())
+        let rtmp_url = self.rtmp_url.clone().filter(|u| !u.trim().is_empty());
+        let record_path = self
+            .record_path
+            .clone()
+            .filter(|p| !p.as_os_str().is_empty());
+        let record_path = match (&rtmp_url, record_path) {
+            (None, None) => Some(PathBuf::from(STAND_IN_RECORDING)),
+            (_, path) => path,
+        };
+        self.to_output_config(rtmp_url, record_path, Some(STAND_IN_AUDIO))
+            .validate()
+            .map_err(|e| match e {
+                OutputError::InvalidConfig(message) => format!("output: {message}"),
+                other => format!("output: {other}"),
+            })
     }
 
     /// The encoder config for one output session.
@@ -127,3 +157,6 @@ impl OutputSettings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

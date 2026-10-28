@@ -64,6 +64,12 @@ pub fn notice_for(
     }
 }
 
+/// The notice for the config's load warnings (a missing `schema` key), all
+/// of them in order; not an error, since the studio runs.
+pub fn warnings_notice(warnings: &[String]) -> Option<(String, bool)> {
+    (!warnings.is_empty()).then(|| (format!("warning: {}", warnings.join(" · ")), false))
+}
+
 /// The notice for an engine that is no longer running, with the reason when
 /// it died rather than stopped on request; it replaces any other notice.
 pub fn stopped_notice(snap: &ac_engine::EngineSnapshot) -> Option<(String, bool)> {
@@ -137,6 +143,19 @@ impl OperatorApp {
     /// The same app, closing its window once `quit` is requested.
     pub fn with_quit(mut self, quit: QuitSignal) -> Self {
         self.quit = quit;
+        self
+    }
+
+    /// The same app, opening with the config's load `warnings` in the
+    /// status bar (for as long as any notice stays).
+    pub fn with_warnings(mut self, warnings: &[String]) -> Self {
+        if let Some((text, error)) = warnings_notice(warnings) {
+            self.notice = Some(Notice {
+                text,
+                error,
+                at: Instant::now(),
+            });
+        }
         self
     }
 
@@ -332,7 +351,9 @@ mod tests {
                 s.shots.first().is_some_and(|w| w.available)
             })
             .expect("the source delivers frames");
-        let mut app = OperatorApp::new(engine, &config);
+        let warning = "studio.toml: no `schema` key".to_owned();
+        let mut app = OperatorApp::new(engine, &config).with_warnings(&[warning]);
+        assert!(app.notice.as_ref().is_some_and(|n| !n.error));
         let ctx = egui::Context::default();
         let key = |key| egui::Event::Key {
             key,
@@ -368,6 +389,24 @@ mod tests {
         assert!(app.engine.is_none());
         app.shutdown();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.frame(ui));
+    }
+
+    #[test]
+    fn config_warnings_are_one_notice_that_is_not_an_error() {
+        assert_eq!(warnings_notice(&[]), None);
+        let one = ["studio.toml: no `schema` key; add `schema = 1`".to_owned()];
+        assert_eq!(
+            warnings_notice(&one),
+            Some((
+                "warning: studio.toml: no `schema` key; add `schema = 1`".into(),
+                false
+            ))
+        );
+        let two = ["a".to_owned(), "b".to_owned()];
+        assert_eq!(
+            warnings_notice(&two),
+            Some(("warning: a · b".into(), false))
+        );
     }
 
     #[test]

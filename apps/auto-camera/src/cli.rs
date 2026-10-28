@@ -3,10 +3,12 @@
 //! ```text
 //! auto-camera [--config PATH]                                   # operator window
 //! auto-camera [--config PATH] --headless [--seconds N] [--record PATH]
+//! auto-camera [--config PATH] --check                           # readiness check
 //! ```
 //!
 //! The headless options are only accepted together with `--headless`, so a
-//! typo cannot silently open a window that records nothing. The config path
+//! typo cannot silently open a window that records nothing, and `--check`
+//! is accepted only on its own, since it starts nothing. The config path
 //! defaults to the demo studio relative to the working directory, which is
 //! the repository root under `cargo run`.
 
@@ -47,6 +49,11 @@ pub struct Cli {
     /// Record program to this MP4 during a headless run; it must not exist.
     #[arg(long, value_name = "PATH", requires = "headless")]
     pub record: Option<PathBuf>,
+    /// Check the studio without starting it: list every problem with the
+    /// config and the files, tools and folders it names, then exit 0 when
+    /// there is none and 2 otherwise.
+    #[arg(long, conflicts_with_all = ["headless", "seconds", "record"])]
+    pub check: bool,
 }
 
 /// Parses a positive, finite number of seconds up to one day.
@@ -76,7 +83,19 @@ mod tests {
         let cli = parse(&[]).unwrap();
         assert_eq!(cli.config, PathBuf::from(DEFAULT_CONFIG));
         assert!(!cli.headless);
+        assert!(!cli.check);
         assert_eq!(cli.record, None);
+    }
+
+    #[test]
+    fn check_runs_alone() {
+        let cli = parse(&["--check", "--config", "show.toml"]).unwrap();
+        assert!(cli.check && !cli.headless);
+        assert_eq!(cli.config, PathBuf::from("show.toml"));
+        assert!(parse(&["--check"]).unwrap().check);
+        assert!(parse(&["--check", "--headless"]).is_err());
+        assert!(parse(&["--check", "--record", "x.mp4"]).is_err());
+        assert!(parse(&["--check", "--seconds", "3"]).is_err());
     }
 
     #[test]

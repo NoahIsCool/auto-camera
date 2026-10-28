@@ -105,14 +105,59 @@ failed (`ok` is false and `error` says why), 2 for usage and configuration
 errors. Recordings are never overwritten: an existing `--record` path is an
 error.
 
+## Readiness check
+
+```sh
+cargo run -p auto-camera -- --check --config config/sam3-sidecar.example.toml
+auto-camera [--config PATH] --check
+```
+
+`--check` finds what would stop a studio before a show, without starting
+it. It lists every problem in the config's values (all of them, not the
+first), and looks at everything the config names: each file source's video,
+the ffmpeg tools (`-version` of the output's ffmpeg, and of the ffmpeg and
+ffprobe file sources decode with), the detector's model files (and that an
+OWL detector is in the build), the sidecar's program, its venv (a python
+link that points nowhere, a base Python that is gone) and the paths in its
+command, and that `output.record_path` does not exist yet, in a folder that
+takes new files. It opens no camera, source or model, starts no sidecar and
+contacts no RTMP server: it runs nothing but the ffmpeg tools' `-version`,
+and writes nothing but an empty probe file in the recording folder, removed
+at once. Each finding is one line:
+
+```text
+Checking config/sam3-sidecar.example.toml
+  ok       config: schema 1, 1 source, 3 queries, detector "sidecar"
+  problem  source "cam-1": config/../media/rehearsal.mp4 does not exist
+  ok       output.ffmpeg and file sources' ffmpeg (AC_FFMPEG): ffmpeg runs (ffmpeg version 7.1.1)
+  ok       file sources' ffprobe (AC_FFPROBE): ffprobe runs (ffprobe version 7.1.1)
+  problem  detector.command[0]: config/../models/sam3/.venv/bin/python does not exist; make the sidecar's venv as its README says
+  ok       detector.command[1]: config/../sidecars/sam3-mlx/server.py is readable
+  problem  detector.command[5]: config/../models/sam31-mlx does not exist
+  problem  output.record_path: folder ../recordings (from the working folder) does not exist (starting the output does not create it)
+4 problems found; fix them and check again.
+```
+
+The exit status is 0 when nothing was found that would stop the studio
+(warnings allowed) and 2 otherwise. Whether a model file holds the right
+weights (a hash check) is not part of it yet.
+
 ## Studio configuration
 
-A studio is one TOML file (or JSON, by extension). Every section but
-`sources` is optional, unknown keys are errors, and relative paths are
-resolved against the config file's directory. A studio fed by a local video
+A studio is one TOML file (or JSON, by extension). It starts with
+`schema = 1`, the layout its keys follow. A file without the key (any file
+written before it existed) still loads, as schema 1, with a warning on
+stderr and in the window's status bar to add it; a newer or unknown schema
+is an error that says which one this build reads, so an older build never
+half-reads a newer file. Every section but `sources` is optional, unknown
+keys are errors, and relative paths are resolved against the config file's
+directory, except `output.record_path`, which, like a path typed at Start
+Output, is taken from the working folder. A studio fed by a local video
 file ([`config/file-source.example.toml`](config/file-source.example.toml)):
 
 ```toml
+schema = 1
+
 [[sources]]
 id = "cam-1"
 name = "Rehearsal"
@@ -157,7 +202,12 @@ record_path = "../recordings/show.mp4"
 Further sections tune the `tracker`, `subjects` (limits and lost/retire
 times), `framing`, `switcher` (default transition), `monitors` (monitor
 and multiview tile sizes and rates) and `lexicon` (below); see
-`crates/ac-engine/src/config.rs`.
+`crates/ac-engine/src/config.rs`. Every value is checked when the file
+loads; the `output` table with the encoder's own ranges (even sizes up to
+7680x4320, 1–120 fps, `video_bitrate_kbps` 100–100000,
+`audio_bitrate_kbps` 32–512, `keyframe_seconds` 1–10, an `rtmp://` or
+`rtmps://` URL), so a bad value fails at load rather than when the output
+starts.
 
 ## Prompts
 
@@ -272,7 +322,8 @@ cargo run -p auto-camera -- --config config/sam3-sidecar.example.toml
   with a `/` that do not start with `-` or `~` are paths, resolved against
   the config file; a bare program name is looked up on `PATH`. The program
   and every such path must exist, and the process must start, or the
-  studio does not start and says why.
+  studio does not start and says why. `--check` finds a missing program,
+  venv or path without starting the studio or the sidecar.
 - The model loads while the sources play (4.6 s on Noah's M3 Max, then a
   warm-up pass). Until the sidecar's first start ends, with its hello or
   a failure, every source is preparing: no frame is sent and no timeout
@@ -321,8 +372,8 @@ than for a show; choosing a model per query comes later.
 | `ac-compositor` | CPU program compositor |
 | `ac-output` | One ffmpeg encode to RTMP and fragmented MP4 |
 | `ac-eval` | Framing-quality metrics |
-| `ac-engine` | The runtime that wires them together (ADR 0002) |
-| `apps/auto-camera` | Operator window and headless runner |
+| `ac-engine` | The runtime that wires them together (ADR 0002), the studio config and its readiness check |
+| `apps/auto-camera` | Operator window, headless runner and `--check` |
 
 ## Develop
 

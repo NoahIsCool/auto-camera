@@ -3,9 +3,12 @@
 //! A [`StudioConfig`] is plain data, loaded from TOML or JSON
 //! ([`StudioConfig::load`]) and checked once by [`StudioConfig::validate`]
 //! before an engine starts, so the engine never sees an inconsistent setup.
-//! Every section has defaults, so a minimal file only lists its sources:
+//! Every section has defaults, so a minimal file only says which layout it
+//! is written in and lists its sources:
 //!
 //! ```toml
+//! schema = 1
+//!
 //! [[sources]]
 //! id = "stage"
 //! kind = "synthetic"
@@ -13,6 +16,13 @@
 //! height = 720
 //! fps = 30
 //! ```
+//!
+//! The top-level `schema` key names the file's layout, [`SCHEMA_VERSION`]
+//! in this build. A file without it (every file written before the key
+//! existed) is read as schema 1 with a warning to add it
+//! ([`StudioConfig::load_with_warnings`]); an unknown or newer version is
+//! an error, and an older one is upgraded by the migration steps in
+//! `schema` before it is deserialized.
 //!
 //! Sections mirror the pipeline: `sources` (any [`SourceConfig`] plus an id
 //! and a name), `queries` (prompts with their framing presets), `lexicon`
@@ -51,6 +61,7 @@
 //!
 //! | Table | Type | Module |
 //! |---|---|---|
+//! | `schema` (a key) | `u32`, [`SCHEMA_VERSION`], and its migrations | `schema` |
 //! | `sources` | [`SourceEntry`] | `sources` |
 //! | `queries` | [`QuerySettings`], [`PresetSpec`] | `queries` |
 //! | `lexicon` | [`Lexicon`], applied by [`StudioConfig::prompt_lexicon`] | here |
@@ -64,10 +75,12 @@
 //! | `monitors` | [`MonitorSettings`] | `monitors` |
 //!
 //! This module keeps the root table, [`StudioConfig`]: loading, path
-//! resolution and [`StudioConfig::validate`], which runs every table's check
+//! resolution and [`StudioConfig::problems`], which runs every table's check
 //! and the checks that span tables (a synthetic detector needs synthetic
 //! sources, the sidecar's request deadline must be below
-//! `discovery.timeout_s`, `output.audio_source` must name a source). It
+//! `discovery.timeout_s`, `output.audio_source` must name a source) and
+//! lists every problem found, for the readiness check
+//! ([`crate::readiness`]); [`StudioConfig::validate`] fails on the first. It
 //! also keeps the helpers used beyond one table: [`valid_id`] for every id
 //! and [`preset_for`] for bare shot sizes and the engine's default presets.
 //!
@@ -100,6 +113,7 @@ mod monitors;
 mod output;
 mod partial;
 mod queries;
+mod schema;
 mod sidecar;
 mod sources;
 mod subjects;
@@ -111,6 +125,7 @@ pub use discovery::DiscoverySettings;
 pub use monitors::MonitorSettings;
 pub use output::{EncoderSetting, OutputSettings};
 pub use queries::{PresetSpec, QuerySettings, slug, validate_query};
+pub use schema::SCHEMA_VERSION;
 pub use sidecar::SidecarSettings;
 pub use sources::SourceEntry;
 pub use subjects::SubjectSettings;
@@ -122,6 +137,17 @@ use partial::{partial, validate_framing};
 // was in scope here before the `queries` table moved to its own module.
 #[cfg(test)]
 use ac_core::QueryId;
+
+/// A config read from a file, with what the operator should be told about
+/// it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedConfig {
+    /// The config, its relative paths resolved.
+    pub config: StudioConfig,
+    /// Things to fix that did not stop the load (a missing `schema` key),
+    /// each a sentence starting with the file's path.
+    pub warnings: Vec<String>,
+}
 
 /// Errors from loading or validating a [`StudioConfig`].
 #[derive(Debug, Error)]
@@ -163,6 +189,11 @@ pub fn preset_for(size: ShotSize) -> Preset {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StudioConfig {
+    /// The layout the config is written in: [`SCHEMA_VERSION`] once read
+    /// (a file without the key is read as schema 1; see `schema`). First,
+    /// so a TOML file written from a config starts with it.
+    #[serde(default = "schema::unversioned")]
+    pub schema: u32,
     /// Video inputs, at least one.
     pub sources: Vec<SourceEntry>,
     /// Text prompts and their presets.
@@ -205,6 +236,7 @@ impl StudioConfig {
     /// A config with one source and every other section at its default.
     pub fn with_source(id: &str, input: SourceConfig) -> Self {
         Self {
+            schema: SCHEMA_VERSION,
             sources: vec![SourceEntry {
                 id: id.into(),
                 name: None,
@@ -225,31 +257,56 @@ impl StudioConfig {
     }
 
     /// Reads, parses and validates the file at `path` (`.json` as JSON,
-    /// anything else as TOML), resolving relative paths against its directory.
+    /// anything else as TOML), resolving relative paths against its
+    /// directory. The warnings are dropped; a program the operator runs
+    /// uses [`Self::load_with_warnings`] instead.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        Self::load_with_warnings(path).map(|loaded| loaded.config)
+    }
+
+    /// [`Self::load`], keeping the warnings for the operator.
+    pub fn load_with_warnings(path: &Path) -> Result<LoadedConfig, ConfigError> {
+        let loaded = Self::read_file(path)?;
+        loaded.config.validate()?;
+        Ok(loaded)
+    }
+
+    /// Reads and parses the file at `path` and resolves its relative paths,
+    /// without validating the values, so that the readiness check can list
+    /// every problem ([`Self::problems`]) rather than the first.
+    pub fn read_file(path: &Path) -> Result<LoadedConfig, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: path.into(),
             source,
         })?;
         let json = path.extension().is_some_and(|e| e == "json");
-        let mut config = Self::parse(&text, json).map_err(|message| ConfigError::Parse {
-            path: path.into(),
-            message,
-        })?;
+        let (mut config, warnings) =
+            Self::parse_with_warnings(&text, json).map_err(|message| ConfigError::Parse {
+                path: path.into(),
+                message,
+            })?;
         if let Some(dir) = path.parent() {
             config.resolve_paths(dir);
         }
-        config.validate()?;
-        Ok(config)
+        let warnings = warnings
+            .into_iter()
+            .map(|w| format!("{}: {w}", path.display()))
+            .collect();
+        Ok(LoadedConfig { config, warnings })
     }
 
-    /// Parses `text` as JSON or TOML without validating it.
+    /// Parses `text` as JSON or TOML without validating it; the warnings
+    /// are dropped (see [`Self::parse_with_warnings`]).
     pub fn parse(text: &str, json: bool) -> Result<Self, String> {
-        if json {
-            serde_json::from_str(text).map_err(|e| e.to_string())
-        } else {
-            toml::from_str(text).map_err(|e| e.to_string())
-        }
+        Self::parse_with_warnings(text, json).map(|(config, _)| config)
+    }
+
+    /// Parses `text` as JSON or TOML at any schema this build reads,
+    /// without validating it, with the warnings for the operator (a missing
+    /// `schema` key, an upgraded older schema); an unknown or newer schema
+    /// is an error. See the module docs.
+    pub fn parse_with_warnings(text: &str, json: bool) -> Result<(Self, Vec<String>), String> {
+        schema::read(text, json)
     }
 
     /// Makes relative source, model and sidecar command paths relative to
@@ -283,61 +340,80 @@ impl StudioConfig {
         }
     }
 
-    /// Checks the whole config, returning the first problem found.
+    /// Checks the whole config, returning the first problem found (the
+    /// first of [`Self::problems`]).
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let bad = |msg: String| Err(ConfigError::Invalid(msg));
+        match self.problems().into_iter().next() {
+            Some(problem) => Err(ConfigError::Invalid(problem)),
+            None => Ok(()),
+        }
+    }
+
+    /// Every problem in the config, in the order checked: the schema, each
+    /// source, then one per table (a table's own check stops at its first
+    /// problem) and each check that spans tables. Empty when the config is
+    /// valid. Pure: it reads no file (whether the files it names exist is
+    /// the readiness check's question, [`crate::readiness`]).
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.schema != SCHEMA_VERSION {
+            out.push(format!(
+                "schema {} is not this build's schema {SCHEMA_VERSION}",
+                self.schema
+            ));
+        }
         if self.sources.is_empty() {
-            return bad("at least one source is required".into());
+            out.push("at least one source is required".into());
         }
         let mut ids = HashSet::new();
         for s in &self.sources {
             if !valid_id(&s.id) {
-                return bad(format!(
+                out.push(format!(
                     "source id {:?} must be non-empty letters, digits, '-' or '_'",
                     s.id
                 ));
             }
             if !ids.insert(s.id.as_str()) {
-                return bad(format!("duplicate source id {:?}", s.id));
+                out.push(format!("duplicate source id {:?}", s.id));
             }
             if matches!(self.detector, DetectorSettings::Synthetic { .. })
                 && !matches!(s.input, SourceConfig::Synthetic { .. })
             {
-                return bad(format!(
+                out.push(format!(
                     "detector kind \"synthetic\" only works with synthetic sources; source {:?} is not one",
                     s.id
                 ));
             }
         }
-        self.lexicon
-            .validate()
-            .map_err(|e| ConfigError::Invalid(format!("lexicon: {e}")))?;
-        self.build_queries()?;
-        self.detector.validate().map_err(ConfigError::Invalid)?;
-        self.discovery.validate().map_err(ConfigError::Invalid)?;
+        let mut note = |result: Result<(), String>| out.extend(result.err());
+        note(self.lexicon.validate().map_err(|e| format!("lexicon: {e}")));
+        note(self.build_queries().map(drop).map_err(invalid_message));
+        note(self.detector.validate());
+        note(self.discovery.validate());
         if let DetectorSettings::Sidecar(sidecar) = &self.detector
             && sidecar.request_timeout_s >= self.discovery.timeout_s
         {
-            return bad(format!(
+            note(Err(format!(
                 "detector.request_timeout_s ({} s) must be below discovery.timeout_s ({} s), \
                  after which the engine abandons a request",
                 sidecar.request_timeout_s, self.discovery.timeout_s
-            ));
+            )));
         }
-        self.tracker
-            .validate()
-            .map_err(|e| ConfigError::Invalid(format!("tracker: {e}")))?;
-        self.store_config()?;
-        self.director_config()?;
-        validate_framing(&self.framing).map_err(ConfigError::Invalid)?;
-        self.switcher.validate().map_err(ConfigError::Invalid)?;
-        self.output.validate().map_err(ConfigError::Invalid)?;
+        note(self.tracker.validate().map_err(|e| format!("tracker: {e}")));
+        note(self.store_config().map(drop).map_err(invalid_message));
+        note(self.director_config().map(drop).map_err(invalid_message));
+        note(validate_framing(&self.framing));
+        note(self.switcher.validate());
+        note(self.output.validate());
         if let Some(audio) = &self.output.audio_source
             && !ids.contains(audio.as_str())
         {
-            return bad(format!("output.audio_source {audio:?} is not a source id"));
+            note(Err(format!(
+                "output.audio_source {audio:?} is not a source id"
+            )));
         }
-        self.monitors.validate().map_err(ConfigError::Invalid)
+        note(self.monitors.validate());
+        out
     }
 
     /// The prompt parser's vocabulary: the built-in lexicon with the
@@ -410,6 +486,15 @@ impl StudioConfig {
     /// The program frame interval.
     pub fn frame_period(&self) -> Duration {
         Duration::from_secs_f64(1.0 / f64::from(self.output.fps.max(1)))
+    }
+}
+
+/// The message of a [`ConfigError::Invalid`]; any other error (which the
+/// value checks do not return) as displayed.
+fn invalid_message(e: ConfigError) -> String {
+    match e {
+        ConfigError::Invalid(message) => message,
+        other => other.to_string(),
     }
 }
 
