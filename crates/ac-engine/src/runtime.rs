@@ -11,9 +11,10 @@
 //!   ([`TickSchedule`](crate::schedule::TickSchedule));
 //! * one **discovery worker** per source with a detector
 //!   (`ac-discovery-<source>`);
-//! * whatever the sources, the sidecar service and the encoder spawn
+//! * whatever the sources, the sidecar service and the output spawn
 //!   internally (decoders, the sidecar process and its `ac-sam-*` threads,
-//!   ffmpeg pipes), owned by those objects.
+//!   ffmpeg pipes, and on macOS `caffeinate` while output runs), owned by
+//!   those objects.
 //!
 //! Communication is by message passing only:
 //!
@@ -58,7 +59,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use ac_media::{SourceInfo, VideoSource};
-use ac_output::AudioFormat;
+use ac_output::{AudioFormat, AwakeMode, Caffeinate};
 use ac_sidecar::SidecarService;
 use ac_sources::{Clock, WallClock, open_source_with_clock};
 use thiserror::Error;
@@ -130,6 +131,12 @@ pub struct EngineOptions {
     pub clock: Arc<dyn Clock>,
     /// Falling further behind than this skips ticks instead of bursting.
     pub max_lag: Duration,
+    /// How the machine is held awake while output runs (the display too
+    /// when the monitors show program): the system's `caffeinate` on macOS
+    /// ([`Caffeinate::system`]), a stand-in in tests, or [`Caffeinate::Off`]
+    /// when the caller holds it awake itself, as a headless run does for
+    /// the whole run.
+    pub keep_awake: Caffeinate,
 }
 
 impl Default for EngineOptions {
@@ -137,6 +144,7 @@ impl Default for EngineOptions {
         Self {
             clock: Arc::new(WallClock::new()),
             max_lag: Duration::from_secs(1),
+            keep_awake: Caffeinate::system(),
         }
     }
 }
@@ -145,6 +153,7 @@ impl std::fmt::Debug for EngineOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EngineOptions")
             .field("max_lag", &self.max_lag)
+            .field("keep_awake", &self.keep_awake)
             .finish_non_exhaustive()
     }
 }
@@ -279,7 +288,10 @@ impl Engine {
             results,
             commands,
             snapshots: snapshots.clone(),
-            output: OutputController::new(config.output.clone()),
+            output: OutputController::new(config.output.clone()).with_keep_awake(
+                options.keep_awake,
+                AwakeMode::for_display(config.monitors.feeds_display()),
+            ),
             audio_source,
             audio_format,
             clock: options.clock,

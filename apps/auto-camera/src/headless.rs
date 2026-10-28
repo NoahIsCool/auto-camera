@@ -5,7 +5,11 @@
 //! setup fails with a message instead of hanging:
 //!
 //! 1. **Start** the engine on the wall clock with monitors and multiview
-//!    tiles off (nobody is watching).
+//!    tiles off (nobody is watching). From here until the engine has shut
+//!    down, the run holds the system awake (macOS `caffeinate`, see
+//!    [`crate::awake`]), the detector load and the recording included; the
+//!    engine's own hold for the output is turned off. Elsewhere the step is
+//!    skipped with a note on stderr.
 //! 2. **Signal**: wait for a wide shot to become available. A headless run
 //!    has no operator, so unless the director is in Auto mode (which
 //!    establishes a shot by itself) the first wide is cut to program.
@@ -24,7 +28,8 @@
 //! 5. **Run** for the requested time, sampling snapshots to log program
 //!    changes, the largest subject count and each shot's crop size range.
 //! 6. **Stop** the output and wait for the recording to be finalized, then
-//!    shut the engine down, which joins every thread and reaps ffmpeg.
+//!    shut the engine down, which joins every thread and reaps ffmpeg, and
+//!    end the hold, which reaps `caffeinate`.
 //!
 //! A termination signal (Ctrl-C, `SIGTERM`, `SIGHUP`) ends whichever phase
 //! is running; the engine is then shut down as after a normal run (which
@@ -51,6 +56,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::awake;
 use crate::signals::QuitSignal;
 use ac_core::{Rect, ShotId};
 use ac_director::{CandidateKind, DirectorMode};
@@ -58,6 +64,7 @@ use ac_engine::{
     DetectorSettings, Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot,
     MonitorSettings, OutputState, StudioConfig,
 };
+use ac_output::{AwakeMode, Caffeinate};
 
 mod flags;
 mod report;
@@ -94,16 +101,20 @@ pub fn run(
     run_with(config, path, options, EngineOptions::default(), quit)
 }
 
-/// [`run`] with explicit engine options (tests use a faster clock).
+/// [`run`] with explicit engine options (tests use a faster clock or a
+/// stand-in `caffeinate`, which the run holds instead of the engine).
 pub fn run_with(
     mut config: StudioConfig,
     path: &Path,
     options: &HeadlessOptions,
-    engine_options: EngineOptions,
+    mut engine_options: EngineOptions,
     quit: &QuitSignal,
 ) -> Summary {
     let started = Instant::now();
     config.monitors = MonitorSettings::disabled();
+    let caffeinate = std::mem::replace(&mut engine_options.keep_awake, Caffeinate::Off);
+    let mode = AwakeMode::for_display(config.monitors.feeds_display());
+    let awake = awake::hold_for_run(&caffeinate, mode, awake::log);
     let limit = detector_limit(&config.detector);
     let engine = match Engine::start_with(config, engine_options) {
         Ok(e) => e,
@@ -115,6 +126,7 @@ pub fn run_with(
         Ok(r) => (r.ticks, r.threads_joined, Some(r.final_snapshot), error),
         Err(e) => (0, 0, None, error.or(Some(e.to_string()))),
     };
+    drop(awake);
     let last = sampler.last.clone().or(final_snapshot.clone());
     summarize(
         path,

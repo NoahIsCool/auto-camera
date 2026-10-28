@@ -1,5 +1,6 @@
 //! Headless runs on small synthetic studios (real time, about a second each).
 
+mod keep_awake;
 mod summary;
 
 use super::report::round;

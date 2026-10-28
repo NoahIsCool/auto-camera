@@ -69,6 +69,6 @@ pub use core::{EngineCore, SourceFeed, TickOutput};
 pub use queries::{PromptReader, build_query, default_presets, read_prompt, shot_presets};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};
 pub use snapshot::{
-    DirectorView, EngineSnapshot, MatchView, OutputState, OutputView, PassOutcome, QueryView,
-    ShotView, SourceView, SubjectView, SwitcherView, Tally, TimingView,
+    DirectorView, EngineSnapshot, KeepAwakeState, MatchView, OutputState, OutputView, PassOutcome,
+    QueryView, ShotView, SourceView, SubjectView, SwitcherView, Tally, TimingView,
 };
