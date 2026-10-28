@@ -176,8 +176,8 @@ pub struct SwitcherView {
     /// Why the newest of them was dropped.
     pub last_dropped: Option<SwitchError>,
     /// Settle-before-take: the rule in force, the operator's take waiting
-    /// for preview to settle, and the waiting takes dropped
-    /// ([`crate::settle`]).
+    /// for preview to settle, the one that just fired by itself, and the
+    /// waiting takes dropped ([`crate::settle`]).
     pub settle: crate::settle::SettleGate,
 }
 

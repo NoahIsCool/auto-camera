@@ -1,8 +1,9 @@
 //! The settle gate on its own, driven tick by tick with a `dt` and the
 //! settledness each tick would see: a waiting take fires when preview
 //! settles or once `max_wait` has passed, whichever comes first, is dropped
-//! when preview changes, and is forced by a second press; without a rule
-//! nothing ever waits.
+//! when preview changes, and is forced by a second press, which, when it
+//! comes just after the take fired by itself, takes nothing; without a
+//! rule nothing ever waits.
 
 use super::*;
 
@@ -243,4 +244,74 @@ fn refused_takes_are_counted_with_the_newest_reason() {
     assert_eq!(gate.last_dropped(), Some(&(TakeKind::Cut, unavailable)));
     assert_eq!(TakeKind::Cut.name(), "cut");
     assert_eq!(TakeKind::Auto.name(), "auto");
+}
+
+#[test]
+fn a_late_press_of_a_take_that_fired_by_itself_is_expected_for_half_a_second() {
+    let (a, b, c) = (shot("a"), shot("b"), shot("c"));
+    let mut gate = waiting_cut();
+    assert_eq!(
+        run(&mut gate, &[Some(0.9)]),
+        Some((1, TakeKind::Cut, Fired::Settled))
+    );
+    assert!(
+        !gate.late_press(Some(&a), Some(&b), false),
+        "not on air yet"
+    );
+    // On air: a cut put "a" on program and "b" on preview.
+    gate.went_on_air(a.clone());
+    let fired = FiredTake {
+        shot: a.clone(),
+        since: 0.0,
+    };
+    assert_eq!(gate.just_fired(), Some(&fired));
+    assert!(gate.late_press(Some(&a), Some(&b), false));
+    assert!(
+        gate.late_press(Some(&a), Some(&c), false),
+        "whatever preview holds"
+    );
+    // Coming in during its mix counts too. Once something else is on air
+    // and it is not coming in, it does not: cut away from, it waits on
+    // preview with no mix running.
+    assert!(gate.late_press(Some(&b), Some(&a), true));
+    assert!(!gate.late_press(Some(&c), Some(&a), false));
+    assert!(!gate.late_press(Some(&c), Some(&b), true));
+    assert!(!gate.late_press(None, None, false));
+    // Asking uses nothing up, and the wait for it lasts 15 ticks of 1/30 s,
+    // counted by their dt alone.
+    for dt in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(gate.tick(dt, Some(&b), Some(1.0)), None);
+    }
+    for _ in 0..14 {
+        assert_eq!(gate.tick(DT, Some(&b), Some(1.0)), None);
+    }
+    assert!(gate.late_press(Some(&a), Some(&b), false));
+    assert_eq!(gate.tick(DT, Some(&b), Some(1.0)), None);
+    assert!(!gate.late_press(Some(&a), Some(&b), false));
+    assert_eq!(gate.just_fired(), None);
+}
+
+#[test]
+fn any_press_or_staging_ends_the_wait_for_a_late_press() {
+    let fired = || {
+        let mut gate = SettleGate::new(Some(rule()));
+        gate.went_on_air(shot("a"));
+        assert!(gate.late_press(Some(&shot("a")), Some(&shot("b")), false));
+        gate
+    };
+    // A press that is not the late one (the core asks first).
+    let mut gate = fired();
+    assert!(gate.press(TakeKind::Cut, Some(&shot("c")), Some(0.1), true));
+    assert_eq!(gate.just_fired(), None);
+    let mut gate = fired();
+    assert!(!gate.press(TakeKind::Auto, Some(&shot("b")), Some(1.0), true));
+    assert_eq!(gate.just_fired(), None);
+    // A staging, and Cut now or the T-bar.
+    let mut gate = fired();
+    assert_eq!(gate.force(Some(&shot("b"))), None);
+    assert_eq!(gate.just_fired(), None);
+    let mut gate = fired();
+    gate.cancel();
+    assert_eq!(gate.just_fired(), None);
+    assert_eq!(gate.dropped(), 0);
 }

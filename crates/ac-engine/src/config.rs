@@ -87,8 +87,8 @@
 //! also keeps the helpers used beyond one table: [`valid_id`] for every id
 //! and [`preset_for`] for bare shot sizes and the engine's default presets.
 //!
-//! The flat tables (`discovery`, `subjects`, `director`, `switcher`,
-//! `output` and `monitors`) have a default for every key
+//! The tables `discovery`, `subjects`, `director`, `switcher` (with its
+//! `settle` subtable), `output` and `monitors` have a default for every key
 //! (`#[serde(default)]`), and every table rejects unknown keys, so a typo in
 //! a config file is an error rather than a silently ignored setting.
 //! Durations are written as seconds (`*_s` keys) and converted, with range

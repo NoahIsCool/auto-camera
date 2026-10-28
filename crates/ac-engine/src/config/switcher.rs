@@ -1,8 +1,13 @@
-//! The `[switcher]` table: the transition the switcher starts with.
+//! The `[switcher]` table: the transition the switcher starts with, and,
+//! in its `[switcher.settle]` subtable, settle-before-take (whether an
+//! operator's take waits for the preview crop to settle; off by default;
+//! [`SettleSettings`] has the table and [`crate::settle`] the rules).
 //!
-//! The defaults are those of [`Transition::default`]. A cut ignores its
-//! duration; a mix or a dip must last more than 0 and at most 10 seconds
-//! ([`SwitcherSettings::validate`]).
+//! The transition's defaults are those of [`Transition::default`]. A cut
+//! ignores its duration; a mix or a dip must last more than 0 and at most
+//! 10 seconds. [`SwitcherSettings::problems`] lists every bad value, the
+//! subtable's included, and [`SwitcherSettings::validate`] fails on the
+//! first.
 
 mod settle;
 
@@ -10,7 +15,7 @@ use ac_switcher::{Transition, TransitionKind};
 use serde::{Deserialize, Serialize};
 pub use settle::SettleSettings;
 
-/// The switcher's initial transition.
+/// The switcher's initial transition, and settle-before-take.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SwitcherSettings {

@@ -34,12 +34,18 @@
 //! director rather than overriding it, so neither is a manual action.
 //!
 //! With settle-before-take on ([`crate::settle`]), the operator's Cut and
-//! Auto may wait, after their fence has passed, for a preview crop that is
-//! still travelling ([`super::settle`]); the reply comes when it is
-//! pressed, so a take dropped at the end of its wait is counted in the
-//! snapshot with its reason, as a queued take is. A second Cut or Auto
-//! forces it, staging a shot forces it first, and Cut now, the T-bar and
-//! accepting a suggestion supersede it. Its manual action is the press.
+//! Auto, and the Auto of an accepted suggestion, may wait, after their
+//! fence has passed, for a preview crop that is still travelling
+//! ([`super::settle`]); the reply comes when it is pressed, so a take
+//! dropped at the end of its wait is counted in the snapshot with its
+//! reason, as a queued take is. A second Cut or Auto (or Accept) forces it,
+//! staging a shot forces it first, and Cut now and a T-bar move that starts
+//! or moves a transition supersede it; a T-bar move that does nothing
+//! leaves it waiting. Its manual action is the press. Just after a take
+//! fired by itself, a Cut, Auto or Accept is its late second press and
+//! takes nothing, before any fence (a Cut while its mix still runs lands
+//! the mix instead): it is answered `Done` and is no manual action, as it
+//! changes nothing.
 //!
 //! Protection (on-air subjects are never removed) is refreshed before and
 //! after every command, not only at the start of a tick: a cut followed at
@@ -71,11 +77,7 @@ impl EngineCore {
                 self.preview_hold = Some(shot.clone());
                 true
             }
-            C::Cut { preview } => {
-                self.fence(preview)?;
-                self.press_take(TakeKind::Cut)?;
-                true
-            }
+            C::Cut { preview } => self.operator_take(TakeKind::Cut, preview)?,
             C::CutTo { shot } => {
                 if self.catalog.get(shot).is_none() {
                     return Err(CommandError::UnknownShot(shot.clone()));
@@ -86,21 +88,27 @@ impl EngineCore {
                 self.settle.cancel();
                 true
             }
-            C::Auto { preview } => {
-                self.fence(preview)?;
-                self.press_take(TakeKind::Auto)?;
-                true
-            }
+            C::Auto { preview } => self.operator_take(TakeKind::Auto, preview)?,
             C::SetTBar { position } => {
                 if !position.is_finite() {
                     return Err(CommandError::Invalid(format!(
                         "T-bar position {position} is not a number"
                     )));
                 }
+                let moving = self.switcher.in_transition();
+                let on_air = self.switcher.program().cloned();
                 let catalog = &self.catalog;
                 self.switcher
                     .set_tbar(*position, |id| catalog.is_available(id))?;
-                self.settle.cancel();
+                // Only a move that starts, moves or ends a transition takes
+                // a shot; at its rest end with none running the lever does
+                // nothing, and supersedes nothing.
+                if moving
+                    || self.switcher.in_transition()
+                    || self.switcher.program() != on_air.as_ref()
+                {
+                    self.settle.cancel();
+                }
                 true
             }
             C::SetTransition { transition } => {
@@ -177,17 +185,16 @@ impl EngineCore {
                 false
             }
             C::AcceptSuggestion { shot } => {
-                match &self.decision.suggestion {
-                    None => return Err(CommandError::NoSuggestion),
-                    Some(now) if now != shot => {
-                        return Err(CommandError::SuggestionChanged {
-                            seen: shot.clone(),
-                            suggestion: now.clone(),
-                        });
-                    }
-                    Some(_) => {
-                        self.accept(shot.clone())?;
-                        self.settle.cancel();
+                if !self.late_press(false) {
+                    match &self.decision.suggestion {
+                        None => return Err(CommandError::NoSuggestion),
+                        Some(now) if now != shot => {
+                            return Err(CommandError::SuggestionChanged {
+                                seen: shot.clone(),
+                                suggestion: now.clone(),
+                            });
+                        }
+                        Some(_) => self.accept(shot.clone())?,
                     }
                 }
                 false
@@ -221,6 +228,23 @@ impl EngineCore {
         self.update_protection();
         self.note_program();
         Ok(reply)
+    }
+
+    /// The operator's Cut or Auto (`kind`) from a sender who saw `seen` on
+    /// preview: nothing when it is the late second press of a take that
+    /// fired by itself, else fenced and pressed (see the module docs). True
+    /// when it was pressed, a manual action.
+    fn operator_take(
+        &mut self,
+        kind: TakeKind,
+        seen: &Option<ShotId>,
+    ) -> Result<bool, CommandError> {
+        if self.late_press(kind == TakeKind::Cut) {
+            return Ok(false);
+        }
+        self.fence(seen)?;
+        self.press_take(kind)?;
+        Ok(true)
     }
 
     /// Refuses a take whose sender saw `seen` on preview when the preview
@@ -261,10 +285,13 @@ impl EngineCore {
         Ok(CommandReply::QueryAdded { id })
     }
 
-    /// Stages `shot` on preview and runs Auto to it; during a transition,
-    /// queues both for its end, unless the transition brings `shot` in
-    /// already. The operator's hold on preview ends: they chose the
-    /// director's shot over it.
+    /// Stages `shot` on preview and presses Auto to it, which may wait for
+    /// it to settle as Enter's does ([`super::settle`]); during a
+    /// transition, queues both for its end, unless the transition brings
+    /// `shot` in already. The operator's hold on preview ends: they chose
+    /// the director's shot over it. While the take waits, `shot` holds
+    /// preview instead, as a shot the operator staged does, so that the
+    /// director's next suggestion does not stage over it and drop the take.
     fn accept(&mut self, shot: ShotId) -> Result<(), CommandError> {
         if !self.catalog.is_available(&shot) {
             return Err(CommandError::Switch(ac_switcher::SwitchError::Unavailable(
@@ -272,9 +299,11 @@ impl EngineCore {
             )));
         }
         self.release_hold();
-        self.switcher.set_preview(shot);
-        let catalog = &self.catalog;
-        self.switcher.auto(|id| catalog.is_available(id))?;
+        self.switcher.set_preview(shot.clone());
+        self.press_take(TakeKind::Auto)?;
+        if self.settle.waiting().is_some() {
+            self.preview_hold = Some(shot);
+        }
         Ok(())
     }
 

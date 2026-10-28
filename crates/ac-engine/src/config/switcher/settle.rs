@@ -1,8 +1,8 @@
 //! The `[switcher.settle]` table: settle-before-take (spec V6, C.4).
 //!
-//! An operator's Cut or Auto can wait for a preview crop that is still
-//! travelling to its subject, at most `max_wait_s`, and a second press
-//! takes it at once; [`crate::settle`] has the rules. This table says
+//! An operator's Cut, Auto or Accept can wait for a preview crop that is
+//! still travelling to its subject, at most `max_wait_s`, and a second
+//! press takes it at once; [`crate::settle`] has the rules. This table says
 //! whether they apply and with which numbers:
 //!
 //! ```toml

@@ -2,12 +2,14 @@
 //! the operator's take waits for preview to settle, and that the preview
 //! shot's subject is lost.
 //!
-//! * **A waiting take.** With settle-before-take on, a Cut or Auto pressed
-//!   while the preview crop is still travelling to its subject waits for
-//!   it, at most half a second, and a second press takes it at once
-//!   ([`ac_engine::settle`]). Without a word on screen the operator would
-//!   see a press that did nothing, so the caption says which take waits
-//!   and how to force it ([`settle_note`]) for as long as it does.
+//! * **A waiting take.** With settle-before-take on, a Cut, Auto or Accept
+//!   pressed while the preview crop is still travelling to its subject
+//!   waits for it, at most half a second, and a second press takes it at
+//!   once ([`ac_engine::settle`]). Without a word on screen the operator
+//!   would see a press that did nothing, so the caption says which take
+//!   waits and how to force it ([`settle_note`]) for as long as it does. A
+//!   press that answers it just after the take went on air by itself takes
+//!   nothing in the engine, so the advice never makes a double cut.
 //! * **A lost subject** (spec M8, shot status). A shot whose subject is
 //!   lost holds its framing on where the subject was last seen, so the
 //!   picture on preview can be an empty stage. The caption names the

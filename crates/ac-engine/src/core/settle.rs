@@ -1,7 +1,8 @@
-//! The core's side of settle-before-take: the operator's Cut and Auto go
-//! through the [`SettleGate`](crate::settle::SettleGate), which may hold
-//! one of them while the preview crop is still travelling, and each tick
-//! judges the take it holds once framing has stepped.
+//! The core's side of settle-before-take: the operator's Cut and Auto, and
+//! the Auto of an accepted suggestion, go through the
+//! [`SettleGate`](crate::settle::SettleGate), which may hold one of them
+//! while the preview crop is still travelling, and each tick judges the
+//! take it holds once framing has stepped.
 //!
 //! The rules are [`crate::settle`]'s. This module supplies what the gate
 //! needs from the core and does what it decides:
@@ -14,13 +15,18 @@
 //! * **Pressing** ([`EngineCore::press_take`]) runs a take the gate does
 //!   not hold through the switcher at once, as without the rule. A press
 //!   the switcher refuses changes nothing, the gate included: a refused
-//!   second press leaves the first waiting.
+//!   second press leaves the first waiting. Cut, Auto and accepting a
+//!   suggestion all press this way ([`super::commands`]).
+//! * **The late press** ([`EngineCore::late_press`]) of a take that fired
+//!   by itself is answered before any fence, and takes nothing.
 //! * **The tick** ([`EngineCore::settle_tick`]) runs between framing and
 //!   the switcher's own tick, so the settledness judged is this tick's and
 //!   a take that fires is advanced and drawn on this tick, as a press
-//!   applied before it would be. A waiting take whose shot reached program
-//!   by other means (the director took it in Auto mode) has nothing left to
-//!   take and ends unannounced.
+//!   applied before it would be. A take that fires and goes through the
+//!   switcher's checks is handed back to the gate, for its late press. A
+//!   waiting take whose shot reached
+//!   program by other means (the director took it in Auto mode) has
+//!   nothing left to take and ends unannounced.
 //! * **Forcing** ([`EngineCore::force_waiting_take`]) runs the waiting take
 //!   ahead of a shot the operator stages, fenced as on a tick.
 //!
@@ -78,26 +84,48 @@ impl EngineCore {
         Ok(())
     }
 
-    /// Runs `kind` for the gate, which counts a refusal as a dropped take.
-    fn fire(&mut self, kind: TakeKind) {
-        if let Err(reason) = self.run_take(kind) {
-            self.settle.refused(kind, reason);
+    /// Runs `kind` for the gate, which counts a refusal as a dropped take;
+    /// true when it went through.
+    fn fire(&mut self, kind: TakeKind) -> bool {
+        match self.run_take(kind) {
+            Ok(()) => true,
+            Err(reason) => {
+                self.settle.refused(kind, reason);
+                false
+            }
         }
+    }
+
+    /// True when the operator's Cut (`cut`), Auto or Accept is the late
+    /// second press of a take that fired by itself, and takes nothing
+    /// ([`crate::settle::SettleGate::late_press`]); a Cut while that take's
+    /// mix still runs is not, and lands the mix, as a Cut during any mix
+    /// does.
+    pub(super) fn late_press(&self, cut: bool) -> bool {
+        let switcher = &self.switcher;
+        let mixing = switcher.in_transition();
+        self.settle
+            .late_press(switcher.program(), switcher.preview(), mixing)
+            && !(cut && mixing)
     }
 
     /// Advances the waiting take by the tick's `dt` and fires it when the
     /// gate says so (see the module docs).
     pub(super) fn settle_tick(&mut self, dt: f64) {
-        let Some(waiting) = self.settle.waiting() else {
-            return;
-        };
-        if self.switcher.program() == Some(&waiting.shot) && !self.switcher.in_transition() {
+        let waiting = self.settle.waiting().map(|w| w.shot.clone());
+        if let Some(shot) = &waiting
+            && self.switcher.program() == Some(shot)
+            && !self.switcher.in_transition()
+        {
             self.settle.cancel();
             return;
         }
         let (preview, settling) = self.preview_settling();
-        if let Some((kind, _)) = self.settle.tick(dt, preview.as_ref(), settling) {
-            self.fire(kind);
+        if let Some((kind, _)) = self.settle.tick(dt, preview.as_ref(), settling)
+            && let Some(shot) = waiting
+            && self.fire(kind)
+        {
+            self.settle.went_on_air(shot);
         }
     }
 

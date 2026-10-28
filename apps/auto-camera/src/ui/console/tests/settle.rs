@@ -15,8 +15,11 @@
 //! the engine's and are tested there (`ac_engine::settle`, and the core's
 //! own tests); these check that the window's keys and buttons reach them,
 //! that the preview caption says while a take waits and when its subject
-//! is lost, and that a waiting take that is dropped is announced like the
-//! refused cut it became.
+//! is lost, that a waiting take that is dropped is announced like the
+//! refused cut it became, that Space pressed just after a take fired by
+//! itself takes nothing, and what a double click on another tile does
+//! while a take waits, with the engine ticking between its clicks as it
+//! does in the app.
 
 use super::*;
 use crate::ui::notices::notice_for;
@@ -311,6 +314,89 @@ fn a_waiting_cut_left_alone_goes_on_air_within_half_a_second() {
     assert!(!says(&h, "waiting for preview"));
     assert_eq!(h.state().console.notice(&h.state().snapshot()), None);
     assert_eq!(accepted(&mut h), [], "it fired by itself");
+    // Space again just after, as the caption said: the window has drawn
+    // the cut, so it sends a cut of the wide now back on preview, which
+    // the engine takes as the late second press. Nothing cuts back.
+    press(&mut h, Key::Space);
+    assert_eq!(
+        accepted(&mut h),
+        [EngineCommand::Cut {
+            preview: Some(shot_of(&h, 0))
+        }]
+    );
+    assert_eq!(program(&h), Some(shot_of(&h, 1)));
+    assert_eq!(h.state().console.notice(&h.state().snapshot()), None);
+    // Half a second after the cut, Space is a fresh one: back to the wide.
+    advance(&mut h, 15);
+    press(&mut h, Key::Space);
+    assert_eq!(program(&h), Some(shot_of(&h, 0)));
+}
+
+/// Double-clicks the node labelled `label` as [`double_click`] does, but
+/// with the engine ticking `between` times between the two clicks, as it
+/// does in the app (egui counts two clicks up to 0.3 s apart as a double
+/// click: 9 ticks at 30 fps); the program shot between them.
+fn double_click_ticking(h: &mut Harness<'_, Stage>, label: &str, between: u64) -> Option<ShotId> {
+    let at = h.get_by_label(label).rect().center();
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    let start = h.ctx.input(|i| i.time);
+    let mut on_air = None;
+    for (i, pressed) in [true, false, true, false].into_iter().enumerate() {
+        if i == 2 {
+            h.state_mut().tick(between);
+            on_air = program(h);
+        }
+        h.input_mut().time = Some(start + 0.05 * (i + 1) as f64);
+        h.input_mut().events.push(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.input_mut().time = None;
+    h.run();
+    on_air
+}
+
+#[test]
+fn a_double_click_on_another_tile_while_a_cut_waits_puts_the_waiting_shot_on_air_first() {
+    let mut h = stage();
+    cut_to_the_travelling_medium(&mut h);
+    let (medium, close) = (shot_of(&h, 1), shot_of(&h, 2));
+    let changes = h.state().snapshot().program_changes;
+    // The first click stages the close shot, and staging puts the waiting
+    // cut on air first, as it would have gone at once without the rule;
+    // the second is Cut now of the close shot. In between, the medium is
+    // on air for as long as the double click takes.
+    let tile = tile_name(2, &h.state().snapshot().shots[2]);
+    let between = double_click_ticking(&mut h, &tile, 9);
+    assert_eq!(between, Some(medium.clone()));
+    assert_eq!(
+        accepted(&mut h),
+        [
+            EngineCommand::SetPreview {
+                shot: close.clone()
+            },
+            EngineCommand::CutTo {
+                shot: close.clone()
+            }
+        ]
+    );
+    let snap = h.state().snapshot();
+    assert_eq!(snap.switcher.program, Some(close));
+    assert_eq!(snap.switcher.preview, Some(medium));
+    assert_eq!(
+        snap.program_changes,
+        changes + 2,
+        "the medium, then the close"
+    );
+    assert_eq!(snap.switcher.settle.waiting(), None);
+    assert_eq!(snap.switcher.settle.dropped(), 0);
+    assert!(!says(&h, "waiting for preview"));
+    assert_eq!(h.state().console.notice(&snap), None);
 }
 
 #[test]

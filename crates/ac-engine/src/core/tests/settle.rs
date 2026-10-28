@@ -1,11 +1,14 @@
 //! Settle-before-take through the core, timed by the ticks' `dt`: with the
 //! rule on, an operator's take of a shot still travelling to its subject
-//! fires on the first tick preview is settled or once 0.5 s have passed,
-//! whichever comes first; a second press forces it at once; staging forces
-//! it first, Cut now supersedes it, and it is dropped with the fenced
-//! take's notice when preview changes during the wait, or with the
-//! switcher's reason when its source drops out. With the rule off every
-//! take is immediate, and the director's own takes are never delayed.
+//! (an accepted suggestion's included) fires on the first tick preview is
+//! settled or once 0.5 s have passed, whichever comes first; a second press
+//! forces it at once, and one that comes just after it fired by itself
+//! takes nothing; staging forces it first, Cut now and a T-bar move that
+//! starts a transition supersede it (one that does nothing does not), and
+//! it is dropped with the fenced take's notice when preview changes during
+//! the wait, or with the switcher's reason when its source drops out. With
+//! the rule off every take is immediate, and the director's own takes are
+//! never delayed.
 //!
 //! The rig's person stands still until frame [`JUMP`], when the detector
 //! sees them bigger and to the left: the medium and close shots travel to
@@ -397,4 +400,182 @@ fn the_director_s_own_takes_are_never_delayed() {
     let (off, takes) = program(SettleSettings::default());
     assert!(takes >= 3, "the director switched: {takes}");
     assert_eq!(program(strict), (off, takes));
+}
+
+#[test]
+fn a_tbar_move_that_takes_nothing_leaves_the_waiting_take_waiting() {
+    // The lever at its rest end with no transition running does nothing,
+    // so the cut waits on and fires as if it had not been touched.
+    let mut rig = jumping(on());
+    stage(&mut rig, &medium());
+    rig.cut().unwrap();
+    rig.apply(EngineCommand::SetTBar { position: 0.0 }).unwrap();
+    assert_eq!(
+        waiting(&rig),
+        Some(WaitingTake::new(TakeKind::Cut, medium()))
+    );
+    assert!(!rig.core.switcher().in_transition());
+    assert_eq!(ticks_until_on_air(&mut rig, &medium(), 20), Some(15));
+    assert_eq!(rig.snapshot().switcher.settle.dropped(), 0);
+    // Nor at the other end, once a T-bar transition has flipped the lever:
+    // there 1 is its rest end.
+    let mut rig = jumping(on());
+    stage(&mut rig, &close());
+    rig.apply(EngineCommand::SetTBar { position: 1.0 }).unwrap();
+    assert_eq!(rig.core.switcher().program(), Some(&close()), "never waits");
+    stage(&mut rig, &medium());
+    rig.cut().unwrap();
+    rig.apply(EngineCommand::SetTBar { position: 1.0 }).unwrap();
+    assert_eq!(
+        waiting(&rig),
+        Some(WaitingTake::new(TakeKind::Cut, medium()))
+    );
+    rig.run_secs(1.0);
+    assert_eq!(rig.core.switcher().program(), Some(&medium()));
+}
+
+#[test]
+fn a_late_second_press_of_a_take_that_fired_by_itself_takes_nothing() {
+    let wide = shot("cam/wide");
+    let mut rig = jumping(on());
+    stage(&mut rig, &medium());
+    rig.cut().unwrap();
+    assert_eq!(ticks_until_on_air(&mut rig, &medium(), 20), Some(15));
+    assert_eq!(rig.preview(), Some(wide.clone()), "the swap");
+    let changes = rig.snapshot().program_changes;
+    // The operator answers the caption just as the take goes on air, from
+    // a window that drew it on air (the wide back on preview), one that
+    // still drew it waiting (the medium), or one that drew a suggestion
+    // staged as it went on air. Every Cut, Auto or Accept is the take's
+    // second press, and its take is on air already: nothing is taken, and
+    // nothing refused.
+    let late = |rig: &mut Rig| {
+        for seen in [wide.clone(), medium(), close()] {
+            let preview = Some(seen.clone());
+            for take in [
+                EngineCommand::Cut {
+                    preview: preview.clone(),
+                },
+                EngineCommand::Auto { preview },
+                EngineCommand::AcceptSuggestion { shot: seen },
+            ] {
+                assert_eq!(rig.apply(take.clone()), Ok(CommandReply::Done), "{take:?}");
+            }
+        }
+        let snap = rig.snapshot();
+        assert_eq!(snap.switcher.program, Some(medium()));
+        assert_eq!(snap.switcher.preview, Some(wide.clone()));
+        assert!(!snap.switcher.in_transition);
+        assert_eq!(snap.program_changes, changes);
+        assert_eq!(snap.switcher.settle.dropped(), 0);
+    };
+    late(&mut rig);
+    rig.run(14);
+    late(&mut rig);
+    // Half a second after it fired, a cut is a fresh take: back to the wide.
+    rig.step();
+    rig.cut().unwrap();
+    assert_eq!(rig.core.switcher().program(), Some(&wide));
+    // Staging ends it at once: the operator has moved on.
+    let mut rig = jumping(on());
+    stage(&mut rig, &medium());
+    rig.cut().unwrap();
+    rig.run(15);
+    assert_eq!(rig.core.switcher().program(), Some(&medium()));
+    stage(&mut rig, &wide);
+    rig.cut().unwrap();
+    assert_eq!(rig.core.switcher().program(), Some(&wide));
+    // A take the second press forced has had its second press: the next is
+    // a fresh take.
+    let mut rig = jumping(on());
+    stage(&mut rig, &medium());
+    rig.cut().unwrap();
+    rig.cut().unwrap();
+    assert_eq!(rig.core.switcher().program(), Some(&medium()));
+    rig.cut().unwrap();
+    assert_eq!(rig.core.switcher().program(), Some(&wide));
+}
+
+#[test]
+fn a_late_press_during_the_mix_of_an_auto_that_fired_by_itself_lands_it_or_does_nothing() {
+    let mut rig = jumping(on());
+    stage(&mut rig, &medium());
+    rig.auto().unwrap();
+    rig.run(15);
+    assert!(rig.core.switcher().in_transition(), "mixing to the medium");
+    // Enter again: the mix carries on as it was.
+    assert_eq!(rig.auto(), Ok(CommandReply::Done));
+    assert!(rig.core.switcher().in_transition());
+    assert_eq!(rig.core.switcher().queued(), None);
+    // Space: the medium lands at once, as a Cut during any mix does.
+    assert_eq!(rig.cut(), Ok(CommandReply::Done));
+    assert!(!rig.core.switcher().in_transition());
+    assert_eq!(rig.core.switcher().program(), Some(&medium()));
+}
+
+#[test]
+fn accepting_a_suggestion_waits_like_auto_and_a_second_accept_forces_it() {
+    // Moving subjects, the wide on air and the director suggesting; the
+    // first suggestion it stages that is well short of settled.
+    let suggesting = || {
+        let mut c = config(3);
+        c.director.mode = DirectorMode::Suggest;
+        c.director.profile = ContentProfile::Music;
+        c.switcher.settle = on();
+        let mut rig = Rig::new(c);
+        rig.run(5);
+        preview_and_cut(&mut rig, "cam/wide");
+        for _ in 0..(20.0 * FPS) as usize {
+            rig.step();
+            let snap = rig.snapshot();
+            if let Some(s) = snap.director.suggestion.clone()
+                && snap.switcher.preview.as_ref() == Some(&s)
+                && snap.shot(&s).is_some_and(|v| v.settled < 0.5)
+            {
+                return (rig, s);
+            }
+        }
+        panic!("no suggestion of a travelling shot");
+    };
+    let (mut rig, s) = suggesting();
+    assert_eq!(
+        rig.apply(EngineCommand::AcceptSuggestion { shot: s.clone() }),
+        Ok(CommandReply::Done)
+    );
+    assert_eq!(
+        waiting(&rig),
+        Some(WaitingTake::new(TakeKind::Auto, s.clone()))
+    );
+    assert!(!rig.core.switcher().in_transition());
+    // Accept again: the mix starts at once.
+    rig.apply(EngineCommand::AcceptSuggestion { shot: s.clone() })
+        .unwrap();
+    assert!(rig.core.switcher().in_transition());
+    assert_eq!(rig.preview(), Some(s.clone()), "coming in");
+    assert_eq!(waiting(&rig), None);
+    // Left alone, the mix starts within half a second, as Enter's does.
+    let (mut rig, s) = suggesting();
+    rig.apply(EngineCommand::AcceptSuggestion { shot: s.clone() })
+        .unwrap();
+    let mut n = 0;
+    while !rig.core.switcher().in_transition() {
+        let snap = rig.snapshot();
+        assert!(snap.switcher.settle.waiting().is_some(), "tick {n}");
+        // The accepted shot holds preview while it waits, as a shot the
+        // operator staged does, so the director's next suggestion cannot
+        // stage over it and drop the take.
+        assert_eq!(snap.director.preview_held, Some(s.clone()), "tick {n}");
+        n += 1;
+        assert!(n <= 15, "past the wait");
+        rig.step();
+    }
+    assert_eq!(rig.preview(), Some(s.clone()));
+    let snap = rig.snapshot();
+    assert_eq!(snap.switcher.settle.dropped(), 0);
+    assert!(
+        snap.director.held_back > 0,
+        "the director moved on meanwhile"
+    );
+    rig.run_secs(1.0);
+    assert_eq!(rig.core.switcher().program(), Some(&s));
 }
