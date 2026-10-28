@@ -69,7 +69,10 @@ impl OutputForm {
     }
 }
 
-/// The director panel: mode, profile, suggestion and Accept.
+/// The director panel: mode, profile, the suggestion with Accept and Skip,
+/// and the operator's hold on preview with Release. Skip names the
+/// suggestion the operator sees, so a suggestion that changed meanwhile is
+/// not the one skipped.
 pub fn director(ui: &mut Ui, snap: &EngineSnapshot) -> Vec<EngineCommand> {
     let mut commands = Vec::new();
     let d = &snap.director;
@@ -107,10 +110,42 @@ pub fn director(ui: &mut Ui, snap: &EngineSnapshot) -> Vec<EngineCommand> {
         {
             commands.push(EngineCommand::AcceptSuggestion);
         }
+        let skip = ui
+            .add_enabled(can, egui::Button::new("Skip"))
+            .on_hover_text(format!(
+                "Do not suggest this shot for {:.0} s",
+                d.skip.as_secs_f64()
+            ));
+        if skip.clicked()
+            && let Some(shot) = &d.suggestion
+        {
+            commands.push(EngineCommand::Skip { shot: shot.clone() });
+        }
         ui.label(format!("{} takes", d.takes));
     });
+    if let Some(held) = d
+        .preview_held
+        .as_ref()
+        .filter(|_| d.mode != DirectorMode::Off)
+    {
+        ui.horizontal(|ui| {
+            ui.label(format!("Preview held: {}", shot_name(snap, Some(held))))
+                .on_hover_text(HELD_HOVER);
+            if ui
+                .button("Release")
+                .on_hover_text("Hand preview back to the director")
+                .clicked()
+            {
+                commands.push(EngineCommand::ReleasePreview);
+            }
+        });
+    }
     commands
 }
+
+/// Hover text of the operator's hold on preview.
+const HELD_HOVER: &str = "You staged this shot, so the director does not stage its \
+                          suggestions over it until you take it or release it.";
 
 /// The queries panel: live queries, the add form (its prompt read with
 /// `prompts`, the engine's reader) and the subjects.

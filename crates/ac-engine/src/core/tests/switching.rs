@@ -21,7 +21,7 @@ fn cut_and_auto_change_program_with_tally() {
         shot: shot("cam/1/medium"),
     })
     .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
+    rig.auto().unwrap();
     rig.run(6);
     let snap = rig.snapshot();
     assert!(snap.switcher.in_transition);
@@ -50,10 +50,7 @@ fn invalid_switcher_commands_are_refused_without_effect() {
         rig.apply(EngineCommand::SetPreview { shot: shot("nope") }),
         Err(CommandError::UnknownShot(shot("nope")))
     );
-    assert_eq!(
-        rig.apply(EngineCommand::Cut),
-        Err(CommandError::Switch(SwitchError::NoPreview))
-    );
+    assert_eq!(rig.cut(), Err(CommandError::Switch(SwitchError::NoPreview)));
     assert!(matches!(
         rig.apply(EngineCommand::SetTBar { position: f64::NAN }),
         Err(CommandError::Invalid(_))
@@ -99,7 +96,7 @@ fn mixing_to_medium(subjects: u32, ticks: usize) -> Rig {
         shot: shot("cam/1/medium"),
     })
     .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
+    rig.auto().unwrap();
     rig.run(ticks);
     assert!(rig.snapshot().switcher.in_transition);
     rig
@@ -115,8 +112,8 @@ fn a_take_during_a_mix_fires_once_at_its_end() {
     );
     rig.apply(EngineCommand::SetPreview { shot: next.clone() })
         .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
+    rig.auto().unwrap();
+    rig.auto().unwrap();
     let snap = rig.snapshot();
     assert_eq!(snap.switcher.preview, Some(shot("cam/1/medium")));
     assert_eq!(
@@ -165,12 +162,12 @@ fn a_queued_take_whose_shot_became_unavailable_is_dropped_with_a_reason() {
         shot: shot("cam/1/medium"),
     })
     .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
+    rig.auto().unwrap();
     rig.step();
     let next = shot("cam/2/medium");
     rig.apply(EngineCommand::SetPreview { shot: next.clone() })
         .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
+    rig.auto().unwrap();
     // The source stalls; a second later its shots are unavailable, and the
     // mix ends two seconds after that.
     rig.advancing = false;
@@ -197,7 +194,7 @@ fn cut_during_a_mix_lands_the_new_shot_in_the_same_tick() {
         Err(CommandError::Switch(SwitchError::Busy)),
         "the T-bar cannot take over the mix"
     );
-    rig.apply(EngineCommand::Cut).unwrap();
+    rig.cut().unwrap();
     let cut_short = rig.step();
     let snap = rig.snapshot();
     assert_eq!(snap.switcher.program, Some(shot("cam/1/medium")));
@@ -233,13 +230,13 @@ fn cut_during_a_mix_refuses_an_incoming_shot_whose_source_stalled() {
         shot: shot("cam/1/medium"),
     })
     .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
+    rig.auto().unwrap();
     rig.advancing = false;
     rig.run_secs(1.5);
     let incoming = shot("cam/1/medium");
     assert!(!rig.snapshot().shot(&incoming).unwrap().available);
     assert_eq!(
-        rig.apply(EngineCommand::Cut),
+        rig.cut(),
         Err(CommandError::Switch(SwitchError::Unavailable(incoming)))
     );
     let snap = rig.snapshot();
@@ -259,7 +256,7 @@ fn cut_now_ends_a_mix_on_the_named_shot_in_one_command() {
         shot: shot("cam/2/medium"),
     })
     .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
+    rig.auto().unwrap();
     rig.apply(EngineCommand::CutTo {
         shot: named.clone(),
     })
@@ -295,10 +292,7 @@ fn cut_and_cut_now_are_refused_while_the_tbar_holds_a_transition() {
     rig.apply(EngineCommand::SetTBar { position: 0.5 }).unwrap();
     rig.step();
     assert!(rig.snapshot().switcher.tbar_held);
-    assert_eq!(
-        rig.apply(EngineCommand::Cut),
-        Err(CommandError::Switch(SwitchError::TBarHeld))
-    );
+    assert_eq!(rig.cut(), Err(CommandError::Switch(SwitchError::TBarHeld)));
     assert_eq!(
         rig.apply(EngineCommand::CutTo {
             shot: shot("cam/1/medium")
@@ -324,7 +318,7 @@ fn suggesting_while_mixing() -> (Rig, ShotId) {
         shot: shot("cam/1/medium"),
     })
     .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
+    rig.auto().unwrap();
     rig.run(3);
     let mine = shot("cam/1/close");
     rig.apply(EngineCommand::SetPreview { shot: mine.clone() })
@@ -367,14 +361,11 @@ fn a_shot_staged_during_a_mix_is_not_replaced_by_the_suggestion_when_it_lands() 
         assert!(ticks < 60, "the mix ends");
     }
     kept_on_preview(&rig, &mine, &staged);
-    // It stays, as a shot staged by hand would, until the suggestion
-    // changes again.
-    let landed = rig.core.decision().suggestion.clone();
+    assert_eq!(rig.snapshot().director.preview_held, Some(mine.clone()));
+    // It stays, as a shot staged by hand does, until it is taken or
+    // released.
     for _ in 0..30 {
         rig.step();
-        if rig.core.decision().suggestion != landed {
-            break;
-        }
         assert_eq!(rig.snapshot().switcher.preview, Some(mine.clone()));
     }
 
@@ -384,7 +375,7 @@ fn a_shot_staged_during_a_mix_is_not_replaced_by_the_suggestion_when_it_lands() 
     let staged = rig.core.last_staged.clone();
     rig.run(ticks - 1);
     assert!(rig.snapshot().switcher.in_transition);
-    rig.apply(EngineCommand::Cut).unwrap();
+    rig.cut().unwrap();
     assert_eq!(rig.snapshot().switcher.preview, Some(mine.clone()));
     rig.step();
     kept_on_preview(&rig, &mine, &staged);

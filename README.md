@@ -32,7 +32,8 @@ The window has the preview (green) and program (red) monitors with Cut,
 Auto, the transition selector and a T-bar between them; under them the
 multiview of every shot with tally borders, tracking status and quality.
 On the right: the director (mode Off/Suggest/Auto, profile Talk/Music, the
-current suggestion and why, Accept), the queries (add a prompt with its
+current suggestion and why, Accept and Skip, and Release while a shot you
+staged holds preview), the queries (add a prompt with its
 framings, remove one; pin, hide or show subjects) and the output (RTMP URL,
 recording path, start/stop, encoder statistics). Under the prompt a live
 line says how it reads, for example "Detector sees: a person speaking ·
@@ -54,8 +55,8 @@ source frame rates, tick timing and dropped frames.
 | double-click a tile | cut it straight to program ("Cut now") |
 | right-click a subject tile | pin, hide or re-acquire the subject |
 | `1`–`9` | stage tile 1–9 on preview (during a transition, for its end) |
-| `Space` | cut (during a transition, cut it short) |
-| `Enter` | auto transition (during one, queue a take of the shot staged meanwhile) |
+| `Space` | cut (during a transition, cut it short); refused if preview changed since you saw it |
+| `Enter` | auto transition (during one, queue a take of the shot staged meanwhile); refused likewise |
 | `Esc` | leave a focused field or control, so the shortcuts work again |
 
 Shortcuts are paused while a field or control has the keyboard (a prompt or
@@ -79,6 +80,21 @@ and while the T-bar holds a transition CUT is disabled, and `Space` and a
 double click on a tile are refused with a notice (the lever finishes or
 abandons it; the double click's first click still stages the tile for the
 end).
+
+Preview is the operator's. Cut and Auto (the buttons, `Space` and `Enter`)
+take the shot the window showed on preview when you pressed; if preview
+changed in between (the director restaged it a moment earlier), the take is
+refused with a notice, so nothing you did not see goes on air. A shot you
+stage holds preview against the director: in Suggest mode it never stages
+a suggestion over yours until you take it or click Release, and the status
+bar says what it held back. Skip leaves the current suggestion out of the
+suggestions for `skip_s` seconds. While the director runs in Auto mode the
+program monitor carries a red AUTO badge, and your own switching (a key, a
+click on a tile, Cut, Auto or the T-bar) takes over as `takeover` says: by
+default it drops the director to Suggest; `"pause"` holds its takes for
+`pause_s` seconds after each action, counted down on the badge; with
+`"director"` it carries on and stages its shot over yours. A notice says
+which happened.
 
 ## Headless mode
 
@@ -165,6 +181,9 @@ rate_hz = 1.0                # detector passes per second per source
 [director]
 mode = "suggest"             # off, suggest or auto
 profile = "music"            # talk or music
+takeover = "suggest"         # what your switching does in Auto mode: suggest, pause or director
+pause_s = 10                 # with takeover = "pause", seconds each action holds its takes
+skip_s = 30                  # seconds a skipped suggestion stays out
 
 [output]
 width = 1280

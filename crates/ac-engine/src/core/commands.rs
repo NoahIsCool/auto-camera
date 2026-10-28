@@ -15,9 +15,22 @@
 //! pressed and checked again when it fires, a tick or more later, where no
 //! reply is waiting; a take dropped there is counted in the snapshot with
 //! its reason ([`crate::snapshot::SwitcherView::last_dropped`]), and the
-//! window shows it as it shows a refused command. A command that ends a
-//! transition and lands a shot the operator staged meanwhile notes it for
-//! the director ([`EngineCore::note_landing`]), as a tick does.
+//! window shows it as it shows a refused command.
+//!
+//! Cut and Auto are fenced: they carry the preview their sender saw and
+//! are refused, before anything else is checked, when the preview bus
+//! shows anything else ([`crate::command`]). Staging a shot puts the
+//! operator's hold on preview ([`super::directing`]); Skip and
+//! ReleasePreview end it, Skip also leaving the shot out of the director's
+//! suggestions for its window.
+//!
+//! The operator's own switching (staging, Cut, Cut now, Auto, the T-bar)
+//! is also a manual action for the director: once it has been applied, a
+//! director in Auto mode takes over as its takeover setting says
+//! ([`ac_director::Director::take_over`]), and the reply says what that
+//! did ([`CommandReply::TookOver`]). A refused action takes nothing over,
+//! as it changes nothing. Accepting or skipping a suggestion follows the
+//! director rather than overriding it, so neither is a manual action.
 //!
 //! Protection (on-air subjects are never removed) is refreshed before and
 //! after every command, not only at the start of a tick: a cut followed at
@@ -38,17 +51,20 @@ impl EngineCore {
     pub fn apply(&mut self, cmd: &EngineCommand) -> Result<CommandReply, CommandError> {
         use EngineCommand as C;
         self.update_protection();
-        let queued = self.switcher.queued().cloned();
-        match cmd {
+        let manual = match cmd {
             C::SetPreview { shot } => {
                 if self.catalog.get(shot).is_none() {
                     return Err(CommandError::UnknownShot(shot.clone()));
                 }
                 self.switcher.set_preview(shot.clone());
+                self.preview_hold = Some(shot.clone());
+                true
             }
-            C::Cut => {
+            C::Cut { preview } => {
+                self.fence(preview)?;
                 let catalog = &self.catalog;
                 self.switcher.cut(|id| catalog.is_available(id))?;
+                true
             }
             C::CutTo { shot } => {
                 if self.catalog.get(shot).is_none() {
@@ -57,10 +73,13 @@ impl EngineCore {
                 let catalog = &self.catalog;
                 self.switcher
                     .cut_to(shot.clone(), |id| catalog.is_available(id))?;
+                true
             }
-            C::Auto => {
+            C::Auto { preview } => {
+                self.fence(preview)?;
                 let catalog = &self.catalog;
                 self.switcher.auto(|id| catalog.is_available(id))?;
+                true
             }
             C::SetTBar { position } => {
                 if !position.is_finite() {
@@ -71,8 +90,12 @@ impl EngineCore {
                 let catalog = &self.catalog;
                 self.switcher
                     .set_tbar(*position, |id| catalog.is_available(id))?;
+                true
             }
-            C::SetTransition { transition } => self.switcher.set_transition(*transition)?,
+            C::SetTransition { transition } => {
+                self.switcher.set_transition(*transition)?;
+                false
+            }
             C::AddQuery {
                 name,
                 prompt,
@@ -89,6 +112,7 @@ impl EngineCore {
                     s.vision.remove_query(query);
                     s.discovery.matches.remove(query);
                 }
+                false
             }
             C::Pin {
                 source,
@@ -97,6 +121,7 @@ impl EngineCore {
             } => {
                 let i = self.require_source(source)?;
                 self.sources[i].vision.set_pinned(*subject, *pinned)?;
+                false
             }
             C::Hide {
                 source,
@@ -105,6 +130,7 @@ impl EngineCore {
             } => {
                 let i = self.require_source(source)?;
                 self.sources[i].vision.set_hidden(*subject, *hidden)?;
+                false
             }
             C::Reacquire {
                 source,
@@ -117,16 +143,26 @@ impl EngineCore {
                     CommandError::Invalid(format!("source {:?} has no frame yet", source.0))
                 })?;
                 s.vision.reacquire(*subject, *bbox, &frame)?;
+                false
             }
             C::SetDirectorMode { mode } => {
                 self.director.set_mode(*mode);
+                self.preview_hold = None;
                 self.last_staged = None;
+                false
             }
             C::SetDirectorProfile { profile } => {
-                let config = DirectorConfig::new(self.director.config().mode, *profile);
+                let current = self.director.config();
+                let config = DirectorConfig {
+                    takeover: current.takeover,
+                    pause: current.pause,
+                    skip: current.skip,
+                    ..DirectorConfig::new(current.mode, *profile)
+                };
                 self.director
                     .set_config(config)
                     .map_err(|e| CommandError::Invalid(e.to_string()))?;
+                false
             }
             C::AcceptSuggestion => {
                 let shot = self
@@ -135,6 +171,21 @@ impl EngineCore {
                     .clone()
                     .ok_or(CommandError::NoSuggestion)?;
                 self.accept(shot)?;
+                false
+            }
+            C::Skip { shot } => {
+                if self.catalog.get(shot).is_none() {
+                    return Err(CommandError::UnknownShot(shot.clone()));
+                }
+                self.director.skip(shot.clone(), self.now);
+                if self.preview_hold.as_ref() == Some(shot) {
+                    self.release_hold();
+                }
+                false
+            }
+            C::ReleasePreview => {
+                self.release_hold();
+                false
             }
             C::StartOutput { .. } | C::StopOutput | C::Shutdown => {
                 return Err(CommandError::Invalid(format!(
@@ -142,11 +193,29 @@ impl EngineCore {
                     cmd.name()
                 )));
             }
-        }
-        self.note_landing(queued);
+        };
+        let reply = match manual.then(|| self.director.take_over(self.now)).flatten() {
+            Some(handover) => CommandReply::TookOver(handover),
+            None => CommandReply::Done,
+        };
+        self.refresh_hold();
         self.update_protection();
         self.note_program();
-        Ok(CommandReply::Done)
+        Ok(reply)
+    }
+
+    /// Refuses a take whose sender saw `seen` on preview when the preview
+    /// bus shows anything else (see the module docs).
+    fn fence(&self, seen: &Option<ShotId>) -> Result<(), CommandError> {
+        let preview = self.switcher.preview();
+        if preview == seen.as_ref() {
+            Ok(())
+        } else {
+            Err(CommandError::PreviewChanged {
+                seen: seen.clone(),
+                preview: preview.cloned(),
+            })
+        }
     }
 
     /// Reads the prompt once with the studio's reader (its lexicon and
@@ -171,13 +240,15 @@ impl EngineCore {
 
     /// Stages `shot` on preview and runs Auto to it; during a transition,
     /// queues both for its end, unless the transition brings `shot` in
-    /// already.
+    /// already. The operator's hold on preview ends: they chose the
+    /// director's shot over it.
     fn accept(&mut self, shot: ShotId) -> Result<(), CommandError> {
         if !self.catalog.is_available(&shot) {
             return Err(CommandError::Switch(ac_switcher::SwitchError::Unavailable(
                 shot,
             )));
         }
+        self.release_hold();
         self.switcher.set_preview(shot);
         let catalog = &self.catalog;
         self.switcher.auto(|id| catalog.is_available(id))?;

@@ -16,8 +16,23 @@
 //! The status bar shows one notice ([`super::notices`]). The console raises
 //! the reply notices it is handed, then reads the snapshot, which raises
 //! one for a take the switcher dropped since the last frame (a queued take
-//! is answered when it is queued, so its drop is only in the snapshots),
+//! is answered when it is queued, so its drop is only in the snapshots) and
+//! one for a suggestion the director held back for the operator's shot,
 //! and clears a notice that has been shown long enough, by egui's clock.
+//!
+//! # The preview the operator saw
+//!
+//! Cut and Auto carry the preview the operator saw, and the engine refuses
+//! them when preview shows anything else ([`ac_engine::command`]). A press
+//! handled on a frame was made looking at the previous frame, so that is
+//! the preview the console sends: the one the last frame drew, or, when
+//! that frame staged a shot itself (with no transition running, so the
+//! shot went straight to preview), that shot, which its picture could not
+//! show yet. A shot staged by a key earlier in the same frame counts too,
+//! so 2 and Space in one frame cut tile 2. Anything else that changed
+//! preview since (the director restaging it, above all) makes the engine
+//! refuse the take, and the window says so: a take never puts on air a
+//! shot the operator did not see on preview.
 //!
 //! # Keyboard focus
 //!
@@ -77,6 +92,9 @@ pub struct Console {
     guard: CloseGuard,
     /// The status bar's notice and the dropped takes already noticed.
     notices: Notices,
+    /// The preview the operator saw on the last frame (see the module
+    /// docs).
+    shown: Option<ShotId>,
     /// Program aspect ratio.
     aspect: f32,
 }
@@ -97,6 +115,7 @@ impl Console {
             ),
             guard: CloseGuard::default(),
             notices: Notices::new(first),
+            shown: first.switcher.preview.clone(),
             aspect: config.output.width as f32 / config.output.height.max(1) as f32,
         }
     }
@@ -142,10 +161,20 @@ impl Console {
         }
         let paused = ctx.egui_wants_keyboard_input() || self.guard.question().is_some();
         let ids: Vec<ShotId> = snap.shots.iter().map(|s| s.id.clone()).collect();
-        let mut commands: Vec<EngineCommand> = keys::actions(&events, paused)
-            .into_iter()
-            .filter_map(|a| keys::command(a, &ids))
-            .collect();
+        let idle = !snap.switcher.in_transition;
+        let mut seen = self.shown.clone();
+        let mut commands = Vec::new();
+        for action in keys::actions(&events, paused) {
+            let Some(command) = keys::command(action, &ids, &seen) else {
+                continue;
+            };
+            if let EngineCommand::SetPreview { shot } = &command
+                && idle
+            {
+                seen = Some(shot.clone());
+            }
+            commands.push(command);
+        }
         egui::Panel::bottom("status").show(ui, |ui| {
             let notice = notice.as_ref().map(|(text, error)| (text.as_str(), *error));
             panels::status_bar(ui, snap, paused, notice);
@@ -177,6 +206,7 @@ impl Console {
             commands.extend(switching::show(
                 ui,
                 snap,
+                &seen,
                 &mut self.switch,
                 &mut self.textures,
                 self.aspect,
@@ -194,6 +224,10 @@ impl Console {
                 None => {}
             }
         }
+        self.shown = match commands.iter().rev().find(|c| switches(c)) {
+            Some(EngineCommand::SetPreview { shot }) if idle => Some(shot.clone()),
+            _ => snap.switcher.preview.clone(),
+        };
         self.textures.retain(|name| {
             name.starts_with("monitor/")
                 || name
@@ -202,6 +236,19 @@ impl Console {
         });
         commands
     }
+}
+
+/// True when `command` changes the buses: staging, a take or the T-bar.
+fn switches(command: &EngineCommand) -> bool {
+    matches!(
+        command,
+        EngineCommand::SetPreview { .. }
+            | EngineCommand::Cut { .. }
+            | EngineCommand::CutTo { .. }
+            | EngineCommand::Auto { .. }
+            | EngineCommand::SetTBar { .. }
+            | EngineCommand::AcceptSuggestion
+    )
 }
 
 #[cfg(test)]

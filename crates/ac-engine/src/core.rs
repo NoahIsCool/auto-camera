@@ -31,8 +31,9 @@
 //!    a take the operator queued during it fires if the catalog still has
 //!    its shot available, and is dropped with the reason otherwise
 //!    ([`ac_switcher`]). The director then proposes (and in Auto mode
-//!    takes) a shot; a shot the operator staged during the transition
-//!    that landed on preview as it ended counts as the operator's staging.
+//!    takes) a shot; a shot the operator staged holds preview against the
+//!    director's suggestions until it is taken or released
+//!    ([`directing`]).
 //! 7. **Rendering.** The compositor renders the program; monitors and
 //!    multiview tiles are rendered at their own, lower rates.
 //! 8. **Discovery requests** are issued for sources that are due (at most
@@ -241,11 +242,18 @@ pub struct EngineCore {
     director: Director,
     /// The director's newest decision.
     decision: DirectorDecision,
-    /// Suggestion last staged on preview in suggest mode.
+    /// Suggestion last staged on preview, or passed over for the
+    /// operator's hold, in suggest mode (see [`directing`]).
     last_staged: Option<ShotId>,
-    /// A shot the operator staged during a transition has landed on
-    /// preview since the director last ran (see [`directing`]).
-    operator_staged: bool,
+    /// The shot the operator staged, which holds preview against the
+    /// director's suggestions until it is taken or released (see
+    /// [`directing`]).
+    preview_hold: Option<ShotId>,
+    /// Suggestions the director did not stage because of the operator's
+    /// hold.
+    held_back: u64,
+    /// The newest of them.
+    last_held_back: Option<ShotId>,
     /// Takes requested by the director.
     director_takes: u64,
     /// Program renderer.
@@ -340,7 +348,9 @@ impl EngineCore {
             director,
             decision: DirectorDecision::off(),
             last_staged: None,
-            operator_staged: false,
+            preview_hold: None,
+            held_back: 0,
+            last_held_back: None,
             director_takes: 0,
             compositor,
             now: Duration::ZERO,
@@ -431,10 +441,8 @@ impl EngineCore {
         }
         self.sync_catalog();
         self.step_framing(dt);
-        let queued = self.switcher.queued().cloned();
         let catalog = &self.catalog;
         self.switcher.tick(dt, |id| catalog.is_available(id));
-        self.note_landing(queued);
         self.note_program();
         self.run_director();
         self.note_program();

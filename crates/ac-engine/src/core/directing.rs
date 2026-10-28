@@ -1,5 +1,6 @@
 //! The director's side of a tick: program book-keeping, running the
-//! [`Director`](ac_director::Director) and acting on its decision.
+//! [`Director`](ac_director::Director) and acting on its decision, and the
+//! operator's hold on preview.
 //!
 //! The director only ever sees [`ShotCandidate`]s built from the catalog,
 //! and acts through the same switcher calls as the operator, so every
@@ -7,29 +8,49 @@
 //!
 //! - **Off**: nothing is staged.
 //! - **Suggest**: a suggestion is put on preview only when it *changes*
-//!   (edge-triggered), so an operator who stages something else is not
-//!   overridden every tick.
-//! - **Auto**: the suggestion is staged every tick and takes are executed.
+//!   (edge-triggered), and never over the operator's hold (below).
+//! - **Auto**: the suggestion is staged every tick and takes are executed;
+//!   while the operator's switching pauses auto-takes
+//!   ([`Takeover::Pause`](ac_director::Takeover::Pause)) it stages as in
+//!   Suggest mode instead, hold included.
+//!
+//! # The operator's hold
+//!
+//! A shot the operator stages ([`EngineCommand::SetPreview`]) locks
+//! preview against the director: in Suggest mode (and in a paused Auto)
+//! the director never stages over it, however its suggestion changes,
+//! until the operator takes the shot or the hold is cleared. Each
+//! suggestion passed over this way spends its edge, as if staged, and is
+//! counted with the newest kept for the snapshot
+//! ([`DirectorView::held_back`](crate::snapshot::DirectorView::held_back)),
+//! so the window can say what the director would have staged. The hold
+//! covers a shot staged during a transition too: it waits in the
+//! switcher's queue and lands on preview at the end, where it stays.
+//!
+//! The hold ends ([`EngineCore::refresh_hold`]) when its shot is on
+//! program (taken, by any means), when neither the preview bus nor the
+//! queue holds it any more (a Cut now, a take of the director in Auto mode
+//! or an accepted suggestion replaced it), and on
+//! [`EngineCommand::ReleasePreview`], a skip of the held shot or a mode
+//! change. Then the director's edge is reset, so it stages its current
+//! suggestion on its next tick. A non-paused Auto stages over a hold
+//! (the director wins there, by the takeover setting or because the
+//! operator chose Auto), which ends it.
 //!
 //! Staging is skipped during a transition. The switcher would queue it for
 //! the transition's end, where it would replace a shot the operator staged
 //! meanwhile; the director stages once the transition has ended instead:
 //! on the tick that ends it, or on the next tick when a command (the T-bar
-//! or Cut) ends it. A shot the operator staged during the transition lands
-//! on preview at that end, before the director runs, and the program
-//! change there often changes the suggestion too. In Suggest mode the
-//! landing counts as the operator staging over the suggestion
-//! ([`EngineCore::note_landing`]): the director's next suggestion is marked
-//! staged without being staged, so the edge is spent on the operator's
-//! choice and the director stages again only when its suggestion changes
-//! after that, as after a shot staged by hand. (Auto mode stages every
-//! tick regardless.)
+//! or Cut) ends it.
+//!
+//! [`EngineCommand::SetPreview`]: crate::command::EngineCommand::SetPreview
+//! [`EngineCommand::ReleasePreview`]: crate::command::EngineCommand::ReleasePreview
 
 use std::time::Duration;
 
 use ac_core::ShotId;
 use ac_director::{DirectorInput, DirectorMode, ShotCandidate};
-use ac_switcher::{Queued, TransitionKind};
+use ac_switcher::TransitionKind;
 
 use super::EngineCore;
 
@@ -50,22 +71,30 @@ impl EngineCore {
         }
     }
 
-    /// Notes whether `queued`, the press waiting before a switcher call,
-    /// was a shot the operator staged that the call landed on preview at the
-    /// end of its transition, with no take of it running (see the module
-    /// docs).
-    pub(super) fn note_landing(&mut self, queued: Option<Queued>) {
-        let landed = queued.is_some_and(|q| {
-            self.switcher.queued().is_none()
-                && !self.switcher.in_transition()
-                && self.switcher.preview() == Some(&q.shot)
-        });
-        self.operator_staged |= landed;
+    /// Ends the operator's hold on preview once its shot is on program or
+    /// no longer staged (see the module docs).
+    pub(super) fn refresh_hold(&mut self) {
+        let Some(held) = &self.preview_hold else {
+            return;
+        };
+        let staged = self.switcher.preview() == Some(held)
+            || self.switcher.queued().is_some_and(|q| &q.shot == held);
+        if self.switcher.program() == Some(held) || !staged {
+            self.release_hold();
+        }
+    }
+
+    /// Ends the operator's hold, so the director stages its suggestion on
+    /// its next tick.
+    pub(super) fn release_hold(&mut self) {
+        if self.preview_hold.take().is_some() {
+            self.last_staged = None;
+        }
     }
 
     /// Runs the director and acts on its decision for the current mode.
     pub(super) fn run_director(&mut self) {
-        let operator_staged = std::mem::take(&mut self.operator_staged);
+        self.refresh_hold();
         let candidates: Vec<ShotCandidate> = self
             .catalog
             .entries()
@@ -94,22 +123,15 @@ impl EngineCore {
         };
         let decision = self.director.tick(&input);
         let busy = self.switcher.in_transition();
+        let paused = self.director.paused(self.now).is_some();
         match self.director.config().mode {
             DirectorMode::Off => self.last_staged = None,
-            DirectorMode::Suggest => {
-                if operator_staged {
-                    self.last_staged = decision.suggestion.clone();
-                } else if decision.suggestion != self.last_staged {
-                    match &decision.suggestion {
-                        Some(s) if self.stage(s, busy) => self.last_staged = Some(s.clone()),
-                        Some(_) => {}
-                        None => self.last_staged = None,
-                    }
-                }
-            }
-            DirectorMode::Auto => {
-                if let Some(s) = &decision.suggestion {
-                    self.stage(s, busy);
+            DirectorMode::Auto if !paused => {
+                if let Some(s) = &decision.suggestion
+                    && self.stage(s, busy)
+                {
+                    // So a drop to Suggest does not restage it.
+                    self.last_staged = Some(s.clone());
                 }
                 if let Some(take) = &decision.take {
                     self.director_takes += 1;
@@ -119,8 +141,33 @@ impl EngineCore {
                     );
                 }
             }
+            DirectorMode::Suggest | DirectorMode::Auto => {
+                self.suggest(decision.suggestion.as_ref(), busy);
+            }
         }
         self.decision = decision;
+        self.refresh_hold();
+    }
+
+    /// Suggest-mode staging of `suggestion`: only when it changed, and
+    /// never over the operator's hold (see the module docs).
+    fn suggest(&mut self, suggestion: Option<&ShotId>, busy: bool) {
+        if suggestion == self.last_staged.as_ref() {
+            return;
+        }
+        let Some(s) = suggestion else {
+            self.last_staged = None;
+            return;
+        };
+        if let Some(held) = &self.preview_hold {
+            if held != s {
+                self.held_back += 1;
+                self.last_held_back = Some(s.clone());
+            }
+            self.last_staged = Some(s.clone());
+        } else if self.stage(s, busy) {
+            self.last_staged = Some(s.clone());
+        }
     }
 
     /// Puts `shot` on preview unless it is there; false, changing nothing,

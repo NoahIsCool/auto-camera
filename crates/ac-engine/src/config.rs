@@ -187,7 +187,8 @@ pub struct StudioConfig {
     /// Framing controller tuning (partial table over the defaults).
     #[serde(default, deserialize_with = "partial")]
     pub framing: FramerConfig,
-    /// Auto-director mode and profile.
+    /// Auto-director mode, profile and the operator's side (takeover,
+    /// pause and skip windows).
     #[serde(default)]
     pub director: DirectorSettings,
     /// Initial transition.
@@ -401,7 +402,7 @@ impl StudioConfig {
 
     /// The director parameters, validated.
     pub fn director_config(&self) -> Result<DirectorConfig, ConfigError> {
-        let c = DirectorConfig::new(self.director.mode, self.director.profile);
+        let c = self.director.to_director_config()?;
         c.validate()
             .map_err(|e| ConfigError::Invalid(format!("director: {e}")))?;
         Ok(c)

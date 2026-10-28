@@ -24,7 +24,10 @@ fn a_recording_session_writes_a_playable_file() {
         shot: ShotId("stage/wide".into()),
     })
     .unwrap();
-    h.send(EngineCommand::Cut).unwrap();
+    h.send(EngineCommand::Cut {
+        preview: Some(ShotId("stage/wide".into())),
+    })
+    .unwrap();
     assert_eq!(
         h.send(EngineCommand::StartOutput {
             rtmp_url: None,

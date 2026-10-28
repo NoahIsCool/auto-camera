@@ -7,11 +7,22 @@
 //! start of a tick, atomically with respect to rendering, and answers each
 //! with a [`CommandReply`] or a [`CommandError`] that says exactly why it was
 //! refused. A refused command changes nothing.
+//!
+//! # Fencing
+//!
+//! A take must put on air the shot the operator looked at, but the engine
+//! may restage preview between the snapshot the operator saw and the
+//! command's arrival (the director stages its suggestion every tick in Auto
+//! mode). So [`EngineCommand::Cut`] and [`EngineCommand::Auto`] carry the
+//! preview their sender saw, and are refused with
+//! [`CommandError::PreviewChanged`] when the preview bus shows anything
+//! else (spec C.1: fencing against stale commands). Cut now
+//! ([`EngineCommand::CutTo`]) names its shot, so it needs no fence.
 
 use std::path::PathBuf;
 
 use ac_core::{Preset, QueryId, Rect, ShotId, SourceId, SubjectId};
-use ac_director::{ContentProfile, DirectorMode};
+use ac_director::{ContentProfile, DirectorMode, Handover};
 use ac_subjects::StoreError;
 use ac_switcher::{SwitchError, Transition};
 use thiserror::Error;
@@ -25,8 +36,13 @@ pub enum EngineCommand {
         shot: ShotId,
     },
     /// Swap preview and program at once; during a transition, cut it short,
-    /// landing the shot it brings in.
-    Cut,
+    /// landing the shot it brings in. Refused unless preview shows
+    /// `preview` (see the module docs).
+    Cut {
+        /// The preview the sender saw: the shot staged, or the shot a
+        /// running transition brings in; `None` for an empty preview.
+        preview: Option<ShotId>,
+    },
     /// Cut `shot` straight to program ("Cut now"), whatever is staged and
     /// whether or not a transition runs, in one step.
     CutTo {
@@ -35,7 +51,11 @@ pub enum EngineCommand {
     },
     /// Run the selected transition from program to preview; during a
     /// transition, queue a take of the shot staged meanwhile for its end.
-    Auto,
+    /// Refused unless preview shows `preview`, as [`Self::Cut`].
+    Auto {
+        /// The preview the sender saw, as for [`Self::Cut`].
+        preview: Option<ShotId>,
+    },
     /// Move the T-bar to `position` in `0.0..=1.0`.
     SetTBar {
         /// Bar position.
@@ -107,6 +127,15 @@ pub enum EngineCommand {
     /// Stage the director's suggestion on preview and run Auto to it
     /// (queued like [`EngineCommand::Auto`] during a transition).
     AcceptSuggestion,
+    /// Leave `shot` out of the director's suggestions for its skip window
+    /// (`director.skip_s`); a hold the operator has on preview with it ends.
+    Skip {
+        /// The shot, normally the suggestion the sender saw.
+        shot: ShotId,
+    },
+    /// End the operator's hold on preview, so the director stages its
+    /// suggestion again ([`crate::core`] has the rules).
+    ReleasePreview,
     /// Start the program encoder. Destinations default to the config's.
     StartOutput {
         /// RTMP URL with stream key.
@@ -125,9 +154,9 @@ impl EngineCommand {
     pub fn name(&self) -> &'static str {
         match self {
             EngineCommand::SetPreview { .. } => "set_preview",
-            EngineCommand::Cut => "cut",
+            EngineCommand::Cut { .. } => "cut",
             EngineCommand::CutTo { .. } => "cut_to",
-            EngineCommand::Auto => "auto",
+            EngineCommand::Auto { .. } => "auto",
             EngineCommand::SetTBar { .. } => "set_tbar",
             EngineCommand::SetTransition { .. } => "set_transition",
             EngineCommand::AddQuery { .. } => "add_query",
@@ -138,6 +167,8 @@ impl EngineCommand {
             EngineCommand::SetDirectorMode { .. } => "set_director_mode",
             EngineCommand::SetDirectorProfile { .. } => "set_director_profile",
             EngineCommand::AcceptSuggestion => "accept_suggestion",
+            EngineCommand::Skip { .. } => "skip",
+            EngineCommand::ReleasePreview => "release_preview",
             EngineCommand::StartOutput { .. } => "start_output",
             EngineCommand::StopOutput => "stop_output",
             EngineCommand::Shutdown => "shutdown",
@@ -159,6 +190,9 @@ pub enum CommandReply {
     OutputStarting,
     /// The encoder is finishing; the final stats show in the snapshot.
     OutputStopping,
+    /// Applied, and as the operator's own switching while the director ran
+    /// in Auto mode, it took over as `director.takeover` says.
+    TookOver(Handover),
 }
 
 /// Why a command was refused.
@@ -188,6 +222,19 @@ pub enum CommandError {
     /// The director has no suggestion to accept.
     #[error("the director has no suggestion")]
     NoSuggestion,
+    /// Preview changed after the sender saw it, so the take was refused
+    /// (see the module docs).
+    #[error(
+        "preview changed to {} since you saw {}: nothing was taken",
+        bus(.preview),
+        bus(.seen)
+    )]
+    PreviewChanged {
+        /// The preview the sender saw.
+        seen: Option<ShotId>,
+        /// The preview it shows now.
+        preview: Option<ShotId>,
+    },
     /// The output is already running or starting.
     #[error("output is already {0}")]
     OutputBusy(&'static str),
@@ -202,6 +249,14 @@ pub enum CommandError {
     Unavailable(&'static str),
 }
 
+/// A preview bus in an error message: the shot, or "nothing".
+fn bus(shot: &Option<ShotId>) -> String {
+    match shot {
+        Some(shot) => format!("{shot:?}"),
+        None => "nothing".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,11 +267,11 @@ mod tests {
             EngineCommand::SetPreview {
                 shot: ShotId("a".into()),
             },
-            EngineCommand::Cut,
+            EngineCommand::Cut { preview: None },
             EngineCommand::CutTo {
                 shot: ShotId("a".into()),
             },
-            EngineCommand::Auto,
+            EngineCommand::Auto { preview: None },
             EngineCommand::SetTBar { position: 0.5 },
             EngineCommand::SetTransition {
                 transition: Transition::default(),
@@ -252,6 +307,10 @@ mod tests {
                 profile: ContentProfile::Music,
             },
             EngineCommand::AcceptSuggestion,
+            EngineCommand::Skip {
+                shot: ShotId("a".into()),
+            },
+            EngineCommand::ReleasePreview,
             EngineCommand::StartOutput {
                 rtmp_url: None,
                 record_path: None,
@@ -271,6 +330,14 @@ mod tests {
             CommandError::UnknownShot(ShotId("x".into()))
                 .to_string()
                 .contains('x')
+        );
+        let changed = CommandError::PreviewChanged {
+            seen: Some(ShotId("mine".into())),
+            preview: None,
+        };
+        assert_eq!(
+            changed.to_string(),
+            "preview changed to nothing since you saw ShotId(\"mine\"): nothing was taken"
         );
     }
 }

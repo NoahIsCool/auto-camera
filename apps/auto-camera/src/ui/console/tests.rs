@@ -6,6 +6,7 @@
 //! the window draws and checks the commands it sends; [`switching`] sends
 //! them to a live core instead, to see what goes on air.
 
+mod operator;
 mod switching;
 
 use super::*;
@@ -263,14 +264,15 @@ fn drops_counted_before_the_window_opened_raise_no_notice() {
 #[test]
 fn space_cuts_and_enter_runs_the_transition() {
     let mut h = window(snapshot());
+    // Both carry the preview the window shows: none here.
     press(&mut h, Key::Space);
-    assert_eq!(sent(&mut h), [EngineCommand::Cut]);
+    assert_eq!(sent(&mut h), [EngineCommand::Cut { preview: None }]);
     press(&mut h, Key::Enter);
-    assert_eq!(sent(&mut h), [EngineCommand::Auto]);
+    assert_eq!(sent(&mut h), [EngineCommand::Auto { preview: None }]);
     // The shortcut is the press: Shift does not change it, Ctrl takes it.
     h.key_press_modifiers(Modifiers::SHIFT, Key::Space);
     h.run();
-    assert_eq!(sent(&mut h), [EngineCommand::Cut]);
+    assert_eq!(sent(&mut h), [EngineCommand::Cut { preview: None }]);
     h.key_press_modifiers(Modifiers::CTRL, Key::Enter);
     h.run();
     assert_eq!(sent(&mut h), []);
@@ -294,13 +296,13 @@ fn a_focused_drag_value_pauses_space_and_enter() {
     assert!(
         !taken
             .iter()
-            .any(|c| matches!(c, EngineCommand::Cut | EngineCommand::Auto)),
+            .any(|c| matches!(c, EngineCommand::Cut { .. } | EngineCommand::Auto { .. })),
         "{taken:?}"
     );
     // The edit is over, so the shortcuts are back.
     assert!(!paused(&h));
     press(&mut h, Key::Space);
-    assert_eq!(sent(&mut h), [EngineCommand::Cut]);
+    assert_eq!(sent(&mut h), [EngineCommand::Cut { preview: None }]);
 }
 
 #[test]
@@ -351,12 +353,15 @@ fn escape_drops_the_focus_of_any_widget() {
     assert!(paused(&h));
     press(&mut h, Key::Space);
     let taken = sent(&mut h);
-    assert!(!taken.contains(&EngineCommand::Cut), "{taken:?}");
+    assert!(
+        !taken.iter().any(|c| matches!(c, EngineCommand::Cut { .. })),
+        "{taken:?}"
+    );
     press(&mut h, Key::Escape);
     assert!(h.ctx.memory(|m| m.focused()).is_none());
     assert!(!paused(&h));
     press(&mut h, Key::Space);
-    assert_eq!(sent(&mut h), [EngineCommand::Cut]);
+    assert_eq!(sent(&mut h), [EngineCommand::Cut { preview: None }]);
     // egui alone keeps the focus on Escape with a modifier; the console
     // drops it all the same.
     h.get_all_by_role(Role::TextInput).next().unwrap().focus();
@@ -376,14 +381,20 @@ fn cut_and_auto_buttons_take_when_a_shot_is_staged() {
     h.run();
     assert_eq!(sent(&mut h), []);
     let mut snap = snapshot();
-    snap.switcher.preview = Some(snap.shots[0].id.clone());
+    let staged = Some(snap.shots[0].id.clone());
+    snap.switcher.preview = staged.clone();
     let mut h = window(snap);
     h.get_by_label("CUT").click();
     h.run();
-    assert_eq!(sent(&mut h), [EngineCommand::Cut]);
+    assert_eq!(
+        sent(&mut h),
+        [EngineCommand::Cut {
+            preview: staged.clone()
+        }]
+    );
     h.get_by_label("AUTO").click();
     h.run();
-    assert_eq!(sent(&mut h), [EngineCommand::Auto]);
+    assert_eq!(sent(&mut h), [EngineCommand::Auto { preview: staged }]);
     // Clicking leaves no widget holding the keyboard.
     assert!(!paused(&h));
 }
