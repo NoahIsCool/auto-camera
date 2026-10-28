@@ -28,6 +28,8 @@ use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::ShotStatus;
 use serde::Serialize;
 
+use super::alarms::AlarmSummary;
+
 /// The JSON summary of a run.
 #[derive(Debug, Clone, Serialize)]
 pub struct Summary {
@@ -61,6 +63,9 @@ pub struct Summary {
     pub program: ProgramSummary,
     /// Auto-director state at the end.
     pub director: DirectorSummary,
+    /// Every alarm the run raised (spec M14), in raise order, with when
+    /// its cause cleared (`alarms` module).
+    pub alarms: Vec<AlarmSummary>,
     /// Master-clock timing.
     pub timing: TimingSummary,
     /// The output session, when one was started.

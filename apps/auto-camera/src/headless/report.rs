@@ -243,6 +243,7 @@ pub(super) fn summarize(
                 .collect(),
         },
         director,
+        alarms: sampler.alarms.summary(),
         timing: TimingSummary {
             budget_ms: round(timing.budget_ms, 2),
             avg_ms: round(timing.tick.avg_ms, 2),

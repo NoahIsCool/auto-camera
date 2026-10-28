@@ -51,6 +51,20 @@ and the monitors and the director's suggestion name it "Speaker 1 Close
 subject's shots (two sizes both drawn at the ceiling). The status bar shows
 source frame rates, tick timing and dropped frames.
 
+Above it, the status bar lists alarms (spec M14), one row each, for as long
+as their cause lasts: the program black for 2 s while the output runs, the
+program on a subject lost for half a second, the program's source sending
+no new frame for over half a second, encoder drops, a failed output, the
+stream reconnecting or down, and a recording without audio (no audio track,
+or no source audio for 2 s). Each clears only once its cause has been gone
+for a while (a second for the picture and audio, five for drops and a
+reconnected stream), so it does not flicker. Acknowledge dims an alarm and
+removes its button, but it stays listed until its cause clears; one that
+comes back is new. With `start_on_wide = true` in the `[switcher]` table the
+first source's wide is on program from the start (it shows black until
+the source delivers), so a studio restarted after a crash goes out on a
+clean wide instead of black.
+
 | Input | Action |
 |---|---|
 | click a tile | stage it on preview |
@@ -147,9 +161,12 @@ it was lost and opened again (`outages`, `reconnects`):
 
 (abridged). Each query's `matches` is the prompt feedback of the window:
 what the newest applied detector pass of each source found for it, and on
-which frame. The exit status is 0 on success, 1 when the engine, the output
-or the trace failed or a source never delivered a picture during the run
-(`ok` is false and `error` says why), 2 for usage and configuration errors.
+which frame. `alarms` lists every alarm the run raised, by the window's
+rules, with its `kind`, `message`, `raised_s` and `cleared_s` (`null` when
+it was still raised at the end). The exit status is 0 on success, 1 when
+the engine, the output or the trace failed or a source never delivered a
+picture during the run (`ok` is false and `error` says why), 2 for usage
+and configuration errors.
 Recordings are never overwritten: an existing `--record` path is an error.
 
 ### Per-tick trace
@@ -317,9 +334,9 @@ added in the window joins the end of the list (or gets 3 when priorities
 are given), and a priority outside 1 to 5 is a configuration error.
 
 Further sections tune the `tracker`, `subjects` (limits and lost/retire
-times), `framing`, `switcher` (default transition), `monitors` (monitor
-and multiview tile sizes and rates) and `lexicon` (below); see
-`crates/ac-engine/src/config.rs`. Every value is checked when the file
+times), `framing`, `switcher` (default transition, `start_on_wide`),
+`monitors` (monitor and multiview tile sizes and rates) and `lexicon` (below);
+see `crates/ac-engine/src/config.rs`. Every value is checked when the file
 loads; the `output` table with the encoder's own ranges (even sizes up to
 7680x4320, 1–120 fps, `video_bitrate_kbps` 100–100000,
 `audio_bitrate_kbps` 32–512, `keyframe_seconds` 1–10, an `rtmp://` or

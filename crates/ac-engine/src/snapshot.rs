@@ -404,6 +404,14 @@ pub struct EngineSnapshot {
     pub preview_monitor: Option<VideoFrame>,
     /// Shots that should have been visible on program but were drawn black.
     pub render_issues: Vec<String>,
+    /// Master-clock time of the first of the consecutive program frames,
+    /// ending with this tick's, that looked black (nearly every pixel dark,
+    /// whatever drew it: no shot, a full dip, a source sending black);
+    /// `None` when this tick's frame showed a picture. A start time rather
+    /// than a flag, so a reader that samples snapshots (the program-black
+    /// alarm, [`crate::alarms`]) sees how long the program has been black
+    /// without seeing every tick.
+    pub program_black_since: Option<Duration>,
     /// Times the program shot changed.
     pub program_changes: u64,
     /// One detector process serves every source, one pass at a time (the
