@@ -19,8 +19,10 @@
 //! peak is never below the sample peak, which a sine at a quarter of the
 //! rate sampled on its crests would otherwise undercut by 0.2 dB. The
 //! points come out six samples late, which does not matter for a maximum.
-//! At 48 kHz the reading is within +0.25/−0.1 dB of the true crest for
-//! sines up to 20 kHz, the ripple of the Annex 2 filter; Tech 3341 allows
+//! At 48 kHz the reading is within +0.25/−0.3 dB of the true crest for
+//! sines up to 20 kHz, the ripple of the Annex 2 filter: a sweep in 50 Hz
+//! and 7.5° steps finds the most over at 12150 Hz (+0.22 dB) and the most
+//! under at 8 kHz, a sixth of the rate (−0.30 dB). Tech 3341 allows
 //! +0.2/−0.4 dB on its test signals.
 
 /// Taps per phase.
@@ -195,12 +197,22 @@ mod tests {
 
     #[test]
     fn sines_read_their_crest_across_the_band() {
-        for freq in [100.0, 997.0, 5_000.0, 12_050.0, 15_000.0, 19_000.0] {
-            for phase in [0.0, 30.0, 60.0] {
+        // A few frequencies, not a sweep, but with the sweep's extremes
+        // (see the module docs): 8 kHz at 0° or 60° reads 0.30 dB under,
+        // 12150 Hz at 7.5° 0.22 dB over.
+        for freq in [
+            100.0, 997.0, 5_000.0, 8_000.0, 12_050.0, 12_150.0, 15_000.0, 19_000.0,
+        ] {
+            for phase in [0.0, 7.5, 30.0, 60.0] {
                 let x = sine(48_000, 1, freq, -1.0, phase, 0.2);
                 let tp = peak_db(&x, 2 * TAPS);
-                assert!((-1.1..=-0.75).contains(&tp), "{freq} Hz {phase}°: {tp}");
+                assert!((-1.3..=-0.75).contains(&tp), "{freq} Hz {phase}°: {tp}");
             }
+        }
+        // Away from the filter's ripple the reading is close.
+        for freq in [100.0, 997.0] {
+            let tp = peak_db(&sine(48_000, 1, freq, -1.0, 30.0, 0.2), 2 * TAPS);
+            assert!((tp + 1.0).abs() < 0.05, "{freq} Hz: {tp}");
         }
     }
 

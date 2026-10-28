@@ -2,9 +2,10 @@
 //! `summarize` in `report` from the run's snapshots.
 //!
 //! Every value is rounded for reading (milliseconds to one decimal,
-//! normalized coordinates to four, scores to two) and absent values are
-//! `null`, so a summary diffed between runs shows changes in behaviour, not
-//! in float noise.
+//! normalized coordinates to four, scores to two, the program loudness and
+//! peaks to 0.1 dB and the seconds they cover to two decimals) and absent
+//! values are `null` (for the loudness and peaks: no reading), so a summary
+//! diffed between runs shows changes in behaviour, not in float noise.
 //!
 //! Besides counters it carries what a run without a window needs to judge
 //! the pictures: how each query's prompt was read (what the detector was
@@ -17,7 +18,8 @@
 //! static performers), whether each shot is zoom-limited and which shot it
 //! then looks the same as, and the subjects at the end with the queries
 //! they answer, so duplicate subjects and their roles can be told apart
-//! without a contact sheet.
+//! without a contact sheet. With audio it also carries the program's
+//! loudness and peaks (spec M12).
 
 use std::path::PathBuf;
 

@@ -18,8 +18,9 @@ use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::EngineSnapshot;
 
 use super::{
-    CropRange, DirectorSummary, HeadlessOptions, MatchSummary, OutputSummary, ProgramSummary,
-    QuerySummary, Sampler, ShotSummary, SourceSummary, SubjectSummary, Summary, TimingSummary,
+    CropRange, DirectorSummary, HeadlessOptions, LoudnessSummary, MatchSummary, OutputSummary,
+    ProgramSummary, QuerySummary, Sampler, ShotSummary, SourceSummary, SubjectSummary, Summary,
+    TimingSummary,
 };
 
 /// Counters from the engine report.
@@ -253,9 +254,9 @@ pub(super) fn round(v: f64, digits: i32) -> f64 {
 
 /// The summary of the program meter's `reading`, rounded to Tech 3341's
 /// 0.1 LU resolution.
-fn loudness_summary(reading: &ac_audio::LoudnessReading) -> super::summary::LoudnessSummary {
+fn loudness_summary(reading: &ac_audio::LoudnessReading) -> LoudnessSummary {
     let tenth = |v: Option<f64>| v.map(|v| round(v, 1));
-    super::summary::LoudnessSummary {
+    LoudnessSummary {
         integrated_lufs: tenth(reading.integrated),
         momentary_lufs: tenth(reading.momentary),
         short_term_lufs: tenth(reading.short_term),

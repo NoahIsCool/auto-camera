@@ -65,8 +65,8 @@ mod summary;
 
 pub use flags::HeadlessOptions;
 pub use summary::{
-    DirectorSummary, MatchSummary, OutputSummary, ProgramSummary, QuerySummary, ShotSummary,
-    SourceSummary, SubjectSummary, Summary, TimingSummary,
+    DirectorSummary, LoudnessSummary, MatchSummary, OutputSummary, ProgramSummary, QuerySummary,
+    ShotSummary, SourceSummary, SubjectSummary, Summary, TimingSummary,
 };
 
 use report::{Totals, failed_to_start, summarize};
