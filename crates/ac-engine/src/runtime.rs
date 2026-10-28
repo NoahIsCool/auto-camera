@@ -26,6 +26,7 @@
 //! | caller → engine | `mpsc` channel of [`EngineCommand`] + reply channel | applied in order at tick start |
 //! | engine → callers | [`Latest`]`<Arc<EngineSnapshot>>` | newest snapshot only |
 //! | engine → encoder | bounded queues inside [`ac_output::ProgramEncoder`] | drop and repay |
+//! | engine → trace writer | bounded [`TraceSender`] of [`EngineOptions::trace`] | never waits: a full channel drops the record ([`crate::trace`]) |
 //!
 //! No lock is shared between threads except inside these mailboxes, and none
 //! is held across I/O. [`Engine::shutdown`] (or dropping the [`Engine`])
@@ -72,6 +73,7 @@ use crate::mailbox::Latest;
 use crate::output::OutputController;
 use crate::schedule::TickTimer;
 use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
+use crate::trace::{TraceSender, Tracer};
 
 mod engine_thread;
 mod handle;
@@ -130,13 +132,20 @@ pub struct EngineOptions {
     pub clock: Arc<dyn Clock>,
     /// Falling further behind than this skips ticks instead of bursting.
     pub max_lag: Duration,
+    /// Where the engine thread sends one trace record per tick
+    /// ([`crate::trace`]); `None` for no trace. The engine's thread owns
+    /// this sender, so the channel closes when the engine stops, unless a
+    /// clone of these options still holds one.
+    pub trace: Option<TraceSender>,
 }
 
 impl Default for EngineOptions {
+    /// Real time, a one-second lag limit and no trace.
     fn default() -> Self {
         Self {
             clock: Arc::new(WallClock::new()),
             max_lag: Duration::from_secs(1),
+            trace: None,
         }
     }
 }
@@ -145,6 +154,7 @@ impl std::fmt::Debug for EngineOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EngineOptions")
             .field("max_lag", &self.max_lag)
+            .field("trace", &self.trace.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -212,6 +222,8 @@ struct Runtime {
     late: u64,
     /// Skipped ticks.
     skipped: u64,
+    /// Where each tick's trace record goes.
+    trace: Tracer,
 }
 
 impl Engine {
@@ -288,6 +300,7 @@ impl Engine {
             timer: TickTimer::default(),
             late: 0,
             skipped: 0,
+            trace: Tracer::new(options.trace),
         };
         let last_words = snapshots.clone();
         let thread =

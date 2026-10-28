@@ -31,6 +31,7 @@ eframe = { version = "0.35", default-features = false, features = ["default_font
 serde_json = "1.0"
 
 [dev-dependencies]
+ac-eval.workspace = true
 ac-sources.workspace = true
 # Window tests drive the real UI through its AccessKit tree with egui's plain
 # test harness: no renderer (its wgpu feature stays off), so they need no GPU

@@ -36,16 +36,18 @@ mod switching;
 mod text;
 mod textures;
 
-use ac_engine::{Engine, StudioConfig};
+use ac_engine::{Engine, EngineOptions, StudioConfig};
 use eframe::egui;
 
 use crate::signals::QuitSignal;
 use app::OperatorApp;
 
-/// Starts the engine from `config` and runs the window until it is closed,
-/// or until `quit` is requested (a termination signal), which closes it.
-pub fn run(config: StudioConfig, quit: QuitSignal) -> Result<(), String> {
-    let engine = Engine::start(config.clone()).map_err(|e| e.to_string())?;
+/// Starts the engine from `config` with `options` and runs the window until
+/// it is closed, or until `quit` is requested (a termination signal), which
+/// closes it. The engine has stopped when this returns, whether the window
+/// opened or not.
+pub fn run(config: StudioConfig, options: EngineOptions, quit: QuitSignal) -> Result<(), String> {
+    let engine = Engine::start_with(config.clone(), options).map_err(|e| e.to_string())?;
     let title = match config.sources.as_slice() {
         [one] => format!("Auto Camera · {}", one.display_name()),
         many => format!("Auto Camera · {} sources", many.len()),
