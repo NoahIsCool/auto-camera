@@ -23,6 +23,7 @@ use ac_switcher::Transition;
 
 use crate::audio::AudioPacerStats;
 use crate::catalog::ShotStatus;
+use crate::presentation::PresentationStats;
 use crate::schedule::TickTimer;
 use crate::vision::VisionStats;
 
@@ -259,9 +260,18 @@ pub struct SourceView {
     pub frame_age: Option<Duration>,
     /// New frames seen.
     pub frames: u64,
-    /// Frames produced but never seen, because a newer one replaced them in
-    /// the mailbox before the engine looked (the engine fell behind).
+    /// Frames produced but never shown: a newer one replaced them in the
+    /// mailbox before the engine looked (the engine fell behind), or, for a
+    /// source with a presentation buffer, the buffer passed over them
+    /// (counted on their own in [`PresentationStats::skipped`]).
     pub missed: u64,
+    /// How the source's presentation buffer has presented it, for a source
+    /// the engine aligns to the ticks by PTS (every source but the phase
+    /// reference; see [`crate::presentation`]): new frames, repeats,
+    /// passed-over frames, and whether it is stale. `None` for the phase
+    /// reference, which is shown as it arrives, and in a core driven
+    /// without the runtime.
+    pub presentation: Option<PresentationStats>,
     /// The source has fresh frames and its shots can go on air.
     pub available: bool,
     /// Live subjects.

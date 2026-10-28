@@ -4,8 +4,10 @@
 //! source the [`SourceVision`] (subject store and tracker), the query list,
 //! the shot [`Catalog`] with one framer per shot, the [`Switcher`], the
 //! [`Director`] and the [`Compositor`]. It does not own sources, detector
-//! threads or the encoder; the runtime ([`crate::runtime`]) feeds it the
-//! newest frame of every source and the discovery results that arrived, and
+//! threads or the encoder; the runtime ([`crate::runtime`]) feeds it a
+//! frame of every source (the newest of the phase reference, and for every
+//! other source the one its presentation buffer picked by PTS;
+//! [`crate::presentation`]) and the discovery results that arrived, and
 //! takes back the program frame and the discovery requests to send.
 //!
 //! One [`EngineCore::tick`] at master-clock time `now`:
@@ -24,7 +26,9 @@
 //!    ([`crate::snapshot::PassOutcome`]), so the window can say the
 //!    feedback is no longer current.
 //! 3. **Frames.** Each source's newest frame, if new, advances its tracker
-//!    and store (media time = the frame's PTS).
+//!    and store (media time = the frame's PTS). "Newest" is the newest the
+//!    runtime fed: for a source with a presentation buffer, the frame it
+//!    presented, which is why a frame it passed over counts as missed.
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
 //! 5. **Framing.** Every shot's framer steps by `dt` and is rescored.
 //! 6. **Switching.** The switcher advances its transition; the director
@@ -99,6 +103,7 @@ use ac_switcher::Switcher;
 use crate::catalog::Catalog;
 use crate::config::{DiscoverySettings, MonitorSettings, StudioConfig};
 use crate::discovery::{DiscoveryRequest, DiscoveryResult};
+use crate::presentation::PresentationStats;
 use crate::queries::PromptReader;
 use crate::schedule::RateMeter;
 use crate::snapshot::{DiscoveryStats, MatchView};
@@ -228,9 +233,13 @@ struct SourceSlot {
     last_frame_at: Option<Duration>,
     /// New frames seen.
     frames: u64,
-    /// Frames the source produced that the engine never saw (sequence gaps:
-    /// the mailbox kept only the newest).
+    /// Frames the source produced that the engine never showed (sequence
+    /// gaps in the frames fed: the mailbox kept only the newest, or the
+    /// source's presentation buffer passed over them).
     missed: u64,
+    /// The runtime's report on the source's presentation buffer
+    /// ([`EngineCore::note_presentation`]); `None` for a source without one.
+    presentation: Option<PresentationStats>,
     /// New-frame rate.
     rate: RateMeter,
     /// Discovery scheduling.
@@ -362,6 +371,7 @@ impl EngineCore {
                 last_frame_at: None,
                 frames: 0,
                 missed: 0,
+                presentation: None,
                 rate: RateMeter::new(Duration::from_secs(1)),
                 discovery: DiscoveryState::new(detectors.get(i).copied().unwrap_or(false)),
             });
@@ -520,6 +530,21 @@ impl EngineCore {
         s.frames += 1;
         s.rate.record(now);
         s.vision.on_frame(frame);
+    }
+
+    /// Takes the runtime's report on its presentation buffers, one entry
+    /// per source in source order (`None` for a source without one; see
+    /// [`crate::presentation`]), for the snapshot
+    /// ([`SourceView::presentation`](crate::SourceView::presentation)).
+    /// Entries past the last source are ignored, and sources past the last
+    /// entry keep what they had.
+    pub fn note_presentation(
+        &mut self,
+        stats: impl IntoIterator<Item = Option<PresentationStats>>,
+    ) {
+        for (s, stats) in self.sources.iter_mut().zip(stats) {
+            s.presentation = stats;
+        }
     }
 
     /// Index of the source with `id`.

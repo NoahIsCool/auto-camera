@@ -85,7 +85,7 @@ use crate::detectors::Detectors;
 use crate::discovery::{DiscoveryResult, DiscoveryWorker};
 use crate::mailbox::Latest;
 use crate::output::OutputController;
-use crate::presentation::{PresentationBuffer, buffers_for};
+use crate::presentation::{PresentationBuffer, buffers_for, stats_by_source};
 use crate::schedule::TickTimer;
 use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 
@@ -262,7 +262,7 @@ impl Engine {
         } = Detectors::build(&config)?;
         let infos: Vec<SourceInfo> = sources.iter().map(|s| s.info().clone()).collect();
         let enabled: Vec<bool> = detectors.iter().map(Option::is_some).collect();
-        let core = EngineCore::new(&config, infos, &enabled).map_err(EngineError::Setup)?;
+        let mut core = EngineCore::new(&config, infos, &enabled).map_err(EngineError::Setup)?;
         let (results_tx, results) = channel();
         let mut workers = Vec::new();
         for ((entry, detector), i) in config.sources.iter().zip(detectors).zip(0..) {
@@ -276,6 +276,11 @@ impl Engine {
             .audio_source
             .as_ref()
             .and_then(|id| config.sources.iter().position(|s| &s.id == id));
+        let presenters = buffers_for(
+            config.sources.iter().map(|e| e.source_id()),
+            audio_source.unwrap_or(0),
+        );
+        core.note_presentation(stats_by_source(&presenters));
         let snapshots = Arc::new(Latest::new());
         let initial = Arc::new(core.snapshot(
             OutputView::default(),
@@ -290,10 +295,7 @@ impl Engine {
         let runtime = Runtime {
             core,
             sources,
-            presenters: buffers_for(
-                config.sources.iter().map(|e| e.source_id()),
-                audio_source.unwrap_or(0),
-            ),
+            presenters,
             sidecar,
             workers,
             results,

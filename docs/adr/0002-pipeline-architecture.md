@@ -39,7 +39,7 @@ channels, and the operator sees it only through immutable snapshots.
 
 | From → to | Mechanism | Policy |
 |---|---|---|
-| source → engine | `ac_media::LatestFrame` | Newest frame only. A frame overwritten before the engine read it is never queued; the engine counts the sequence gap as `missed`. The engine reads it whenever its thread wakes, and keeps what it read from every source but the phase reference in that source's `PresentationBuffer`, a ring of at most 4 frames (below). |
+| source → engine | `ac_media::LatestFrame` | Newest frame only. A frame overwritten before the engine read it is never queued; the engine counts the sequence gap as `missed`. The engine reads it whenever its thread wakes, and keeps what it read from every source but the phase reference in that source's `PresentationBuffer`, a ring of at most 4 frames, none older than the one shown last (below); a frame the buffer passes over counts as `missed` too. |
 | source audio → engine | bounded queue | Drained every tick, paced against video by `AudioPacer` (silence when audio lags more than 100 ms, drops when it leads more than 500 ms). |
 | engine → discovery worker | `mailbox::Slot` (capacity 1) | At most one request in flight per source; a new request replaces an unclaimed one. The worker always works on the newest frame it was given. |
 | discovery worker → engine | `mpsc` channel | One result per request (bounded in practice by the in-flight rule). Results are applied only if not stale (below). |
@@ -91,8 +91,12 @@ no longer decides between two frames: a source at the tick rate shows one
 frame per tick and a 29.97 fps source repeats exactly one frame per 1,001
 ticks, at the cost of one to two frame periods of delay. The buffer's ring
 of at most 4 frames, owned by the engine thread, is the one deliberate
-queue of frames on their way in; a source without a new frame for 1 s is
-stale, and its buffer stops presenting it. Core crates never read
+queue of frames on their way in; it drops every frame older than the one
+it shows, and a source's frame pool remembers enough buffers for it, so
+frames are still never copied or allocated per frame. A source without a
+new frame for 1 s is stale: its buffer stops presenting it, and the
+snapshot shows it stale with the buffer's counts of new, repeated and
+passed-over frames (`SourceView::presentation`). Core crates never read
 a clock; `EngineCore::tick(now, feeds, results)` takes time as an argument
 and is deterministic, which the core tests rely on (same inputs, identical
 program frames).

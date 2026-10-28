@@ -21,18 +21,21 @@
 //! the source's newest frame whenever the engine thread wakes, at every tick
 //! and between ticks (every 10 ms at most, on the engine's clock, while the
 //! thread waits), with the clock reading at which it collected the frame,
-//! and asks it at every tick for the frame to show. The buffer answers with the held frame whose PTS
-//! is nearest the tick's *target*, `due + offset`: `due` is the clock reading
-//! at which the tick was due, and `offset` is the buffer's *lock*,
+//! and asks it at every tick for the frame to show. The buffer answers with
+//! the held frame whose PTS is nearest the tick's *target*, `due + offset`:
+//! `due` is the clock reading at which the tick was due
+//! ([`TickSchedule::due`](crate::schedule::TickSchedule::due)), and
+//! `offset` is the buffer's *lock*,
 //!
 //! ```text
 //! offset = max over frames not shown yet (pts − collected_at) − period
 //! ```
 //!
-//! measured when the buffer locks (see the rules below). Sources are paced on the engine's clock, so within one
-//! connection the frame with PTS `p` becomes available at clock reading
-//! `p − c` for a fixed `c`, plus jitter. A frame is collected at or after
-//! that, so the largest `pts − collected_at` is the closest estimate of `c`,
+//! measured when the buffer locks (see the rules below). Sources are paced
+//! on the engine's clock, so within one connection the frame with PTS `p`
+//! becomes available at clock reading `p − c` for a fixed `c`, plus jitter.
+//! A frame is collected at or after that, so the largest
+//! `pts − collected_at` is the closest estimate of `c`,
 //! and the target runs one frame period behind the newest frame that can
 //! have arrived. The frame nearest the target therefore takes over half a
 //! period after the lock's estimate of its arrival: the same half-period
@@ -56,9 +59,11 @@
 //!
 //! # Rules
 //!
-//! * **Never backwards.** The presented sequence number never decreases:
-//!   while the frame nearest the target is older than the one shown, the
-//!   one shown is repeated.
+//! * **Never backwards.** The presented sequence number never decreases.
+//!   Held frames older than the one presented can never be shown again, so
+//!   the buffer drops them as it presents; while the target is still behind
+//!   the frame shown, that frame is the nearest one held, and it is
+//!   repeated.
 //! * **Epochs.** A frame of a newer epoch (the source reconnected; see
 //!   `ac_media`) drops every held frame and the lock, since its PTS describe
 //!   a new connection. A frame of an older epoch than the newest held, from
@@ -80,11 +85,28 @@
 //!   [`SOURCE_STALE_AFTER`] before the tick was due, the source has stalled:
 //!   the buffer presents [`Presentation::Stale`], no frame, until a new one
 //!   arrives. The core uses the same bound to call a source without new
-//!   frames unavailable ([`SourceView::available`](crate::SourceView::available)
-//!   false), and keeps its last
-//!   picture where it is shown, since a freeze is better than black on air;
-//!   but the buffer does not hand that frame out as current, tick after
-//!   tick, for as long as the stall lasts.
+//!   frames unavailable
+//!   ([`SourceView::available`](crate::SourceView::available) false), and
+//!   keeps its last picture where it is shown, since a freeze is better
+//!   than black on air; but the buffer does not hand that frame out as
+//!   current, tick after tick, for as long as the stall lasts, and the
+//!   snapshot shows the source stale (below).
+//!
+//! # What the snapshot shows
+//!
+//! The core sees only the frames presented: a repeat is no new frame to it,
+//! and a stale tick no frame at all, so on its own it could not tell a
+//! source shown on time from one repeated or stale. The buffer therefore
+//! counts what it presents ([`PresentationStats`]): new frames, repeats,
+//! frames it took but passed over (`skipped`: a faster source decimated, a
+//! late frame overtaken, a lock measured again, the frames of a connection
+//! that ended), stale ticks and whether the latest tick was one, and its
+//! locks. The runtime reports the counts to the core at every tick
+//! ([`EngineCore::note_presentation`](crate::EngineCore::note_presentation))
+//! and the snapshot carries them with the source
+//! ([`SourceView::presentation`](crate::SourceView::presentation)). The
+//! core counts the frames passed over as missed, with those the mailbox
+//! replaced before the engine read them.
 //!
 //! # The one exception to latest-frame mailboxes
 //!
@@ -93,16 +115,27 @@
 //! mailbox has replaced by the time the tick looks, so each buffer holds a
 //! ring of up to [`CAPACITY`] frames: deliberately the one exception to
 //! taking only the newest frame from a source (the encoder's bounded queues
-//! are on the way out). It keeps the rule's purpose. The ring has
-//! a fixed capacity and a new frame evicts the oldest, so a slow engine never
+//! are on the way out). It keeps the rule's purpose. The ring has a fixed
+//! capacity and a new frame evicts the oldest, so a slow engine never
 //! builds a backlog and is never shown a frame more than a few periods old;
-//! the pixels are shared with the mailbox (`Arc`), not copied; and the ring
-//! is owned by the engine thread alone, so it needs no lock. Four frames
-//! cover the one to two periods between the target and the newest frame,
-//! plus a period of jitter.
+//! it holds no frame older than the one presented last, so between ticks it
+//! holds that frame and those that arrived since (two or three for a source
+//! at the tick rate, four for one twice as fast); and it is owned by the
+//! engine thread alone, so it needs no lock. Four frames cover the one to
+//! two periods between the target and the newest frame, plus a period of
+//! jitter.
+//!
+//! The pixels are shared with the mailbox (`Arc`), not copied, but a held
+//! frame keeps its buffer from going back to the source: a source writes a
+//! new frame only into a buffer no reader holds any more, and remembers a
+//! few recent buffers for that (the frame pool of `ac_sources`). The pool
+//! remembers enough for this ring, the mailbox and a frame a detector works
+//! on, so a source read through a buffer allocates no frame buffers in
+//! steady state; a larger [`CAPACITY`] needs a larger pool too.
 //!
 //! The buffer is pure: it reads no clock, and time enters as clock readings
-//! passed in, as for [`TickSchedule::poll`](crate::schedule::TickSchedule::poll).
+//! passed in, as for
+//! [`TickSchedule::poll`](crate::schedule::TickSchedule::poll).
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -126,6 +159,27 @@ pub const RELOCK_AFTER: u32 = 3;
 /// one tick and the other way on the next; a microsecond is far above
 /// that rounding and far below any frame period.
 const TIE: i128 = 1_000;
+
+/// How a [`PresentationBuffer`] has presented its source so far; see the
+/// module docs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PresentationStats {
+    /// Ticks that presented a frame not presented before.
+    pub new: u64,
+    /// Ticks that presented the frame presented last again.
+    pub repeats: u64,
+    /// Frames the buffer took and will never present: passed over for a
+    /// later one, evicted from a full ring, or dropped with their
+    /// connection. Frames the buffer still holds and may present are not
+    /// counted.
+    pub skipped: u64,
+    /// Ticks that presented nothing because the source was stale.
+    pub stale_ticks: u64,
+    /// The latest tick found the source stale.
+    pub stale: bool,
+    /// Locks measured: the first, and each time the buffer locked again.
+    pub locks: u64,
+}
 
 /// What a [`PresentationBuffer`] shows at one tick.
 #[derive(Debug, Clone)]
@@ -192,7 +246,8 @@ pub struct PresentationBuffer {
     /// The source whose frames it takes.
     source: SourceId,
     /// Frames of the current connection, oldest first, at most [`CAPACITY`];
-    /// their sequence numbers and PTS increase.
+    /// their sequence numbers and PTS increase, and none is older than the
+    /// frame presented last.
     held: VecDeque<Held>,
     /// The lock, once measured.
     lock: Option<Lock>,
@@ -201,6 +256,11 @@ pub struct PresentationBuffer {
     last: Option<u64>,
     /// Ticks in a row on which the wanted frame had not arrived.
     late: u32,
+    /// Frames taken by [`PresentationBuffer::offer`].
+    taken: u64,
+    /// The counts, except `skipped`, which [`PresentationBuffer::stats`]
+    /// derives from `taken`.
+    counts: PresentationStats,
 }
 
 impl PresentationBuffer {
@@ -212,6 +272,8 @@ impl PresentationBuffer {
             lock: None,
             last: None,
             late: 0,
+            taken: 0,
+            counts: PresentationStats::default(),
         }
     }
 
@@ -235,6 +297,24 @@ impl PresentationBuffer {
         self.lock.is_some()
     }
 
+    /// What the buffer has presented so far. Every frame taken was
+    /// presented once, is still held and newer than the frame presented
+    /// last, or was skipped.
+    pub fn stats(&self) -> PresentationStats {
+        let pending = self
+            .held
+            .iter()
+            .filter(|h| self.last.is_none_or(|last| h.frame.seq > last))
+            .count() as u64;
+        PresentationStats {
+            skipped: self
+                .taken
+                .saturating_sub(self.counts.new)
+                .saturating_sub(pending),
+            ..self.counts
+        }
+    }
+
     /// Offers the source's newest frame, collected at clock reading `at`.
     /// A frame not newer than the newest held, of an older epoch or of
     /// another source is ignored; see the module docs for the rules.
@@ -256,6 +336,7 @@ impl PresentationBuffer {
             self.held.pop_front();
         }
         self.held.push_back(Held { frame, at });
+        self.taken += 1;
     }
 
     /// The frame to show at the tick due at clock reading `due`; see the
@@ -264,21 +345,28 @@ impl PresentationBuffer {
         let Some(newest) = self.held.back() else {
             return Presentation::Empty;
         };
-        if due.saturating_sub(newest.at) > SOURCE_STALE_AFTER {
+        let stale = due.saturating_sub(newest.at) > SOURCE_STALE_AFTER;
+        self.counts.stale = stale;
+        if stale {
             self.lock = None;
             self.late = 0;
+            self.counts.stale_ticks += 1;
             return Presentation::Stale;
         }
         let pick = match self.locked(due) {
             Some(lock) => self.nearest(due, lock),
             None => self.held.len() - 1,
         };
-        let frame = self.held[pick].frame.clone();
+        // Never backwards: the older frames can never be presented again.
+        self.held.drain(..pick);
+        let frame = self.held[0].frame.clone();
         let new = self.last.is_none_or(|last| frame.seq > last);
         self.last = Some(frame.seq);
         if new {
+            self.counts.new += 1;
             Presentation::New(frame)
         } else {
+            self.counts.repeats += 1;
             Presentation::Repeat(frame)
         }
     }
@@ -299,6 +387,7 @@ impl PresentationBuffer {
         self.lock = self.measure();
         if self.lock.is_some() {
             self.late = 0;
+            self.counts.locks += 1;
         }
         self.lock
     }
@@ -327,9 +416,9 @@ impl PresentationBuffer {
     }
 
     /// Index of the held frame nearest the target of the tick due at `due`
-    /// under `lock`, among the frames presented last or newer (the older of
-    /// two equally near, within [`TIE`]), and notes whether the wanted frame
-    /// had arrived.
+    /// under `lock` (the older of two equally near, within [`TIE`]), and
+    /// notes whether the wanted frame had arrived. No held frame is older
+    /// than the one presented last, so the pick never goes backwards.
     fn nearest(&mut self, due: Duration, lock: Lock) -> usize {
         let target = nanos(due) + lock.offset;
         let distance = |h: &Held| (nanos(h.frame.pts) - target).abs();
@@ -342,9 +431,6 @@ impl PresentationBuffer {
         };
         let mut pick = newest;
         for (i, h) in self.held.iter().enumerate().rev().skip(1) {
-            if self.last.is_some_and(|last| h.frame.seq < last) {
-                break;
-            }
             if distance(h) <= distance(&self.held[pick]) + TIE {
                 pick = i;
             }
@@ -365,6 +451,17 @@ pub fn buffers_for(
         .enumerate()
         .map(|(i, id)| (i != reference).then(|| PresentationBuffer::new(id)))
         .collect()
+}
+
+/// The counts of `buffers`, made by [`buffers_for`], by source (`None` for
+/// the reference): what the runtime reports to the core
+/// ([`EngineCore::note_presentation`](crate::EngineCore::note_presentation)).
+pub fn stats_by_source(
+    buffers: &[Option<PresentationBuffer>],
+) -> impl Iterator<Item = Option<PresentationStats>> + '_ {
+    buffers
+        .iter()
+        .map(|b| b.as_ref().map(PresentationBuffer::stats))
 }
 
 #[cfg(test)]

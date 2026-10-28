@@ -15,7 +15,10 @@
 //! other source's newest frame is offered to its
 //! [`PresentationBuffer`](crate::presentation::PresentationBuffer) whenever
 //! the thread wakes, between ticks too, and the core is fed the frame that
-//! buffer presents for the tick's due time (see [`crate::presentation`]).
+//! buffer presents for the clock reading at which the tick was due
+//! ([`TickSchedule::due`], read before the phase lock can move the
+//! schedule), with the buffers' counts for the snapshot (see
+//! [`crate::presentation`]).
 //!
 //! Commands are applied in order at tick start, and only on this thread:
 //! `StartOutput` and `StopOutput` go to the
@@ -38,6 +41,7 @@ use crate::command::{CommandReply, EngineCommand};
 use crate::core::SourceFeed;
 use crate::discovery::{DiscoveryResult, DiscoveryWorker};
 use crate::mailbox::Latest;
+use crate::presentation::stats_by_source;
 use crate::schedule::{PhaseLock, TickDecision, TickSchedule};
 use crate::snapshot::{EngineSnapshot, OutputState, TimingView};
 
@@ -77,20 +81,22 @@ impl Runtime {
         let mut schedule = TickSchedule::new(self.clock.now(), self.period, self.max_lag);
         let mut phase = PhaseLock::new(self.period);
         loop {
-            let (media_time, due, late, skipped) = match schedule.poll(self.clock.now()) {
+            let (index, media_time, late, skipped) = match schedule.poll(self.clock.now()) {
                 TickDecision::Wait(d) => {
                     self.collect_frames();
                     self.clock.sleep(d.min(WAIT_SLICE));
                     continue;
                 }
                 TickDecision::Tick {
+                    index,
                     media_time,
-                    due,
                     late,
                     skipped,
                     ..
-                } => (media_time, due, late, skipped),
+                } => (index, media_time, late, skipped),
             };
+            // Before the phase lock can delay the schedule below.
+            let due = schedule.due(index);
             let started = Instant::now();
             if self.apply_commands() {
                 break;
@@ -197,6 +203,8 @@ impl Runtime {
                 info: Some(s.current_info()),
             })
             .collect();
+        self.core
+            .note_presentation(stats_by_source(&self.presenters));
         let reference = feeds
             .get(self.audio_source.unwrap_or(0))
             .and_then(|feed| feed.frame.as_ref())

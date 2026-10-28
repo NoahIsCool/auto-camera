@@ -6,15 +6,27 @@
 //! cloned it; once all of them have let go, the worker's own handle is the
 //! only one left and [`Arc::get_mut`] succeeds. Only then is the buffer
 //! written again, so a reader can never observe a frame changing under it.
+//!
+//! A worker fills its next buffer as soon as it has published a frame, so
+//! at that moment every recent frame a reader still holds is out of reach:
+//! the pool must remember more buffers than readers hold. The engine holds
+//! the frame it shows and, for every source but one, up to four recent
+//! frames in a presentation buffer that picks frames by PTS (the frame
+//! shown among them; `ac_engine::presentation::CAPACITY`); the mailbox holds
+//! the newest, and a detector may be working on one more. A buffer is
+//! allocated only when every remembered one is still held, so the pool
+//! keeps no more buffers alive than were once in use at the same time, plus
+//! the one being filled.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-/// Buffers remembered for reuse. The mailbox holds the newest frame and a
-/// reader typically holds the one before, so the third most recent buffer is
-/// normally free again; remembering three keeps steady-state allocation at
-/// zero without hoarding memory (three 4K frames are 100 MB).
-const SPARES: usize = 3;
+/// Buffers remembered for reuse: the engine's four, the mailbox's newest
+/// and a detector's (see the module docs), and one more, which is then free
+/// again, so steady-state allocation stays at zero. A source read only for
+/// its newest frame still circulates three or four buffers; seven 4K
+/// frames (230 MB) are reached only when a reader really holds that many.
+const SPARES: usize = 7;
 
 /// A small pool of equally sized byte buffers; see the module docs.
 #[derive(Debug)]
@@ -87,6 +99,47 @@ mod tests {
         let (b, ()) = pool.fill(|b| b.fill(9));
         assert_ne!(b.as_ptr(), reader.as_ptr());
         assert_eq!(&reader[..], &[7, 7]);
+    }
+
+    #[test]
+    fn a_reader_holding_a_presentation_ring_gets_every_buffer_back() {
+        // A worker publishing frame after frame to a reader like the
+        // engine's for a source it aligns by PTS: frames 4 to 1 before the
+        // newest in its presentation buffer (the newest is not collected
+        // yet when the worker fills the next buffer), the newest in the
+        // mailbox, and every 30th frame kept 25 frames longer by a
+        // detector.
+        const RING: usize = 4;
+        let mut pool = FramePool::new(16);
+        let mut ring: VecDeque<Arc<[u8]>> = VecDeque::new();
+        let mut mailbox: Option<Arc<[u8]>> = None;
+        let mut detector: Option<(u64, Arc<[u8]>)> = None;
+        let mut fresh = Vec::new();
+        for n in 0..600u64 {
+            let remembered: Vec<*const u8> = pool.recent.iter().map(|b| b.as_ptr()).collect();
+            let (buf, ()) = pool.fill(|b| b.fill(n as u8));
+            if !remembered.contains(&buf.as_ptr()) {
+                fresh.push(n);
+            }
+            if let Some(previous) = mailbox.replace(buf.clone()) {
+                ring.push_back(previous);
+                if ring.len() > RING {
+                    ring.pop_front();
+                }
+            }
+            pool.recycle(buf);
+            if n % 30 == 0 {
+                detector = ring.back().map(|b| (n, b.clone()));
+            }
+            if detector.as_ref().is_some_and(|(since, _)| n >= since + 25) {
+                detector = None;
+            }
+        }
+        // The pool grows to what the reader once held at the same time
+        // (the first time the detector's frame was among the recent ones),
+        // plus the one being filled, and then allocates no more.
+        assert!(fresh.len() <= SPARES, "{fresh:?}");
+        assert!(fresh.iter().all(|&n| n < 60), "{fresh:?}");
     }
 
     #[test]

@@ -168,6 +168,8 @@ struct Record {
     /// Epoch and sequence number of the newest frame in the mailbox at the
     /// tick: what the engine showed before it had presentation buffers.
     naive: Option<(u64, u64)>,
+    /// Frames the buffer held when the tick came, the most it holds.
+    held: usize,
 }
 
 /// Runs `ticks` ticks of the 30 fps program on a virtual clock, as the
@@ -206,6 +208,7 @@ fn simulate(
             clock.sleep((due - now).min(SLICE));
         }
         for ((s, b), out) in sources.iter().zip(&mut buffers).zip(&mut records) {
+            let held = b.len();
             let p = b.present(due);
             let kind = match &p {
                 Presentation::Empty => Kind::Empty,
@@ -219,6 +222,7 @@ fn simulate(
                 kind,
                 shown: p.frame().map(tag),
                 naive: s.mailbox.as_ref().map(tag),
+                held,
             });
         }
     }
@@ -254,6 +258,27 @@ fn ticks_with(records: &[Record], kind: Kind) -> Vec<usize> {
     (0..records.len())
         .filter(|&n| records[n].kind == kind)
         .collect()
+}
+
+/// Checks the counts of the buffer that presented `records`: one per
+/// tick, by kind, and stale now when the last tick was.
+fn assert_counts(records: &[Record], stats: PresentationStats) {
+    let count = |kind| ticks_with(records, kind).len() as u64;
+    assert_eq!(
+        (stats.new, stats.repeats, stats.stale_ticks),
+        (count(Kind::New), count(Kind::Repeat), count(Kind::Stale)),
+        "{stats:?}"
+    );
+    let stale_now = records.last().is_some_and(|r| r.kind == Kind::Stale);
+    assert_eq!(stats.stale, stale_now, "{stats:?}");
+}
+
+/// Checks `skipped` for a source whose every frame the buffer took (none
+/// was replaced in the mailbox before it looked): every frame up to the
+/// one presented last that was not presented was passed over.
+fn assert_every_frame_taken(records: &[Record], stats: PresentationStats) {
+    let last = records.iter().rev().find_map(|r| r.shown).unwrap().1;
+    assert_eq!(stats.skipped, last + 1 - stats.new, "{stats:?}");
 }
 
 #[test]
@@ -314,6 +339,57 @@ fn a_pts_that_does_not_increase_breaks_the_timeline() {
     b.offer(frame("cam", 0, 2, ms(40)), ms(80));
     assert_eq!((b.len(), b.is_locked()), (1, false));
     assert!(matches!(b.present(ms(90)), Presentation::New(f) if f.seq == 2));
+}
+
+#[test]
+fn counts_follow_the_presentations_and_passed_over_frames_are_dropped() {
+    // Frames 40 ms apart, each collected at its PTS unless said otherwise.
+    let mut b = PresentationBuffer::new(SourceId("cam".into()));
+    assert_eq!(b.stats(), PresentationStats::default());
+    let offer = |b: &mut PresentationBuffer, epoch, seq: u64, at| {
+        b.offer(frame("cam", epoch, seq, ms(seq * 40)), at);
+    };
+    offer(&mut b, 0, 0, ms(0));
+    assert!(matches!(b.present(ms(10)), Presentation::New(f) if f.seq == 0));
+    assert!(matches!(b.present(ms(43)), Presentation::Repeat(f) if f.seq == 0));
+    offer(&mut b, 0, 1, ms(40));
+    offer(&mut b, 0, 2, ms(80));
+    // Locked: the target is 40 ms behind the due time, on frame 1; frame 0
+    // can never be shown again, and frame 2 still may be.
+    assert!(matches!(b.present(ms(81)), Presentation::New(f) if f.seq == 1));
+    let seqs = |b: &PresentationBuffer| b.held.iter().map(|h| h.frame.seq).collect::<Vec<_>>();
+    assert_eq!(seqs(&b), [1, 2]);
+    let expect = PresentationStats {
+        new: 2,
+        repeats: 1,
+        locks: 1,
+        ..PresentationStats::default()
+    };
+    assert_eq!(b.stats(), expect);
+    for seq in 3..6 {
+        offer(&mut b, 0, seq, ms(seq * 40));
+    }
+    // The target is on frame 4: frames 2 and 3 are passed over.
+    assert!(matches!(b.present(ms(201)), Presentation::New(f) if f.seq == 4));
+    assert_eq!(seqs(&b), [4, 5]);
+    assert_eq!((b.stats().new, b.stats().skipped), (3, 2));
+    // A stall: nothing new for over a second.
+    assert!(matches!(b.present(ms(1201)), Presentation::Stale));
+    assert!(matches!(b.present(ms(1234)), Presentation::Stale));
+    let stats = b.stats();
+    assert!(stats.stale && stats.stale_ticks == 2, "{stats:?}");
+    // It resumes: locked again, frame 6 shown and frame 5 passed over.
+    offer(&mut b, 0, 6, ms(1300));
+    assert!(matches!(b.present(ms(1301)), Presentation::New(f) if f.seq == 6));
+    let stats = b.stats();
+    assert!(!stats.stale && stats.stale_ticks == 2, "{stats:?}");
+    assert_eq!((stats.new, stats.skipped, stats.locks), (4, 3, 2));
+    // A frame of a connection that ended before it was shown is skipped
+    // too; the one shown last was not.
+    offer(&mut b, 1, 7, ms(1340));
+    offer(&mut b, 2, 8, ms(1380));
+    let stats = b.stats();
+    assert_eq!((stats.new, stats.repeats, stats.skipped), (4, 1, 4));
 }
 
 #[test]
@@ -394,8 +470,11 @@ fn a_29_97_fps_source_into_30_fps_repeats_exactly_one_frame_per_1001_ticks() {
         ms(3),
         1,
     )];
-    let (records, _) = simulate(&mut sources, cycles * 1001, None);
+    let (records, buffers) = simulate(&mut sources, cycles * 1001, None);
     let records = &records[0];
+    let stats = buffers[0].stats();
+    assert_counts(records, stats);
+    assert_every_frame_taken(records, stats);
     let seqs = shown(records);
     let steps = steps(&seqs);
     let odd: Vec<(usize, i64)> = (0..steps.len())
@@ -432,8 +511,14 @@ fn two_jittered_sources_at_the_tick_rate_show_one_frame_per_tick() {
         SimSource::steady("edge", fps, ms(0), ms(6), 2),
         SimSource::steady("mid", fps, ms(12), ms(8), 3),
     ];
-    let (records, _) = simulate(&mut sources, 1800, None);
-    for r in &records {
+    let (records, buffers) = simulate(&mut sources, 1800, None);
+    for (r, b) in records.iter().zip(&buffers) {
+        assert_counts(r, b.stats());
+        assert_every_frame_taken(r, b.stats());
+        // After the first tick (the frames from before it fill the ring),
+        // the frame shown and those that arrived since: never more than the
+        // one shown, the next and one early.
+        assert!(r[1..].iter().all(|x| x.held <= 3), "{:?}", b.stats());
         let seqs = shown(r);
         let steps = steps(&seqs);
         let odd: Vec<(usize, i64)> = (0..steps.len())
@@ -468,12 +553,20 @@ fn faster_and_slower_sources_are_decimated_and_held_evenly() {
         SimSource::steady("sixty", rate(60, 1), ms(3), ms(4), 4),
         SimSource::steady("fifteen", rate(15, 1), ms(7), ms(8), 5),
     ];
-    let (records, _) = simulate(&mut sources, 900, None);
+    let (records, buffers) = simulate(&mut sources, 900, None);
+    for (r, b) in records.iter().zip(&buffers) {
+        assert_counts(r, b.stats());
+        assert_every_frame_taken(r, b.stats());
+    }
     let sixty = steps(&shown(&records[0]));
     assert!(
         sixty.iter().all(|&s| s == 2),
         "every other frame: {sixty:?}"
     );
+    assert!(records[0].iter().all(|x| x.held <= CAPACITY));
+    // Every other frame taken is passed over, and the buffer says so.
+    let stats = buffers[0].stats();
+    assert!(stats.skipped >= stats.new - 1, "{stats:?}");
     let fifteen = shown(&records[1]);
     for seq in fifteen[2]..fifteen[fifteen.len() - 3] {
         let times = fifteen.iter().filter(|&&s| s == seq).count();
@@ -586,8 +679,9 @@ fn a_source_that_stalls_goes_stale_and_resumes() {
         }
         p
     })];
-    let (records, _) = simulate(&mut sources, 240, None);
+    let (records, buffers) = simulate(&mut sources, 240, None);
     let r = &records[0];
+    assert_counts(r, buffers[0].stats());
     // The last frame published before the stall.
     let last_arrival = (0..)
         .map(|seq| (sources[0].plan)(seq).arrival)
@@ -641,6 +735,7 @@ fn a_reconnected_source_is_shown_from_its_new_epoch_on() {
     })];
     let (records, buffers) = simulate(&mut sources, 240, None);
     let r = &records[0];
+    assert_counts(r, buffers[0].stats());
     let switch = (0..r.len())
         .find(|&n| r[n].naive.is_some_and(|(epoch, _)| epoch == 1))
         .unwrap();
