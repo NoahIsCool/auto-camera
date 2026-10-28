@@ -1,11 +1,28 @@
-//! Framing-quality metrics.
+//! Evaluation: ground-truth labels and framing-quality metrics.
 //!
-//! The rebuild gates releases on measured framing quality, not just plumbing
-//! tests. These metrics score a crop path against ground-truth subject boxes
-//! sampled at a fixed frame interval. Annotated real footage plugs into the
-//! same functions once it exists.
+//! The rebuild gates releases on measured quality on an annotated
+//! evaluation set of real footage, not just plumbing tests (spec V9). This
+//! crate holds the parts of that harness that need no I/O:
+//!
+//! * [`labels`]: the versioned label file for one clip (the video's
+//!   manifest, people boxed on keyframes with visibility, truncation and
+//!   body lines, roles over time and exclusion zones), its JSON form and
+//!   its validator, whose errors name fields by path.
+//! * [`mot`]: an importer for MOT Challenge ground truth.
+//! * The metrics below, which score a crop path against ground-truth
+//!   subject boxes sampled at a fixed frame interval.
+//!
+//! Everything here is a function of its arguments: files are parsed from
+//! strings, and reading them, hashing videos and running the engine over
+//! clips belong to the runner.
 
 use ac_core::Rect;
+
+pub mod labels;
+pub mod mot;
+
+pub use labels::{FieldError, FieldErrors, LabelFile, SCHEMA_VERSION};
+pub use mot::{MotError, import_mot};
 
 /// Fraction of frames in which the subject box lies fully inside the crop.
 ///
