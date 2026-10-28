@@ -5,6 +5,9 @@
 //! auto-camera [--config PATH] --headless [--seconds N] [--record PATH]
 //! ```
 //!
+//! Both take `--log-dir PATH`, the folder for the log and crash reports
+//! (the per-user log folder when absent; see the `logs` module).
+//!
 //! The headless options are only accepted together with `--headless`, so a
 //! typo cannot silently open a window that records nothing. The config path
 //! defaults to the demo studio relative to the working directory, which is
@@ -47,6 +50,11 @@ pub struct Cli {
     /// Record program to this MP4 during a headless run; it must not exist.
     #[arg(long, value_name = "PATH", requires = "headless")]
     pub record: Option<PathBuf>,
+    /// Folder for the log and crash reports [default:
+    /// ~/Library/Logs/auto-camera on macOS, $XDG_STATE_HOME/auto-camera or
+    /// ~/.local/state/auto-camera on Linux].
+    #[arg(long, value_name = "PATH")]
+    pub log_dir: Option<PathBuf>,
 }
 
 /// Parses a positive, finite number of seconds up to one day.
@@ -77,6 +85,16 @@ mod tests {
         assert_eq!(cli.config, PathBuf::from(DEFAULT_CONFIG));
         assert!(!cli.headless);
         assert_eq!(cli.record, None);
+        assert_eq!(cli.log_dir, None);
+    }
+
+    #[test]
+    fn both_modes_take_a_log_folder() {
+        let window = parse(&["--log-dir", "/tmp/logs"]).unwrap();
+        assert_eq!(window.log_dir, Some(PathBuf::from("/tmp/logs")));
+        let headless = parse(&["--headless", "--log-dir", "logs"]).unwrap();
+        assert_eq!(headless.log_dir, Some(PathBuf::from("logs")));
+        assert!(parse(&["--log-dir"]).is_err(), "the folder is required");
     }
 
     #[test]

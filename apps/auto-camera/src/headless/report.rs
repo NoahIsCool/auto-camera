@@ -19,6 +19,7 @@ use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::EngineSnapshot;
 use ac_output::{StreamHealth, StreamState};
 
+use super::sidecar::sidecar_summary;
 use super::{
     CropRange, DirectorSummary, HeadlessOptions, MatchSummary, OutputSummary, ProgramSummary,
     QuerySummary, Sampler, ShotSummary, SourceSummary, StreamSummary, SubjectSummary, Summary,
@@ -245,6 +246,7 @@ pub(super) fn summarize(
         },
         output,
         render_issues: end.map(|s| s.render_issues.clone()).unwrap_or_default(),
+        sidecar: sidecar_summary(last, end),
     }
 }
 

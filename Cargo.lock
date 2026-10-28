@@ -302,13 +302,16 @@ dependencies = [
  "ac-engine",
  "ac-media",
  "ac-output",
+ "ac-sidecar",
  "ac-sources",
  "ac-switcher",
  "clap",
  "ctrlc",
  "eframe",
+ "hmac-sha256",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

@@ -38,6 +38,7 @@ use app::OperatorApp;
 /// or until `quit` is requested (a termination signal), which closes it.
 pub fn run(config: StudioConfig, quit: QuitSignal) -> Result<(), String> {
     let engine = Engine::start(config.clone()).map_err(|e| e.to_string())?;
+    let _watch = crate::logs::watch(engine.handle());
     let title = match config.sources.as_slice() {
         [one] => format!("Auto Camera · {}", one.display_name()),
         many => format!("Auto Camera · {} sources", many.len()),

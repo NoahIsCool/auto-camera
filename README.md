@@ -111,6 +111,27 @@ failed (`ok` is false and `error` says why), 2 for usage and configuration
 errors. Recordings are never overwritten: an existing `--record` path is an
 error.
 
+## Logs and crash reports
+
+Every run, in the window or headless, appends to a log in a per-user
+folder: `~/Library/Logs/auto-camera` on macOS, `$XDG_STATE_HOME/auto-camera`
+(else `~/.local/state/auto-camera`) on Linux; `--log-dir PATH` picks
+another. The current file is `auto-camera.log`; at 8 MiB it moves to
+`auto-camera.1.log` and the four newest old files are kept. One line per
+event, in UTC: the app's version and commit, the config's SHA-256 and the
+model files (path, size and time at once, their SHA-256 from a background
+thread, so a start never waits for gigabytes of weights), then what the
+studio did (sources starting and stopping, detectors ready or failing,
+program changes, the output's lifecycle and the stream's connection),
+every line ffmpeg and the detector sidecar print on stderr (stream key
+redacted), and the sidecar's starts, losses and restarts. A panic writes
+`crash-<time>-<pid>-<n>.txt` next to the log, with the panic, its
+backtrace and a summary of the studio's newest state, and prints its path;
+each start keeps the 20 newest reports. Nothing is sent anywhere. A headless
+summary also reports the detector sidecar, when the studio has one
+(`sidecar`: `state`, `pid`, `model`, `spawns`, `restarts`, `failures`
+and the other host counters).
+
 ## Studio configuration
 
 A studio is one TOML file (or JSON, by extension). Every section but

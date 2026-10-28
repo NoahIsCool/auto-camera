@@ -61,6 +61,7 @@ use ac_engine::{
 
 mod flags;
 mod report;
+mod sidecar;
 mod summary;
 
 pub use flags::HeadlessOptions;
@@ -109,6 +110,7 @@ pub fn run_with(
         Ok(e) => e,
         Err(e) => return failed_to_start(path, options, started, e.to_string()),
     };
+    let _watch = crate::logs::watch(engine.handle());
     let mut sampler = Sampler::default();
     let error = drive(&engine, options, limit, &mut sampler, quit).err();
     let (ticks, threads_joined, final_snapshot, error) = match engine.shutdown() {

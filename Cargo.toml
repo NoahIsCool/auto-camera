@@ -48,6 +48,11 @@ opt-level = 3
 [profile.dev.package.ac-compositor]
 opt-level = 3
 
+# The app hashes model files (hundreds of MB) for its log on a background
+# thread; unoptimized SHA-256 would keep a core busy for minutes.
+[profile.dev.package.hmac-sha256]
+opt-level = 3
+
 # The sidecar host downscales every frame it sends with a box filter.
 [profile.dev.package.ac-sidecar]
 opt-level = 3

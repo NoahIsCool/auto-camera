@@ -17,11 +17,14 @@
 //! window does ([`signals`]), so the detector sidecar never outlives the
 //! app; a second signal exits at once.
 //!
+//! Every run keeps a log and writes a crash report on a panic ([`logs`]).
+//!
 //! Exit status: 0 on success, 1 when the engine or the output failed, 2 for
 //! usage and configuration errors, 130 after a termination signal.
 
 mod cli;
 mod headless;
+mod logs;
 mod signals;
 mod ui;
 
@@ -37,6 +40,7 @@ use signals::QuitSignal;
 /// headless run; see the module docs for the exit status.
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let mut log = logs::LogSession::start(cli.log_dir.as_deref());
     let quit = QuitSignal::new();
     if let Err(e) = quit.install() {
         eprintln!("auto-camera: {e}");
@@ -45,18 +49,24 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => {
             eprintln!("auto-camera: {e}");
+            tracing::error!("{e}");
             if cli.config.as_os_str() == cli::DEFAULT_CONFIG {
                 eprintln!("(run from the repository root, or pass --config PATH)");
             }
             return ExitCode::from(2);
         }
     };
+    log.studio(&cli.config, &config);
     if cli.headless {
         let options = headless::HeadlessOptions {
             seconds: cli.seconds,
             record: cli.record,
         };
         let summary = headless::run(config, &cli.config, &options, &quit);
+        match &summary.error {
+            Some(e) => tracing::error!("headless run failed: {e}"),
+            None => tracing::info!("headless run done"),
+        }
         match serde_json::to_string_pretty(&summary) {
             Ok(json) => println!("{json}"),
             Err(e) => eprintln!("auto-camera: cannot print the summary: {e}"),
@@ -74,6 +84,7 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("auto-camera: {e}");
+                tracing::error!("{e}");
                 ExitCode::FAILURE
             }
         }
