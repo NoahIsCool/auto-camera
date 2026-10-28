@@ -56,10 +56,11 @@ as their cause lasts: the program black for 2 s while the output runs, the
 program on a subject lost for half a second, the program's source sending
 no new frame for over half a second, encoder drops, a failed output, the
 stream reconnecting, stalled (the ingest takes no packets) or down, and a
-recording without audio (no audio track, or no source audio for 2 s). Each
-clears only once its cause has been gone for a while (a second for the
+recording without audio (no audio track, or no source audio for 2 s). Most
+clear only once their cause has been gone for a while (a second for the
 picture and audio, five for drops and for a stream taking packets again),
-so it does not flicker. Acknowledge dims an alarm and removes its button,
+so they do not flicker; a failed output clears when the output starts
+again, and a stream that is down when the session ends. Acknowledge dims an alarm and removes its button,
 but it stays listed until its cause clears; one that comes back is new.
 With `start_on_wide = true` in the `[switcher]` table the first source's
 wide is on program from the start (it shows black until the source
