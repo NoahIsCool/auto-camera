@@ -129,6 +129,35 @@ fn paths_split_where_a_shot_is_missing_and_skip_wides_and_other_sources() {
 }
 
 #[test]
+fn a_path_splits_where_time_fails_to_advance() {
+    // Ticks at 0, 0.1 and 0.2 s with the crop centred on 0.5, then the
+    // clock steps back to 0.1 s and runs on to 0.2 s with it on 0.7. The
+    // step starts a second path, so the jump to 0.7 is no motion: two
+    // still paths, of three samples and of two.
+    let trace: Vec<_> = [(0, 0.5), (1, 0.5), (2, 0.5), (1, 0.7), (2, 0.7)]
+        .iter()
+        .map(|&(f, c)| {
+            record(
+                f,
+                Vec::new(),
+                vec![shot("cam/1/close", Some(1), at(c))],
+                None,
+            )
+        })
+        .collect();
+    let paths = shot_paths(&trace, &SourceId(CAM.into()));
+    let starts: Vec<(f64, usize)> = paths
+        .iter()
+        .map(|p| (p.samples[0].0, p.samples.len()))
+        .collect();
+    assert_eq!(starts, [(0.0, 3), (0.1, 2)]);
+    for p in &paths {
+        let m = path_motion(&p.samples, 1000.0, 1000.0, 0.005);
+        assert_eq!(peak_and_rms(&m.pan_speed), Some((0.0, 0.0)));
+    }
+}
+
+#[test]
 fn the_scored_metrics_judge_the_step_against_the_defaults() {
     let labels = labels(0, Vec::new());
     let trace: Vec<_> = [0.2, 0.2, 0.2, 0.3, 0.3, 0.3]

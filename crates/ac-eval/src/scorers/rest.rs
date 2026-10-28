@@ -35,6 +35,14 @@
 //!
 //! Both are not measurable when no span has a shot framing its person
 //! with two or more crops.
+//!
+//! # Invariants
+//!
+//! * A rest span's first and last keyframes both label its person, every
+//!   keyframe between them does too, and it lasts at least `min_rest_s`.
+//! * A settle time lies between 0 and the span's length, since every crop
+//!   sample is of a frame inside the span; jitter is a non-negative
+//!   fraction of the final crop's height.
 
 use std::collections::BTreeSet;
 

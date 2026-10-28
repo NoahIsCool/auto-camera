@@ -36,6 +36,14 @@
 //!
 //! Peaks and RMS values over no samples are not measurable: a path needs
 //! three samples for an acceleration, four for a jerk.
+//!
+//! # Invariants
+//!
+//! * A path's times strictly increase and its crops are finite with a
+//!   positive size, so every quotient divides by a positive time and every
+//!   logarithm is of a positive number.
+//! * Every value is a magnitude, a rate's absolute value or a duration:
+//!   never negative. A hold never lasts longer than its path.
 
 use std::collections::{BTreeMap, BTreeSet};
 

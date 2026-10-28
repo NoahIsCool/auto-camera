@@ -52,6 +52,14 @@
 //! them: the picture on air switched people under the viewers' eyes. A
 //! keyframe where the box matches nobody keeps the last identity; a
 //! keyframe off air forgets it.
+//!
+//! # Invariants
+//!
+//! * Takes are in record order, none on the first record. Stints are in
+//!   order and never overlap, and every tick with a head is in exactly
+//!   one; a loss likewise covers each tick at most once.
+//! * Every metric here is a count or a duration, always measured: 0 over
+//!   no events, never not measurable.
 
 use std::collections::BTreeMap;
 

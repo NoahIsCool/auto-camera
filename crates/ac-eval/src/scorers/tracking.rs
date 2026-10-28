@@ -39,6 +39,15 @@
 //! found for ten seconds waits ten seconds, while one glimpsed on a single
 //! keyframe waits nothing. Times are the keyframes' clip PTS, so their
 //! resolution is the keyframe spacing.
+//!
+//! # Invariants
+//!
+//! * A keyframe's matching is one to one, so matched targets never exceed
+//!   the targets (recall lies in `0..=1`) and switches never exceed the
+//!   matches. IDF1's pairing is one to one too, so its matched keyframes
+//!   never exceed the targets or the subjects, and IDF1 lies in `0..=1`.
+//! * Every query gets the same six metrics in the same order, queries in
+//!   sorted order. A rate over no keyframe or no target is not measurable.
 
 use std::collections::{BTreeMap, BTreeSet};
 

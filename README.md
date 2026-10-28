@@ -498,7 +498,7 @@ than for a show; choosing a model per query comes later.
 | `ac-switcher` | Preview/program, cut/auto/T-bar transitions, the take queued during one |
 | `ac-compositor` | CPU program compositor |
 | `ac-output` | One ffmpeg encode to RTMP and fragmented MP4; `caffeinate` while live |
-| `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), framing-quality metrics, and the per-tick trace schema (`TraceRecord`) the engine emits and they score |
+| `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), the per-tick trace schema (`TraceRecord`) the engine emits, and the framing, motion, tracking and switching scorers that measure a trace against the labels, judged by a TOML thresholds file into a JSON report |
 | `ac-engine` | The runtime that wires them together (ADR 0002), the studio config and its readiness check |
 | `apps/auto-camera` | Operator window, headless runner and `--check` |
 

@@ -41,6 +41,14 @@
 //!   (C.4: no cuts at joints). The labels have no joint keypoints (hips,
 //!   knees, elbows; the shoulder and waist lines are cut lines, not
 //!   joints), so it is never measurable yet.
+//!
+//! # Invariants
+//!
+//! * A share is over at least one sample and lies in `0..=1`, and its
+//!   `samples` is its denominator; over no sample it is not measurable,
+//!   never 0 or NaN.
+//! * The metrics come in a fixed order: head and torso, the four headroom
+//!   bands widest first, the lower cut, containment, joint clearance.
 
 use ac_core::{Rect, ShotSize};
 
