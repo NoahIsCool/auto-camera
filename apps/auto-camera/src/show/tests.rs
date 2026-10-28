@@ -421,6 +421,18 @@ fn a_show_that_would_not_open_or_a_file_that_is_not_a_show_is_left_alone() {
         "{err}"
     );
     assert_eq!(std::fs::read_to_string(&target.path).unwrap(), STUDIO);
+    // A show this build cannot read, such as one a later build wrote at a
+    // newer show schema: a save in this build's layout would drop what the
+    // newer one adds.
+    let newer = "show = 2\nstudio = \"../studio.toml\"\nslots = [\"pulpit\"]\n";
+    std::fs::write(&target.path, newer).unwrap();
+    let err = save(show.clone(), &target, &mut SystemDisk).unwrap_err();
+    let refused = "is a show this build cannot read, so it is left as it is: ";
+    assert!(
+        err.contains(&format!("{refused}this file is show schema 2, newer")),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_to_string(&target.path).unwrap(), newer);
     // A studio file that is gone: the show would not open.
     let gone = ShowTarget {
         path: dir.join("shows/new.show.toml"),

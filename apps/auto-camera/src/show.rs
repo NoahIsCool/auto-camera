@@ -40,8 +40,10 @@
 //! 2. opens the show as `--config` would (the studio file read, the show
 //!    laid over it, validated): a show that would not open is not written,
 //!    and why is the save's error;
-//! 3. refuses a target that exists and is not a show, or is the show of
-//!    another studio file, so a mistyped path never replaces another file;
+//! 3. refuses a target that exists and is not a show, is a show this build
+//!    cannot read (a newer layout's, whose additions a save in this
+//!    build's layout would drop), or is the show of another studio file,
+//!    so a save never replaces a file it would lose;
 //! 4. writes the text atomically ([`disk::write_atomic`]): to a new temp
 //!    file beside the target, readable and writable by its owner only,
 //!    synced to the disk, then renamed over the target. The target is
@@ -233,7 +235,13 @@ pub fn save(mut show: Show, target: &ShowTarget, disk: &mut dyn Disk) -> Result<
                 target.path.display()
             ));
         }
-        if let Some(other) = studio_of(&old, json, &target.path)
+        let other = studio_of(&old, json, &target.path).map_err(|why| {
+            format!(
+                "{} is a show this build cannot read, so it is left as it is: {why}",
+                target.path.display()
+            )
+        })?;
+        if let Some(other) = other
             && !same_file(&other, &target.studio)
         {
             return Err(format!(
@@ -248,14 +256,15 @@ pub fn save(mut show: Show, target: &ShowTarget, disk: &mut dyn Disk) -> Result<
 }
 
 /// The studio file that the show `text` (JSON when `json`), found at
-/// `path`, lies over, a relative one taken from that file's folder; `None`
-/// when the show does not parse or names none.
-fn studio_of(text: &str, json: bool, path: &Path) -> Option<PathBuf> {
-    let (mut show, _) = Show::parse_with_warnings(text, json).ok()?;
+/// `path`, lies over, a relative one taken from that file's folder, or
+/// `None` when it names none. The error is why the show does not parse in
+/// this build, such as a newer show schema.
+fn studio_of(text: &str, json: bool, path: &Path) -> Result<Option<PathBuf>, String> {
+    let (mut show, _) = Show::parse_with_warnings(text, json)?;
     if let Some(dir) = path.parent() {
         show.resolve_paths(dir);
     }
-    show.studio
+    Ok(show.studio)
 }
 
 /// One save running on its own thread; see the module docs. Dropping it

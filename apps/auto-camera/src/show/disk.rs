@@ -18,10 +18,11 @@
 //! mode. A show holds no stream key (that stays in the studio file), but it
 //! is the operator's own: it names their studio file and folders and the
 //! people their queries frame, so it is never readable by others, not even
-//! while it is written. A folder that has to be created is made `0700`. Syncing the folder is best effort: the rename has already
-//! happened, and some file systems refuse to sync a folder, so a failure
-//! there leaves the flush to the system rather than failing a save that
-//! is in place.
+//! while it is written. A folder that has to be created is made `0700`.
+//!
+//! Syncing the folder is best effort: the rename has already happened, and
+//! some file systems refuse to sync a folder, so a failure there leaves the
+//! flush to the system rather than failing a save that is in place.
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};

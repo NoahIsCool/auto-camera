@@ -389,11 +389,12 @@ which must be an absolute path (a relative one makes Save show fail and
 say so), else `~/Library/Application Support/auto-camera` on macOS and
 `$XDG_DATA_HOME/auto-camera` or `~/.local/share/auto-camera` elsewhere.
 A show that would not open is not written, and a file that is not a
-show, the show of another studio file and the studio file itself are
-never replaced. The write goes to a temp file beside the target,
-readable by its owner only (`0600`), synced, then renamed over the
-target, so a failed save leaves the previous show as it was. The status
-bar says where the show went, or why it did not.
+show, a show this build cannot read (one a newer build wrote), the show
+of another studio file and the studio file itself are never replaced.
+The write goes to a temp file beside the target, readable by its owner
+only (`0600`), synced, then renamed over the target, so a failed save
+leaves the previous show as it was. The status bar says where the show
+went, or why it did not.
 
 ## Prompts
 
