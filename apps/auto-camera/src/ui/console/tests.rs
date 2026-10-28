@@ -399,6 +399,93 @@ fn cut_and_auto_buttons_take_when_a_shot_is_staged() {
     assert!(!paused(&h));
 }
 
+#[test]
+fn a_staged_shot_stays_seen_until_a_snapshot_shows_what_came_of_it() {
+    let snap = nine_tiles();
+    assert_eq!(snap.switcher.preview, None);
+    let tile = |i: usize| Some(snap.shots[i].id.clone());
+    let shown = |h: &Harness<'_, Window>| h.state().console.shown.clone();
+    let mut h = window(snap.clone());
+    // The snapshot never shows the shot key 2 staged: every frame draws one
+    // from before the staging, so the shot stays the preview seen.
+    press(&mut h, Key::Num2);
+    let _ = sent(&mut h);
+    h.run_steps(3);
+    assert_eq!(shown(&h), tile(1));
+    // The engine has answered, but the snapshots drawn are not that late.
+    let tick = snap.tick;
+    h.state_mut().console.answered(tick + 1);
+    h.run_steps(3);
+    assert_eq!(shown(&h), tile(1));
+    // One that late shows what came of the staging: an empty preview here
+    // (the engine refused it, say), and that is what Space now takes.
+    h.state_mut().snap.tick = tick + 1;
+    h.step();
+    assert_eq!(shown(&h), None);
+    press(&mut h, Key::Space);
+    assert_eq!(sent(&mut h), [EngineCommand::Cut { preview: None }]);
+    // An answer from before a staging does not count for it...
+    h.state_mut().console.answered(tick + 2);
+    press(&mut h, Key::Num3);
+    let _ = sent(&mut h);
+    h.state_mut().snap.tick = tick + 5;
+    h.run_steps(2);
+    assert_eq!(shown(&h), tile(2));
+    // ...and a snapshot showing the shot on preview ends it at once: the
+    // window follows the snapshots from there.
+    h.state_mut().snap.switcher.preview = tile(2);
+    h.step();
+    h.state_mut().snap.switcher.preview = tile(3);
+    h.step();
+    assert_eq!(shown(&h), tile(3));
+    press(&mut h, Key::Enter);
+    assert_eq!(sent(&mut h), [EngineCommand::Auto { preview: tile(3) }]);
+}
+
+#[test]
+fn accept_and_skip_name_the_suggestion_the_window_showed() {
+    let mut snap = nine_tiles();
+    let (first, second) = (snap.shots[1].id.clone(), snap.shots[2].id.clone());
+    snap.director.mode = DirectorMode::Suggest;
+    snap.director.suggestion = Some(first.clone());
+    let mut h = window(snap);
+    h.get_by_label("Accept").click();
+    h.run();
+    assert_eq!(
+        sent(&mut h),
+        [EngineCommand::AcceptSuggestion {
+            shot: first.clone()
+        }]
+    );
+    // The suggestion changes on the frame that handles a click (the
+    // button's release), which was made looking at the frame before: the
+    // click names the shot that frame showed (an Accept of it the engine
+    // refuses).
+    let at = h.get_by_label("Skip").rect().center();
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    for pressed in [true, false] {
+        if !pressed {
+            h.state_mut().snap.director.suggestion = Some(second.clone());
+        }
+        h.input_mut().events.push(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    assert_eq!(sent(&mut h), [EngineCommand::Skip { shot: first }]);
+    h.run();
+    h.get_by_label("Accept").click();
+    h.run();
+    assert_eq!(
+        sent(&mut h),
+        [EngineCommand::AcceptSuggestion { shot: second }]
+    );
+}
+
 /// The T-bar positions in `commands`.
 fn tbar_positions(commands: &[EngineCommand]) -> Vec<f64> {
     commands

@@ -16,8 +16,13 @@
 //! mode). So [`EngineCommand::Cut`] and [`EngineCommand::Auto`] carry the
 //! preview their sender saw, and are refused with
 //! [`CommandError::PreviewChanged`] when the preview bus shows anything
-//! else (spec C.1: fencing against stale commands). Cut now
-//! ([`EngineCommand::CutTo`]) names its shot, so it needs no fence.
+//! else (spec C.1: fencing against stale commands). Accepting a suggestion
+//! is fenced the same way: [`EngineCommand::AcceptSuggestion`] names the
+//! suggestion its sender saw and is refused with
+//! [`CommandError::SuggestionChanged`] when the director suggests anything
+//! else by then. Cut now ([`EngineCommand::CutTo`]) names its shot, so it
+//! needs no fence. The T-bar is not fenced: its first move starts a
+//! transition to whatever preview holds.
 
 use std::path::PathBuf;
 
@@ -125,8 +130,12 @@ pub enum EngineCommand {
         profile: ContentProfile,
     },
     /// Stage the director's suggestion on preview and run Auto to it
-    /// (queued like [`EngineCommand::Auto`] during a transition).
-    AcceptSuggestion,
+    /// (queued like [`EngineCommand::Auto`] during a transition). Refused
+    /// unless the director still suggests `shot` (see the module docs).
+    AcceptSuggestion {
+        /// The suggestion the sender saw.
+        shot: ShotId,
+    },
     /// Leave `shot` out of the director's suggestions for its skip window
     /// (`director.skip_s`); a hold the operator has on preview with it ends.
     Skip {
@@ -166,7 +175,7 @@ impl EngineCommand {
             EngineCommand::Reacquire { .. } => "reacquire",
             EngineCommand::SetDirectorMode { .. } => "set_director_mode",
             EngineCommand::SetDirectorProfile { .. } => "set_director_profile",
-            EngineCommand::AcceptSuggestion => "accept_suggestion",
+            EngineCommand::AcceptSuggestion { .. } => "accept_suggestion",
             EngineCommand::Skip { .. } => "skip",
             EngineCommand::ReleasePreview => "release_preview",
             EngineCommand::StartOutput { .. } => "start_output",
@@ -222,6 +231,15 @@ pub enum CommandError {
     /// The director has no suggestion to accept.
     #[error("the director has no suggestion")]
     NoSuggestion,
+    /// The director's suggestion changed after the sender saw it, so it was
+    /// not accepted (see the module docs).
+    #[error("the suggestion changed to {suggestion:?} since you saw {seen:?}: nothing was taken")]
+    SuggestionChanged {
+        /// The suggestion the sender saw.
+        seen: ShotId,
+        /// The suggestion now.
+        suggestion: ShotId,
+    },
     /// Preview changed after the sender saw it, so the take was refused
     /// (see the module docs).
     #[error(
@@ -306,7 +324,9 @@ mod tests {
             EngineCommand::SetDirectorProfile {
                 profile: ContentProfile::Music,
             },
-            EngineCommand::AcceptSuggestion,
+            EngineCommand::AcceptSuggestion {
+                shot: ShotId("a".into()),
+            },
             EngineCommand::Skip {
                 shot: ShotId("a".into()),
             },
@@ -338,6 +358,14 @@ mod tests {
         assert_eq!(
             changed.to_string(),
             "preview changed to nothing since you saw ShotId(\"mine\"): nothing was taken"
+        );
+        let changed = CommandError::SuggestionChanged {
+            seen: ShotId("a".into()),
+            suggestion: ShotId("b".into()),
+        };
+        assert_eq!(
+            changed.to_string(),
+            "the suggestion changed to ShotId(\"b\") since you saw ShotId(\"a\"): nothing was taken"
         );
     }
 }

@@ -4,16 +4,18 @@
 //! A [`Studio`] hands every command the console returns straight to a real
 //! [`EngineCore`], as the engine thread does between ticks, and turns its
 //! reply into the notice the app would raise ([`notice_for`]), handed back
-//! on the next frame; every frame draws the core's newest snapshot. Engine
-//! time moves only when a test says so ([`advance`]), and frames only draw
-//! and apply commands, so a test decides exactly where in a transition each
-//! press lands. The studio has three synthetic sources ("a", "b", "c") and
-//! no queries, so its shots are the three wides, which need no detector; a
+//! on the next frame; every frame draws the core's newest snapshot. A
+//! lagging studio ([`Studio::lagging`]) applies each frame's commands only
+//! on the next frame, after taking the snapshot that frame draws, as the
+//! engine does a tick after the window sent them. Engine time moves only
+//! when a test says so ([`advance`]), and frames only draw and apply
+//! commands, so a test decides exactly where in a transition each press
+//! lands. The studio has three synthetic sources ("a", "b", "c") and no
+//! queries, so its shots are the three wides, which need no detector; a
 //! stalled source repeats its last frame, and its wide goes unavailable
-//! [`SOURCE_STALE_AFTER`] later. The director is off, so only the
-//! operator stages shots; [`studio_with`] changes the config, and the
-//! tests of the operator's side of the director (`operator.rs`) turn it
-//! on.
+//! [`SOURCE_STALE_AFTER`] later. The director is off, so only the operator
+//! stages shots; [`studio_with`] changes the config, and the tests of the
+//! operator's side of the director (`operator.rs`) turn it on.
 //!
 //! The rules themselves (queued takes, Cut cutting a transition short, Cut
 //! now, the T-bar's hold) are the switcher's and are tested there and in
@@ -61,6 +63,12 @@ pub(super) struct Studio {
     raised: Vec<(String, bool)>,
     /// Every command the console returned, with the core's reply.
     pub(super) sent: Vec<(EngineCommand, Result<CommandReply, CommandError>)>,
+    /// When true, each frame's commands reach the core only on the next
+    /// frame, after the snapshot that frame draws was taken, so a frame
+    /// drawn from a snapshot older than them follows every command.
+    pub(super) lagging: bool,
+    /// The last frame's commands, while lagging.
+    late: Vec<EngineCommand>,
 }
 
 impl Studio {
@@ -68,6 +76,13 @@ impl Studio {
     pub(super) fn snapshot(&self) -> EngineSnapshot {
         self.core
             .snapshot(OutputView::default(), TimingView::default(), true)
+    }
+
+    /// Hands `command` to the core, keeping the reply and its notice.
+    fn apply(&mut self, command: EngineCommand) {
+        let reply = self.core.apply(&command);
+        self.raised.extend(notice_for(command.name(), &reply));
+        self.sent.push((command, reply));
     }
 
     /// Ticks the core for `secs` seconds of frames.
@@ -147,6 +162,8 @@ pub(super) fn studio_with(configure: impl FnOnce(&mut StudioConfig)) -> Harness<
         feeds,
         raised: Vec::new(),
         sent: Vec::new(),
+        lagging: false,
+        late: Vec::new(),
     };
     studio.tick_for(1.0);
     let mut h = Harness::builder()
@@ -154,11 +171,21 @@ pub(super) fn studio_with(configure: impl FnOnce(&mut StudioConfig)) -> Harness<
         .build_ui_state(
             |ui, s: &mut Studio| {
                 let snap = s.snapshot();
+                // A frame egui draws twice (it discarded a pass) is still
+                // one frame.
+                if ui.ctx().current_pass_index() == 0 {
+                    for command in std::mem::take(&mut s.late) {
+                        s.apply(command);
+                    }
+                }
                 let raised = std::mem::take(&mut s.raised);
-                for command in s.console.frame(ui, &snap, raised, false) {
-                    let reply = s.core.apply(&command);
-                    s.raised.extend(notice_for(command.name(), &reply));
-                    s.sent.push((command, reply));
+                let commands = s.console.frame(ui, &snap, raised, false);
+                if s.lagging {
+                    s.late.extend(commands);
+                } else {
+                    for command in commands {
+                        s.apply(command);
+                    }
                 }
             },
             studio,

@@ -1,9 +1,10 @@
 //! The operator owns preview: Cut and Auto are refused when preview changed
-//! after the operator saw it; a shot the operator staged holds preview
-//! against the director in Suggest mode until it is taken or released; a
-//! skipped suggestion stays out for its window; and each takeover setting
-//! decides what the operator's own switching does to a director in Auto
-//! mode, timed by the ticks' `dt`.
+//! after the operator saw it, and Accept when the suggestion did; a shot
+//! the operator staged holds preview against the director in Suggest mode
+//! until it is taken or released; a skipped suggestion stays out for its
+//! window; and each takeover setting decides what the operator's own
+//! switching does to a director in Auto mode, timed by the ticks' `dt`,
+//! and stays as configured when the operator changes the profile.
 
 use ac_director::{Handover, Reason, Takeover};
 
@@ -380,4 +381,67 @@ fn with_the_director_setting_auto_carries_on_over_the_operator() {
     assert_eq!(snap.director.preview_held, None, "which ends the hold");
     rig.run_secs(10.0);
     assert!(rig.snapshot().director.takes > takes);
+}
+
+#[test]
+fn accepting_a_suggestion_that_changed_since_it_was_seen_is_refused() {
+    let mut rig = directed(DirectorMode::Suggest, Takeover::Suggest);
+    preview_and_cut(&mut rig, "cam/wide");
+    rig.run_secs(1.0);
+    let seen = rig.snapshot().director.suggestion.clone().unwrap();
+    // The suggestion moves on (here because it was skipped) before the
+    // operator's Accept arrives.
+    rig.apply(EngineCommand::Skip { shot: seen.clone() })
+        .unwrap();
+    rig.step();
+    let before = rig.snapshot();
+    let now = before.director.suggestion.clone().unwrap();
+    assert_ne!(now, seen);
+    assert_eq!(
+        rig.apply(EngineCommand::AcceptSuggestion { shot: seen.clone() }),
+        Err(CommandError::SuggestionChanged {
+            seen,
+            suggestion: now.clone()
+        })
+    );
+    // Nothing changed: no take, preview as it was.
+    let after = rig.snapshot();
+    assert_eq!(after.switcher, before.switcher);
+    assert!(!after.switcher.in_transition);
+    // Accepting the suggestion as it is now takes it.
+    rig.apply(EngineCommand::AcceptSuggestion { shot: now.clone() })
+        .unwrap();
+    assert_eq!(rig.preview(), Some(now.clone()));
+    rig.run_secs(1.0);
+    assert_eq!(rig.snapshot().switcher.program, Some(now));
+}
+
+#[test]
+fn changing_the_profile_keeps_the_takeover_pause_and_skip_settings() {
+    let mut rig = directed(DirectorMode::Auto, Takeover::Pause);
+    let before = rig.snapshot().director;
+    assert_eq!(before.profile, ContentProfile::Music);
+    // None of them is the default, so a reset would show.
+    let defaults = ac_director::DirectorConfig::new(DirectorMode::Auto, ContentProfile::Talk);
+    assert_ne!(before.takeover, defaults.takeover);
+    assert_ne!(before.pause, defaults.pause);
+    assert_ne!(before.skip, defaults.skip);
+    rig.apply(EngineCommand::SetDirectorProfile {
+        profile: ContentProfile::Talk,
+    })
+    .unwrap();
+    let after = rig.snapshot().director;
+    assert_eq!(after.profile, ContentProfile::Talk);
+    assert_eq!(after.mode, DirectorMode::Auto);
+    assert_eq!(after.takeover, Takeover::Pause);
+    assert_eq!(after.pause, Duration::from_secs(2));
+    assert_eq!(after.skip, Duration::from_secs(5));
+    // And the pause still works as configured.
+    let mine = other_shot(&rig);
+    assert_eq!(
+        rig.apply(EngineCommand::SetPreview { shot: mine }),
+        Ok(CommandReply::TookOver(Handover::Paused(
+            Duration::from_secs(2)
+        )))
+    );
 }

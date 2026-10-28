@@ -446,7 +446,10 @@ fn suggest_mode_stages_the_suggestion_without_taking() {
     assert_eq!(snap.switcher.preview, Some(shot("cam/wide")));
     assert_eq!(snap.switcher.program, None);
     assert!(!snap.director.reason_text.is_empty());
-    rig.apply(EngineCommand::AcceptSuggestion).unwrap();
+    rig.apply(EngineCommand::AcceptSuggestion {
+        shot: shot("cam/wide"),
+    })
+    .unwrap();
     rig.run_secs(1.0);
     assert_eq!(rig.snapshot().switcher.program, Some(shot("cam/wide")));
     rig.apply(EngineCommand::SetDirectorMode {
@@ -455,7 +458,9 @@ fn suggest_mode_stages_the_suggestion_without_taking() {
     .unwrap();
     rig.step();
     assert_eq!(
-        rig.apply(EngineCommand::AcceptSuggestion),
+        rig.apply(EngineCommand::AcceptSuggestion {
+            shot: shot("cam/wide")
+        }),
         Err(CommandError::NoSuggestion)
     );
 }

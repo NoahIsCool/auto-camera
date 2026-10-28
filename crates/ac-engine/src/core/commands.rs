@@ -17,10 +17,11 @@
 //! its reason ([`crate::snapshot::SwitcherView::last_dropped`]), and the
 //! window shows it as it shows a refused command.
 //!
-//! Cut and Auto are fenced: they carry the preview their sender saw and
-//! are refused, before anything else is checked, when the preview bus
-//! shows anything else ([`crate::command`]). Staging a shot puts the
-//! operator's hold on preview ([`super::directing`]); Skip and
+//! Cut and Auto are fenced: they carry the preview their sender saw and are
+//! refused, before anything else is checked, when the preview bus shows
+//! anything else ([`crate::command`]); accepting a suggestion is refused
+//! the same way when the director suggests anything else. Staging a shot
+//! puts the operator's hold on preview ([`super::directing`]); Skip and
 //! ReleasePreview end it, Skip also leaving the shot out of the director's
 //! suggestions for its window.
 //!
@@ -164,13 +165,17 @@ impl EngineCore {
                     .map_err(|e| CommandError::Invalid(e.to_string()))?;
                 false
             }
-            C::AcceptSuggestion => {
-                let shot = self
-                    .decision
-                    .suggestion
-                    .clone()
-                    .ok_or(CommandError::NoSuggestion)?;
-                self.accept(shot)?;
+            C::AcceptSuggestion { shot } => {
+                match &self.decision.suggestion {
+                    None => return Err(CommandError::NoSuggestion),
+                    Some(now) if now != shot => {
+                        return Err(CommandError::SuggestionChanged {
+                            seen: shot.clone(),
+                            suggestion: now.clone(),
+                        });
+                    }
+                    Some(_) => self.accept(shot.clone())?,
+                }
                 false
             }
             C::Skip { shot } => {

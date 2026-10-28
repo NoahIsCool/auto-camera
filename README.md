@@ -82,19 +82,22 @@ abandons it; the double click's first click still stages the tile for the
 end).
 
 Preview is the operator's. Cut and Auto (the buttons, `Space` and `Enter`)
-take the shot the window showed on preview when you pressed; if preview
-changed in between (the director restaged it a moment earlier), the take is
-refused with a notice, so nothing you did not see goes on air. A shot you
-stage holds preview against the director: in Suggest mode it never stages
-a suggestion over yours until you take it or click Release, and the status
-bar says what it held back. Skip leaves the current suggestion out of the
-suggestions for `skip_s` seconds. While the director runs in Auto mode the
-program monitor carries a red AUTO badge, and your own switching (a key, a
-click on a tile, Cut, Auto or the T-bar) takes over as `takeover` says: by
-default it drops the director to Suggest; `"pause"` holds its takes for
-`pause_s` seconds after each action, counted down on the badge; with
-`"director"` it carries on and stages its shot over yours. A notice says
-which happened.
+take the shot the window showed on preview when you pressed (or the shot
+you had just staged, while the picture has not caught up), and Accept the
+suggestion the panel showed; if that changed in between (the director
+restaged preview or moved its suggestion on a moment earlier), the take is
+refused with a notice, so none of them puts on air a shot you did not see.
+The T-bar is not fenced: it takes whatever preview holds when you start to
+move it. A shot you stage holds preview against the director: in Suggest
+mode it never stages a suggestion over yours until you take it or click
+Release, and the status bar says what it held back. Skip leaves the current
+suggestion out of the suggestions for `skip_s` seconds. While the director
+runs in Auto mode the program monitor carries a red AUTO badge, and your
+own switching (a key, a click on a tile, Cut, Auto or the T-bar) takes over
+as `takeover` says: by default it drops the director to Suggest; `"pause"`
+holds its takes for `pause_s` seconds after each action, counted down on
+the badge; with `"director"` it carries on and stages its shot over yours.
+A notice says which happened.
 
 ## Headless mode
 

@@ -1,9 +1,11 @@
 //! Window tests of the operator's side of the director, on the live studio
 //! of [`super::switching`] with the director on: a take refused because
-//! the director restaged preview after the operator looked, the operator's
-//! hold on preview in Suggest mode and what the window says about it, Skip,
-//! and what a key press does to a director in Auto mode with each takeover
-//! setting, the program monitor's AUTO badge included.
+//! the director restaged preview after the operator looked, and one that
+//! goes through although a frame drawn before the engine applied the key
+//! came in between; the operator's hold on preview in Suggest mode and what
+//! the window says about it, Skip, and what a key press does to a director
+//! in Auto mode with each takeover setting, the program monitor's AUTO
+//! badge included.
 //!
 //! The studio's shots are the three wides ("a", "b", "c"), which the
 //! director ranks in that order. In Auto mode it puts "a" on air with the
@@ -122,6 +124,52 @@ fn the_director_restaging_between_a_key_press_and_space_refuses_the_cut() {
         ]
     );
     assert_eq!(h.state().snapshot().switcher.program, Some(c));
+}
+
+/// A key event as the keyboard sends it, for a test that puts each on a
+/// frame of its own (the harness's own key presses run a frame for the
+/// press and one for the release).
+fn key(key: Key, pressed: bool) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+#[test]
+fn a_frame_drawn_before_the_engine_applies_a_key_still_cuts_the_staged_shot() {
+    let mut h = studio_with(|_| {});
+    h.state_mut().lagging = true;
+    let b = shot_of(&h, 1);
+    // Key 2 stages "b"; the engine has not seen it yet.
+    h.input_mut().events.push(key(Key::Num2, true));
+    h.step();
+    assert_eq!(h.state().snapshot().switcher.preview, None);
+    // The next frame (the key's release) draws the snapshot from before
+    // the staging, with an empty preview; the engine applies the staging
+    // after it.
+    h.input_mut().events.push(key(Key::Num2, false));
+    h.step();
+    assert_eq!(h.state().snapshot().switcher.preview, Some(b.clone()));
+    // So Space, pressed looking at that frame, takes "b": the operator
+    // staged it, and no picture since could have shown it.
+    h.input_mut().events.push(key(Key::Space, true));
+    h.step();
+    h.input_mut().events.push(key(Key::Space, false));
+    h.step();
+    assert_eq!(
+        accepted(&mut h),
+        [
+            EngineCommand::SetPreview { shot: b.clone() },
+            EngineCommand::Cut {
+                preview: Some(b.clone())
+            }
+        ]
+    );
+    assert_eq!(h.state().snapshot().switcher.program, Some(b));
 }
 
 #[test]
