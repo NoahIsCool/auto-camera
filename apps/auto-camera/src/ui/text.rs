@@ -13,7 +13,7 @@ use ac_engine::{
     EngineSnapshot, MatchView, OutputState, OutputView, PassOutcome, QueryView, ShotStatus,
     ShotView, SourceView, TimingView,
 };
-use ac_output::EncoderStats;
+use ac_output::{EncoderStats, StreamHealth, StreamState};
 
 /// Shown for a value that is not known.
 pub const NONE: &str = "–";
@@ -454,6 +454,59 @@ pub fn encoder_lines(stats: &EncoderStats) -> Vec<String> {
         lines.push(format!("last error: {e}"));
     }
     lines
+}
+
+/// The stream's health in a line: "stream connected · 812 kbit/s",
+/// "stream reconnecting (attempt 3) · 1 outage", "stream connecting… · no
+/// answer", "stream down". A stalled connection says so, and the bitrate
+/// (what the ingest takes) is shown while connected.
+pub fn stream_line(stream: &StreamHealth) -> String {
+    let mut line = match stream.state {
+        StreamState::Connecting => "stream connecting…".to_owned(),
+        state => format!("stream {state}"),
+    };
+    if stream.state == StreamState::Connected {
+        let kbps = stream
+            .bitrate_kbps
+            .map_or(NONE.to_owned(), |k| format!("{k:.0}"));
+        line.push_str(&format!(" · {kbps} kbit/s"));
+    }
+    if stream.stalled {
+        line.push_str(if stream.state == StreamState::Connecting {
+            " · no answer"
+        } else {
+            " · stalled, dropping packets"
+        });
+    }
+    match stream.outages {
+        0 => {}
+        1 => line.push_str(" · 1 outage"),
+        n => line.push_str(&format!(" · {n} outages")),
+    }
+    line
+}
+
+/// How [`stream_line`] is drawn: plain while the ingest takes the stream,
+/// weak while the first connection is opening, amber when the stream is
+/// reconnecting, stalled or down.
+pub fn stream_tone(stream: &StreamHealth) -> Tone {
+    match stream.state {
+        _ if stream.stalled => Tone::Warning,
+        StreamState::Connected => Tone::Plain,
+        StreamState::Connecting => Tone::Weak,
+        StreamState::Reconnecting { .. } | StreamState::Down => Tone::Warning,
+    }
+}
+
+/// The stream's line and tone for the output panel while a session that
+/// streams is live; `None` otherwise (once ffmpeg has exited the stream is
+/// down by definition, and the session's state says why).
+pub fn stream_status(output: &OutputView) -> Option<(String, Tone)> {
+    if !matches!(output.state, OutputState::Running | OutputState::Stopping) {
+        return None;
+    }
+    let stream = output.stats.as_ref()?.stream?;
+    Some((stream_line(&stream), stream_tone(&stream)))
 }
 
 /// Where the output goes, for the output panel.

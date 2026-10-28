@@ -34,7 +34,9 @@ multiview of every shot with tally borders, tracking status and quality.
 On the right: the director (mode Off/Suggest/Auto, profile Talk/Music, the
 current suggestion and why, Accept), the queries (add a prompt with its
 framings, remove one; pin, hide or show subjects) and the output (RTMP URL,
-recording path, start/stop, encoder statistics). Under the prompt a live
+recording path, start/stop, encoder statistics and, while it streams, the
+stream's connection: "stream connected · 3980 kbit/s", or in amber "stream
+reconnecting (attempt 2) · 1 outage" after the ingest went away). Under the prompt a live
 line says how it reads, for example "Detector sees: a person speaking ·
 Framing: Medium, Medium close (person)", and the framing checkboxes follow
 the prompt's shot words until you tick one yourself (see
@@ -79,8 +81,12 @@ source says whether its detector was still preparing and when it was ready
 was read (with the parse's `notes`), each shot gives the range of its crop
 size over the run (`crop_width_min` to `crop_height_max`) and whether the
 zoom ceiling limits it (`limited_by_zoom`, with `same_picture_as` naming
-the shot it then looks the same as), and `subjects` lists the subjects at
-the end with the queries they answer:
+the shot it then looks the same as), `subjects` lists the subjects at
+the end with the queries they answer, and for a stream `output.stream`
+says how its connection stood while the output last ran (`state`,
+`attempt`, `stalled`, `bitrate_kbps`, which is `null` on an ffmpeg older
+than 6.1) and how often it was lost and opened again (`outages`,
+`reconnects`):
 
 ```json
 {
