@@ -31,8 +31,9 @@
 //!    a take the operator queued during it fires if the catalog still has
 //!    its shot available, and is dropped with the reason otherwise
 //!    ([`ac_switcher`]). The director then proposes (and in Auto mode
-//!    takes) a shot; a shot the operator staged during the transition
-//!    that landed on preview as it ended counts as the operator's staging.
+//!    takes) a shot, weighing each shot's quality and its subject's query
+//!    priority; a shot the operator staged during the transition that
+//!    landed on preview as it ended counts as the operator's staging.
 //! 7. **Rendering.** The compositor renders the program; monitors and
 //!    multiview tiles are rendered at their own, lower rates.
 //! 8. **Discovery requests** are issued for sources that are due (at most
@@ -102,7 +103,7 @@ use ac_media::{SourceInfo, SourceState, VideoFrame};
 use ac_switcher::Switcher;
 
 use crate::catalog::Catalog;
-use crate::config::{DiscoverySettings, MonitorSettings, StudioConfig};
+use crate::config::{DiscoverySettings, MonitorSettings, QuerySettings, Ranking, StudioConfig};
 use crate::discovery::{DiscoveryRequest, DiscoveryResult};
 use crate::queries::PromptReader;
 use crate::schedule::RateMeter;
@@ -276,6 +277,14 @@ pub struct EngineCore {
     /// Prompt queries in creation order, each prompt read once when the
     /// query was created ([`crate::queries`]).
     queries: Vec<Query>,
+    /// The director priority of each live query, fixed when the query was
+    /// created: from the config by its [`Ranking`], or, for a query added
+    /// by command, as if it were listed last. Kept in step with `queries`
+    /// by the commands that add and remove them.
+    priorities: HashMap<QueryId, u8>,
+    /// How the config ranks queries that give no priority, which also
+    /// ranks the queries added by command.
+    ranking: Ranking,
     /// How prompts of queries added by command are read: the studio's
     /// lexicon and what its detector sees ([`crate::queries`]).
     prompts: PromptReader,
@@ -372,6 +381,13 @@ impl EngineCore {
             });
         }
         let queries = config.build_queries().map_err(|e| e.to_string())?;
+        let ranking = Ranking::of(&config.queries);
+        let priorities = config
+            .queries
+            .iter()
+            .map(QuerySettings::query_id)
+            .zip(ranking.priorities(&config.queries))
+            .collect();
         let mut switcher = Switcher::new();
         switcher
             .set_transition(config.switcher.to_transition())
@@ -386,6 +402,8 @@ impl EngineCore {
         let mut core = Self {
             sources,
             queries,
+            priorities,
+            ranking,
             prompts: PromptReader::of(config),
             discovery: config.discovery,
             shared_detector: config.detector.is_shared(),

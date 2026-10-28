@@ -35,6 +35,7 @@ fn studio() -> StudioConfig {
         prompt: "person".into(),
         presets: Some(vec![PresetSpec::Size(ShotSize::Medium)]),
         literal: false,
+        priority: None,
     });
     c.output.width = 320;
     c.output.height = 180;
