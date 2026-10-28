@@ -25,8 +25,10 @@ fn record() -> TraceRecord {
                         id: SubjectId(1),
                         query: QueryId("person".into()),
                         // Not exactly representable: the round trip must
-                        // still give back the very same numbers.
-                        bbox: Rect::new(0.1, 0.2, 1.0 / 3.0, 0.123_456_789_012_345_67),
+                        // still give back the very same numbers. serde_json
+                        // reads 1/730 one ULP off unless its
+                        // `float_roundtrip` feature is on.
+                        bbox: Rect::new(0.1, 1.0 / 730.0, 1.0 / 3.0, 0.123_456_789_012_345_67),
                         state: TrackState::Tracking,
                     },
                     SubjectTrace {
