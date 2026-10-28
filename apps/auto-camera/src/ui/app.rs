@@ -9,6 +9,10 @@
 //! the console with the next frame ([`super::notices`]). The window
 //! repaints at about the monitor rate while the engine runs.
 //!
+//! An output session the engine cannot hold awake (no `caffeinate` on this
+//! platform, or one that cannot start or ends early) is noted on stderr
+//! once, from the output view ([`crate::awake::SessionNotes`]).
+//!
 //! Closing the window shuts the engine down, which finishes a running
 //! recording before the process exits; while the output is live the
 //! console asks first ([`super::close_guard`]). A termination signal
@@ -22,6 +26,7 @@ use eframe::egui;
 
 use super::console::Console;
 use super::notices::notice_for;
+use crate::awake::{self, SessionNotes};
 use crate::signals::QuitSignal;
 
 /// Repaint interval while running (about 30 Hz, the monitor rate).
@@ -39,6 +44,10 @@ pub struct OperatorApp {
     pending: Vec<(&'static str, PendingReply)>,
     /// Termination signals; when one has come the window closes.
     quit: QuitSignal,
+    /// Notes on output sessions that are not held awake.
+    awake: SessionNotes,
+    /// Where notes go: stderr ([`awake::log`]); tests collect them.
+    log: Box<dyn FnMut(&str)>,
 }
 
 impl std::fmt::Debug for OperatorApp {
@@ -60,6 +69,8 @@ impl OperatorApp {
             engine: Some(engine),
             pending: Vec::new(),
             quit: QuitSignal::new(),
+            awake: SessionNotes::default(),
+            log: Box::new(awake::log),
         }
     }
 
@@ -108,6 +119,9 @@ impl OperatorApp {
         }
         let snap = self.handle.snapshot();
         let raised = self.poll();
+        if let Some(note) = self.awake.note(&snap.output.keep_awake) {
+            (self.log)(&note);
+        }
         for command in self.console.frame(ui, &snap, raised, quitting) {
             self.post(command);
         }
@@ -134,9 +148,13 @@ impl Drop for OperatorApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{have, temp_path};
     use ac_core::ShotId;
-    use ac_engine::{EngineOptions, MonitorSettings};
+    use ac_engine::{EngineOptions, MonitorSettings, OutputState};
+    use ac_output::Caffeinate;
     use ac_sources::SourceConfig;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::time::Instant;
 
     /// Runs frames until every posted command was answered, then fails with
@@ -154,8 +172,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn frames_draw_and_shortcuts_reach_the_engine() {
+    /// A one-source synthetic studio at 160x90 with the monitors off.
+    fn small_studio() -> StudioConfig {
         let mut config = StudioConfig::with_source(
             "stage",
             SourceConfig::Synthetic {
@@ -168,17 +186,28 @@ mod tests {
         config.output.width = 160;
         config.output.height = 90;
         config.monitors = MonitorSettings::disabled();
-        // Real time: on a virtual clock the engine's sleeps would race ahead
-        // of the source thread under load, the wide would go stale and the
-        // cut would be refused.
-        let engine = Engine::start_with(config.clone(), EngineOptions::default()).unwrap();
-        let handle = engine.handle();
-        handle
+        config
+    }
+
+    /// Starts `config` with `options` (in real time: on a virtual clock the
+    /// engine's sleeps would race ahead of the source thread under load,
+    /// the wide would go stale and a cut would be refused) and waits until
+    /// the wide is available.
+    fn start(config: &StudioConfig, options: EngineOptions) -> Engine {
+        let engine = Engine::start_with(config.clone(), options).unwrap();
+        engine
+            .handle()
             .wait_until(Duration::from_secs(10), |s| {
                 s.shots.first().is_some_and(|w| w.available)
             })
             .expect("the source delivers frames");
-        let mut app = OperatorApp::new(engine, &config);
+        engine
+    }
+
+    #[test]
+    fn frames_draw_and_shortcuts_reach_the_engine() {
+        let config = small_studio();
+        let mut app = OperatorApp::new(start(&config, EngineOptions::default()), &config);
         let ctx = egui::Context::default();
         let key = |key| egui::Event::Key {
             key,
@@ -216,6 +245,62 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.frame(ui));
     }
 
+    /// Draws frames of `app` until `done` holds for its newest output
+    /// state, for at most 20 s, then one more.
+    fn draw_until(app: &mut OperatorApp, ctx: &egui::Context, done: fn(&OutputState) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done(&app.handle.snapshot().output.state) {
+            assert!(
+                Instant::now() < deadline,
+                "{:?}",
+                app.handle.snapshot().output
+            );
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.frame(ui));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.frame(ui));
+    }
+
+    #[test]
+    fn a_session_that_is_not_held_awake_is_noted_once() {
+        if !have("ffmpeg") {
+            eprintln!("skipped: ffmpeg is not installed");
+            return;
+        }
+        let mut config = small_studio();
+        config.output.encoder = ac_engine::EncoderSetting::Libx264;
+        // As on a platform without caffeinate, whichever this one is.
+        let options = EngineOptions {
+            keep_awake: Caffeinate::Unsupported,
+            ..EngineOptions::default()
+        };
+        let mut app = OperatorApp::new(start(&config, options), &config);
+        let notes = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = notes.clone();
+        app.log = Box::new(move |n| sink.borrow_mut().push(n.to_owned()));
+        let ctx = egui::Context::default();
+        draw_until(&mut app, &ctx, |_| true);
+        assert!(notes.borrow().is_empty(), "noted before any output");
+        let path = temp_path("window-awake.mp4");
+        app.handle
+            .send(EngineCommand::StartOutput {
+                rtmp_url: None,
+                record_path: Some(path.clone()),
+            })
+            .unwrap();
+        draw_until(&mut app, &ctx, |s| *s == OutputState::Running);
+        draw_until(&mut app, &ctx, |_| true);
+        let noted = notes.borrow().clone();
+        assert_eq!(noted.len(), 1, "{noted:?}");
+        assert!(noted[0].contains("only on macOS"), "{noted:?}");
+        // Not again while the session runs on, nor when it ends.
+        app.handle.send(EngineCommand::StopOutput).unwrap();
+        draw_until(&mut app, &ctx, |s| *s == OutputState::Finished);
+        assert_eq!(notes.borrow().len(), 1, "{:?}", notes.borrow());
+        app.shutdown();
+        std::fs::remove_file(&path).unwrap();
+    }
+
     /// A file removed when dropped, so a failing test leaves no recording
     /// behind.
     struct Scratch(std::path::PathBuf);
@@ -228,9 +313,7 @@ mod tests {
 
     #[test]
     fn a_close_request_while_recording_asks_and_the_engine_keeps_running() {
-        use crate::headless::tests::{have, temp_path};
         use crate::ui::close_guard::Question;
-        use ac_engine::OutputState;
         use egui_kittest::{Harness, kittest::Queryable};
         if !(have("ffmpeg") && have("ffprobe")) {
             eprintln!("skipped: ffmpeg is not installed");

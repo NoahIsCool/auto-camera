@@ -15,9 +15,10 @@
 //!   ([`TickSchedule`](crate::schedule::TickSchedule));
 //! * one **discovery worker** per source with a detector
 //!   (`ac-discovery-<source>`);
-//! * whatever the sources, the sidecar service and the encoder spawn
+//! * whatever the sources, the sidecar service and the output spawn
 //!   internally (decoders, the sidecar process and its `ac-sam-*` threads,
-//!   ffmpeg pipes), owned by those objects.
+//!   ffmpeg pipes, and on macOS `caffeinate` while output runs), owned by
+//!   those objects.
 //!
 //! A source that cannot be opened at start (a file that is not there yet)
 //! does not stop the engine: it starts offline, described by its
@@ -75,6 +76,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use ac_media::{SourceInfo, VideoSource};
+use ac_output::{AwakeMode, Caffeinate};
 use ac_sidecar::SidecarService;
 use ac_sources::{Backoff, Clock, WallClock, open_supervised};
 use thiserror::Error;
@@ -153,15 +155,24 @@ pub struct EngineOptions {
     /// this sender, so the channel closes when the engine stops, unless a
     /// clone of these options still holds one.
     pub trace: Option<TraceSender>,
+    /// How the machine is held awake while output runs (the display too
+    /// when the monitors show program): the system's `caffeinate` on macOS
+    /// ([`Caffeinate::system`]), a stand-in in tests, or [`Caffeinate::Off`]
+    /// when the caller holds it awake itself, as a headless run does for
+    /// the whole run (the output view then says
+    /// [`KeepAwakeState::HeldByCaller`](crate::KeepAwakeState::HeldByCaller)).
+    pub keep_awake: Caffeinate,
 }
 
 impl Default for EngineOptions {
-    /// Real time, a one-second lag limit and no trace.
+    /// Real time, a one-second lag limit, no trace and the system's
+    /// `caffeinate` while output runs.
     fn default() -> Self {
         Self {
             clock: Arc::new(WallClock::new()),
             max_lag: Duration::from_secs(1),
             trace: None,
+            keep_awake: Caffeinate::system(),
         }
     }
 }
@@ -171,6 +182,7 @@ impl std::fmt::Debug for EngineOptions {
         f.debug_struct("EngineOptions")
             .field("max_lag", &self.max_lag)
             .field("trace", &self.trace.is_some())
+            .field("keep_awake", &self.keep_awake)
             .finish_non_exhaustive()
     }
 }
@@ -303,7 +315,10 @@ impl Engine {
             results,
             commands,
             snapshots: snapshots.clone(),
-            output: OutputController::new(config.output.clone()),
+            output: OutputController::new(config.output.clone()).with_keep_awake(
+                options.keep_awake,
+                AwakeMode::for_display(config.monitors.feeds_display()),
+            ),
             audio_source,
             clock: options.clock,
             period: config.frame_period(),

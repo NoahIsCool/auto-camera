@@ -6,7 +6,12 @@
 //!
 //! 1. **Start** the engine on the wall clock with monitors and multiview
 //!    tiles off (nobody is watching), and with `--trace` its trace writer
-//!    first, so that the trace has every tick from the first.
+//!    first, so that the trace has every tick from the first. From here
+//!    until the engine has shut down, the run holds the system awake (macOS
+//!    `caffeinate`, see [`crate::awake`]), the detector load and the
+//!    recording included; while it holds, the engine's own hold for the
+//!    output is turned off. Elsewhere, or when `caffeinate` cannot start,
+//!    the hold is skipped with a note on stderr.
 //! 2. **Signal**: wait for a wide shot to become available. A headless run
 //!    has no operator, so unless the director is in Auto mode (which
 //!    establishes a shot by itself) the first wide is cut to program. A
@@ -30,11 +35,12 @@
 //!    changes, the largest subject count and each shot's crop size range.
 //! 6. **Stop** the output and wait for the recording to be finalized, check
 //!    that every source delivered a picture at some point, then shut the
-//!    engine down, which joins every thread and reaps ffmpeg, and wait for
-//!    the trace writer to write the last record. Nobody watches a headless
-//!    run, so a source that stayed off the air throughout (a file that never
-//!    appeared) fails it, with what kept it offline ([`never_delivered`]),
-//!    instead of passing unseen.
+//!    engine down, which joins every thread and reaps ffmpeg, wait for the
+//!    trace writer to write the last record, and end the hold, which reaps
+//!    `caffeinate` (and notes one that had ended early). Nobody watches a
+//!    headless run, so a source that stayed off the air throughout (a file
+//!    that never appeared) fails it, with what kept it offline
+//!    ([`never_delivered`]), instead of passing unseen.
 //!
 //! A termination signal (Ctrl-C, `SIGTERM`, `SIGHUP`) ends whichever phase
 //! is running; the engine is then shut down as after a normal run (which
@@ -69,6 +75,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::awake;
 use crate::signals::QuitSignal;
 use crate::trace::{self, TraceFile};
 use ac_core::{Rect, ShotId};
@@ -77,6 +84,7 @@ use ac_engine::{
     DetectorSettings, Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot,
     MonitorSettings, OutputState, StudioConfig,
 };
+use ac_output::AwakeMode;
 
 mod flags;
 mod report;
@@ -110,19 +118,31 @@ pub fn run(
     options: &HeadlessOptions,
     quit: &QuitSignal,
 ) -> Summary {
-    run_with(config, path, options, EngineOptions::default(), quit)
+    run_with(
+        config,
+        path,
+        options,
+        EngineOptions::default(),
+        quit,
+        awake::log,
+    )
 }
 
-/// [`run`] with explicit engine options (tests use a faster clock).
+/// [`run`] with explicit engine options (tests use a faster clock or a
+/// stand-in `caffeinate`, which the run holds instead of the engine), and
+/// with the run's notes passed to `log` instead of stderr.
 pub fn run_with(
     mut config: StudioConfig,
     path: &Path,
     options: &HeadlessOptions,
-    engine_options: EngineOptions,
+    mut engine_options: EngineOptions,
     quit: &QuitSignal,
+    mut log: impl FnMut(&str),
 ) -> Summary {
     let started = Instant::now();
     config.monitors = MonitorSettings::disabled();
+    let mode = AwakeMode::for_display(config.monitors.feeds_display());
+    let awake = awake::hold_for_run(&mut engine_options.keep_awake, mode, &mut log);
     let limit = detector_limit(&config.detector);
     let (trace, engine_options) = match trace::attach(options.trace.as_deref(), engine_options) {
         Ok(t) => t,
@@ -147,6 +167,7 @@ pub fn run_with(
         Err(e) => (0, 0, None, error.or(Some(e.to_string()))),
     };
     let (trace, error) = finish_trace(trace, ticks, error);
+    awake::end_of_run(awake, &mut log);
     let last = sampler.last.clone().or(final_snapshot.clone());
     summarize(
         path,
@@ -426,4 +447,4 @@ impl CropRange {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
