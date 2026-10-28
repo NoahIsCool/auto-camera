@@ -65,6 +65,23 @@ pub enum SourceConfig {
     },
 }
 
+impl SourceConfig {
+    /// Checks what can be checked before the source is opened: a synthetic
+    /// pattern's parameters. A file is not looked for, since it may appear
+    /// later and a supervised source then picks it up ([`crate::supervisor`]).
+    pub fn validate(&self) -> Result<(), MediaError> {
+        match self {
+            SourceConfig::File { .. } => Ok(()),
+            SourceConfig::Synthetic {
+                width,
+                height,
+                fps,
+                subjects,
+            } => SyntheticPattern::check(*width, *height, *fps, *subjects).map(|_| ()),
+        }
+    }
+}
+
 /// Opens `config` as source `id`, paced in real time.
 pub fn open_source(
     config: &SourceConfig,
@@ -225,6 +242,26 @@ mod tests {
             open_source(&config, SourceId("s".into())),
             Err(MediaError::Open(_))
         ));
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("size 0x18"), "{err}");
+    }
+
+    #[test]
+    fn validation_checks_patterns_but_does_not_look_for_files() {
+        let pattern = SourceConfig::Synthetic {
+            width: 32,
+            height: 18,
+            fps: 30.0,
+            subjects: 1,
+        };
+        assert!(pattern.validate().is_ok());
+        let missing = SourceConfig::File {
+            path: "/nonexistent/auto-camera/clip.mp4".into(),
+            loop_playback: false,
+            max_width: None,
+            audio: true,
+        };
+        assert!(missing.validate().is_ok(), "it may appear later");
     }
 
     #[test]

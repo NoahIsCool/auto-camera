@@ -17,7 +17,9 @@
 //! The clock is injectable. [`WallClock`] paces real playback. [`VirtualClock`]
 //! advances instantly whenever it is slept on, so tests and offline tools run
 //! the identical pacing code unpaced. Waits are sliced into short sleeps so a
-//! worker notices a stop request within [`MAX_SLEEP_SLICE`].
+//! worker notices a stop request within [`MAX_SLEEP_SLICE`]; the same sliced
+//! wait (`sleep_until`) times a supervisor's reconnect backoff, so a backoff
+//! on a virtual clock passes at once too.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -106,6 +108,22 @@ impl Clock for VirtualClock {
     }
 }
 
+/// Blocks until `clock` reads at least `due`, sleeping at most
+/// [`MAX_SLEEP_SLICE`] at a time. Returns `true` when due (at once if it
+/// already is) and `false` when `stop` was raised first.
+pub(crate) fn sleep_until(clock: &dyn Clock, due: Duration, stop: &AtomicBool) -> bool {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return false;
+        }
+        let now = clock.now();
+        if now >= due {
+            return true;
+        }
+        clock.sleep((due - now).min(MAX_SLEEP_SLICE));
+    }
+}
+
 /// Maps media time onto a clock for one source; see the module docs.
 pub(crate) struct Timeline {
     /// The clock items are paced against.
@@ -131,23 +149,18 @@ impl Timeline {
         }
     }
 
+    /// The clock's current reading.
+    pub(crate) fn now(&self) -> Duration {
+        self.clock.now()
+    }
+
     /// Blocks until media time `pts` is due.
     ///
     /// Returns `true` when the item is due (immediately if it is late) and
     /// `false` when `stop` was raised first.
     pub(crate) fn wait_until(&self, pts: Duration, stop: &AtomicBool) -> bool {
         let origin = *self.origin.get_or_init(|| self.clock.now());
-        let due = origin.saturating_add(pts);
-        loop {
-            if stop.load(Ordering::Acquire) {
-                return false;
-            }
-            let now = self.clock.now();
-            if now >= due {
-                return true;
-            }
-            self.clock.sleep((due - now).min(MAX_SLEEP_SLICE));
-        }
+        sleep_until(&*self.clock, origin.saturating_add(pts), stop)
     }
 }
 
@@ -206,6 +219,19 @@ mod tests {
         assert!(t.wait_until(Duration::ZERO, &stop));
         assert!(t.wait_until(Duration::from_millis(40), &stop));
         assert!(started.elapsed() >= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn sleep_until_lands_on_the_due_time_in_slices() {
+        let clock = VirtualClock::new();
+        let stop = AtomicBool::new(false);
+        assert!(sleep_until(&clock, Duration::from_millis(25), &stop));
+        assert_eq!(clock.now(), Duration::from_millis(25), "no overshoot");
+        assert!(sleep_until(&clock, Duration::ZERO, &stop), "already due");
+        assert_eq!(clock.now(), Duration::from_millis(25));
+        stop.store(true, Ordering::Release);
+        assert!(!sleep_until(&clock, Duration::from_secs(9), &stop));
+        assert_eq!(clock.now(), Duration::from_millis(25));
     }
 
     #[test]

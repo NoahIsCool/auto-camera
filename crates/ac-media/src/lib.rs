@@ -1,15 +1,27 @@
 //! Media types shared by sources, vision, compositing and output.
 //!
-//! Every frame carries its provenance: the [`SourceId`] it came from, a
-//! per-source sequence number that increases by one per delivered frame, and a
-//! presentation timestamp on the source's media clock. Downstream stages use
-//! these to drop stale work and to align observations with the picture they
-//! were computed from.
+//! Every frame carries its provenance: the [`SourceId`] it came from, the
+//! connection *epoch* it was captured in, a per-source sequence number that
+//! increases by one per delivered frame, and a presentation timestamp on the
+//! source's media clock. Downstream stages use these to drop stale work and
+//! to align observations with the picture they were computed from.
+//!
+//! # Epochs
+//!
+//! A source that loses its input and is opened again (the supervisor in
+//! `ac-sources` does this) starts a new epoch: epoch 0 is its first
+//! connection, and each reconnection counts one up. The picture of a new
+//! epoch may come from a camera that was moved, replugged or swapped, so
+//! anything computed on a frame of an older epoch, such as a detection,
+//! describes a picture that is gone. The epoch is plain data on the frame;
+//! consumers only compare it. Across epochs the sequence number and the PTS
+//! keep increasing, so "newer" is still a comparison of sequence numbers,
+//! and the time a source was offline counts as elapsed media time.
 //!
 //! Pixels are packed RGBA8 in row-major order with no row padding. Audio is
 //! interleaved `f32` in `-1.0..=1.0`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use ac_core::SourceId;
@@ -20,7 +32,11 @@ use thiserror::Error;
 pub struct VideoFrame {
     /// Source that produced the frame.
     pub source: SourceId,
-    /// Per-source sequence number, starting at 0.
+    /// Connection epoch of the source: 0 for its first connection, one more
+    /// for each reconnection (see the module docs).
+    pub epoch: u64,
+    /// Per-source sequence number, starting at 0; it keeps increasing across
+    /// epochs.
     pub seq: u64,
     /// Presentation time on the source's media clock.
     pub pts: Duration,
@@ -33,7 +49,8 @@ pub struct VideoFrame {
 }
 
 impl VideoFrame {
-    /// Creates a frame, checking that `data` matches the dimensions.
+    /// Creates a frame of epoch 0, checking that `data` matches the
+    /// dimensions.
     pub fn new(
         source: SourceId,
         seq: u64,
@@ -52,12 +69,18 @@ impl VideoFrame {
         }
         Ok(Self {
             source,
+            epoch: 0,
             seq,
             pts,
             width,
             height,
             data,
         })
+    }
+
+    /// The same frame tagged with connection epoch `epoch`.
+    pub fn with_epoch(self, epoch: u64) -> Self {
+        Self { epoch, ..self }
     }
 
     /// Width divided by height.
@@ -130,13 +153,25 @@ pub struct SourceInfo {
 }
 
 /// Health of a running source.
+///
+/// A plain source only moves forward, `Starting -> Running -> Stopped`. A
+/// supervised one (`ac-sources`) that loses its input goes `Offline` and
+/// `Reconnecting` instead of stopping, and back to `Running` under a new
+/// epoch once the input delivers again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceState {
     /// Starting up; no frame yet.
     Starting,
     /// Delivering frames.
     Running,
-    /// Stopped after end of input or an error.
+    /// Not delivering: the input could not be opened, or was lost, and the
+    /// next attempt to open it waits out a backoff delay.
+    Offline,
+    /// Not delivering: an attempt to open the input again is in progress
+    /// (it is being opened, or it is open and its first frame is awaited).
+    Reconnecting,
+    /// Stopped after end of input, an error or a stop request; a stopped
+    /// source never delivers again.
     Stopped,
 }
 
@@ -172,8 +207,15 @@ pub trait VideoSource: Send {
     fn state(&self) -> SourceState;
     /// The newest decoded frame, if any.
     fn latest(&self) -> Option<VideoFrame>;
+    /// Waits up to `timeout` (real time) for a frame newer than sequence
+    /// number `after` (any frame when `None`) and returns the newest frame,
+    /// or `None` when no newer one arrived in time.
+    fn wait_newer(&self, after: Option<u64>, timeout: Duration) -> Option<VideoFrame>;
     /// Audio decoded since the previous call, oldest first.
     fn drain_audio(&self) -> Vec<AudioBlock>;
+    /// The error behind the current state, if an error is the reason: what
+    /// stopped the source, or what keeps a supervised source offline.
+    fn error(&self) -> Option<String>;
     /// Stops decoding and releases the input. Idempotent.
     fn stop(&mut self);
 }
@@ -183,10 +225,28 @@ pub trait VideoSource: Send {
 /// Writers replace the slot; readers clone the `Arc`-backed frame. A slow
 /// reader therefore skips frames instead of building a queue, which is the
 /// correct behaviour for live video.
+///
+/// A reader that must pass frames on as soon as they arrive (a supervisor
+/// forwarding a source's frames) waits in [`LatestFrame::wait_newer`]
+/// instead of polling: every publish wakes it. That wait is in real time,
+/// since it is a hand-off between threads, not media timing. The lock is
+/// held only to swap or clone the frame, and a poisoned lock is recovered:
+/// the slot holds plain data that is valid whatever a panicking holder was
+/// doing.
 #[derive(Debug, Default, Clone)]
 pub struct LatestFrame {
-    /// The newest frame, shared by the writer and every reader clone.
-    slot: Arc<Mutex<Option<VideoFrame>>>,
+    /// The newest frame and its publish signal, shared by the writer and
+    /// every reader clone.
+    slot: Arc<FrameSlot>,
+}
+
+/// Contents of a [`LatestFrame`].
+#[derive(Debug, Default)]
+struct FrameSlot {
+    /// The newest frame.
+    frame: Mutex<Option<VideoFrame>>,
+    /// Signalled on every publish.
+    published: Condvar,
 }
 
 impl LatestFrame {
@@ -195,14 +255,37 @@ impl LatestFrame {
         Self::default()
     }
 
-    /// Publishes `frame`, replacing any unread frame.
+    /// Locks the slot, recovering it if a holder panicked.
+    fn lock(&self) -> MutexGuard<'_, Option<VideoFrame>> {
+        self.slot.frame.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Publishes `frame`, replacing any unread frame, and wakes waiters.
     pub fn publish(&self, frame: VideoFrame) {
-        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+        *self.lock() = Some(frame);
+        self.slot.published.notify_all();
     }
 
     /// The newest frame, if one was published.
     pub fn get(&self) -> Option<VideoFrame> {
-        self.slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.lock().clone()
+    }
+
+    /// Waits up to `timeout` for a frame whose sequence number is above
+    /// `after` (any frame when `None`) and returns the newest frame, or
+    /// `None` when none such was published in time.
+    pub fn wait_newer(&self, after: Option<u64>, timeout: Duration) -> Option<VideoFrame> {
+        let newer = |slot: &Option<VideoFrame>| {
+            slot.as_ref()
+                .is_some_and(|f| after.is_none_or(|seq| f.seq > seq))
+        };
+        let guard = self.lock();
+        let (guard, _) = self
+            .slot
+            .published
+            .wait_timeout_while(guard, timeout, |slot| !newer(slot))
+            .unwrap_or_else(|e| e.into_inner());
+        guard.clone().filter(|_| newer(&guard))
     }
 }
 
@@ -258,6 +341,44 @@ mod tests {
         m.publish(frame(1));
         m.publish(frame(2));
         assert_eq!(m.get().unwrap().seq, 2);
+    }
+
+    #[test]
+    fn frames_start_in_epoch_zero_and_can_be_retagged() {
+        let f = frame(4);
+        assert_eq!(f.epoch, 0);
+        let g = f.clone().with_epoch(3);
+        assert_eq!((g.epoch, g.seq, g.pts), (3, f.seq, f.pts));
+        assert!(Arc::ptr_eq(&g.data, &f.data), "pixels are shared");
+    }
+
+    #[test]
+    fn wait_newer_returns_a_newer_frame_at_once() {
+        let m = LatestFrame::new();
+        m.publish(frame(5));
+        let zero = Duration::ZERO;
+        assert_eq!(m.wait_newer(None, zero).unwrap().seq, 5);
+        assert_eq!(m.wait_newer(Some(4), zero).unwrap().seq, 5);
+        assert!(m.wait_newer(Some(5), zero).is_none(), "not newer");
+        assert!(m.wait_newer(Some(9), zero).is_none(), "older");
+        assert!(LatestFrame::new().wait_newer(None, zero).is_none(), "empty");
+    }
+
+    #[test]
+    fn wait_newer_wakes_on_publish_and_times_out_without_one() {
+        let m = LatestFrame::new();
+        m.publish(frame(1));
+        let started = std::time::Instant::now();
+        assert!(m.wait_newer(Some(1), Duration::from_millis(30)).is_none());
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        let writer = m.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            writer.publish(frame(2));
+        });
+        let got = m.wait_newer(Some(1), Duration::from_secs(30));
+        assert_eq!(got.map(|f| f.seq), Some(2));
+        t.join().unwrap();
     }
 
     #[test]
