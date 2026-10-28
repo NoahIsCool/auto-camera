@@ -40,6 +40,16 @@ jobs:
       - run: python3 -B -m unittest
         working-directory: sidecars/sam3-mlx
 
+  # CLAUDE.md: a module over ~600 lines is a smell. Fail any non-test Rust
+  # module over 600 lines; the script's docs say what counts as a test
+  # module. Standard library only, so no toolchain is needed.
+  module-size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -B scripts/module_size.py
+      - run: python3 -B -m unittest discover -s scripts
+
   # The workspace promises rust-version 1.92; build everything with it.
   msrv:
     runs-on: ubuntu-latest
