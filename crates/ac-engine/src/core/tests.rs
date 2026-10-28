@@ -61,7 +61,7 @@ fn config(subjects: u32) -> StudioConfig {
             PresetSpec::Size(ShotSize::Close),
         ]),
         literal: false,
-        priority: QuerySettings::DEFAULT_PRIORITY,
+        priority: None,
     });
     c.output.width = W;
     c.output.height = H;

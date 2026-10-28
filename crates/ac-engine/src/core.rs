@@ -77,7 +77,7 @@ use ac_media::{SourceInfo, SourceState, VideoFrame};
 use ac_switcher::Switcher;
 
 use crate::catalog::Catalog;
-use crate::config::{DiscoverySettings, MonitorSettings, StudioConfig};
+use crate::config::{DiscoverySettings, MonitorSettings, QuerySettings, Ranking, StudioConfig};
 use crate::discovery::{DiscoveryRequest, DiscoveryResult};
 use crate::queries::PromptReader;
 use crate::schedule::RateMeter;
@@ -218,10 +218,14 @@ pub struct EngineCore {
     /// Prompt queries in creation order, each prompt read once when the
     /// query was created ([`crate::queries`]).
     queries: Vec<Query>,
-    /// The director priority of each live query: from the config, or the
-    /// default for a query added by command. Kept in step with `queries`
+    /// The director priority of each live query, fixed when the query was
+    /// created: from the config by its [`Ranking`], or, for a query added
+    /// by command, as if it were listed last. Kept in step with `queries`
     /// by the commands that add and remove them.
     priorities: HashMap<QueryId, u8>,
+    /// How the config ranks queries that give no priority, which also
+    /// ranks the queries added by command.
+    ranking: Ranking,
     /// How prompts of queries added by command are read: the studio's
     /// lexicon and what its detector sees ([`crate::queries`]).
     prompts: PromptReader,
@@ -314,10 +318,12 @@ impl EngineCore {
             });
         }
         let queries = config.build_queries().map_err(|e| e.to_string())?;
+        let ranking = Ranking::of(&config.queries);
         let priorities = config
             .queries
             .iter()
-            .map(|q| (q.query_id(), q.priority))
+            .map(QuerySettings::query_id)
+            .zip(ranking.priorities(&config.queries))
             .collect();
         let mut switcher = Switcher::new();
         switcher
@@ -334,6 +340,7 @@ impl EngineCore {
             sources,
             queries,
             priorities,
+            ranking,
             prompts: PromptReader::of(config),
             discovery: config.discovery,
             shared_detector: config.detector.is_shared(),

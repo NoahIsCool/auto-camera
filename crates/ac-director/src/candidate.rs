@@ -4,17 +4,17 @@
 //! [`ShotCandidate`]: its source, whether it is a wide or a subject shot, its
 //! crop in normalized source coordinates, a `quality` in `0.0..=1.0`
 //! (tracking confidence multiplied by framing settledness, computed by the
-//! engine) and a `priority`, how many levels the operator ranked the shot's
-//! prompt above the show's lowest. The director turns that into one number
-//! per shot with [`score`]:
+//! engine) and a `priority`, how many levels the operator ranked the prompt
+//! of the shot's subject above the lowest-ranked one among the subjects on
+//! offer. The director turns that into one number per shot with [`score`]:
 //!
 //! ```text
 //! score(c) = k(c) · q(c) + u · p(c) − v · r(c)
 //!
 //!   q(c) = quality clamped to 0..=1 (NaN counts as 0)
 //!   k(c) = ScoreWeights::wide_weight for a wide, 1 for a subject shot
-//!   p(c) = ShotCandidate::priority: levels above the lowest priority, 0 for
-//!          a wide and for every shot when all prompts share one priority
+//!   p(c) = ShotCandidate::priority: levels above the lowest priority on
+//!          offer, 0 for a wide and for every shot when all share one
 //!   r(c) = clamp(1 − (now − t_used) / W, 0, 1) when the shot was last on
 //!          program at t_used, else 0                       (recency, 0..=1)
 //!   u    = ScoreWeights::priority_weight
@@ -44,8 +44,10 @@
 //! (0.1), enough to displace an equal-quality incumbent, while the widest
 //! spread the engine allows (four levels, 0.2) stays below the variety
 //! penalty (0.3): priority tilts the rotation towards the important
-//! subjects without ending it, and a shot one level up still loses to one
-//! tracked 0.05 better.
+//! subjects without ending it. A shot one level up is worth the same as one
+//! tracked 0.05 better (an exact tie goes to the earlier-listed candidate,
+//! and f32 rounding may tip it either way), and loses to one tracked more
+//! than 0.05 better.
 //!
 //! Scores therefore lie in `−v..=max(1, k) + u · p_max`. The program shot is
 //! compared with [`base_score`], which leaves out the recency term: being on
@@ -99,9 +101,9 @@ pub struct ShotCandidate {
     pub available: bool,
     /// When the shot was last on program (media clock), if ever.
     pub recently_used_at: Option<Duration>,
-    /// Priority levels the shot's prompt stands above the lowest-priority
-    /// prompt of the show (`p` in the [module docs](self)): 0 for a wide,
-    /// and for every shot when all prompts share one priority.
+    /// Priority levels the prompt of the shot's subject stands above the
+    /// lowest priority among the subjects on offer (`p` in the [module
+    /// docs](self)): 0 for a wide, and for every shot when all share one.
     pub priority: u8,
 }
 
@@ -261,6 +263,21 @@ mod tests {
             ..w
         };
         assert!((base_score(&c, &off) - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn one_level_is_worth_0_05_of_quality() {
+        let w = ScoreWeights::default();
+        for quality in [0.5, 0.6, 0.7, 0.8, 0.85] {
+            let mut up = cand(CandidateKind::Subject, "cam", Rect::FULL, quality);
+            up.priority = 1;
+            let better = |by: f32| cand(CandidateKind::Subject, "cam", Rect::FULL, quality + by);
+            let now = secs(0.0);
+            // Tracked 0.05 better: the same score, up to f32 rounding.
+            assert!((score(&up, now, &w) - score(&better(0.05), now, &w)).abs() < 1e-6);
+            // Tracked more than 0.05 better: the level loses.
+            assert!(score(&up, now, &w) < score(&better(0.06), now, &w));
+        }
     }
 
     #[test]

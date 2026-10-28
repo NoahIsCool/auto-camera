@@ -29,8 +29,8 @@
 //! `presets` always win over shot words. A role that names an action draws
 //! a notice unless the `detector` sees actions
 //! ([`DetectorSettings::sees_actions`]); see [`crate::queries`]. A query's
-//! `priority`, 1 to 5 (default 3), ranks its subjects for the director;
-//! only differences between queries count ([`QuerySettings`]).
+//! `priority`, 1 to 5, ranks its subjects for the director; when no query
+//! gives one, the list order ranks them, first highest ([`Ranking`]).
 //!
 //! The `detector` table picks one detector `kind` for the whole studio:
 //! `"none"`, `"synthetic"` (ground truth of synthetic sources), `"owl"`
@@ -112,7 +112,7 @@ pub use director::DirectorSettings;
 pub use discovery::DiscoverySettings;
 pub use monitors::MonitorSettings;
 pub use output::{EncoderSetting, OutputSettings};
-pub use queries::{PresetSpec, QuerySettings, slug, validate_query};
+pub use queries::{PresetSpec, QuerySettings, Ranking, slug, validate_query};
 pub use sidecar::SidecarSettings;
 pub use sources::SourceEntry;
 pub use subjects::SubjectSettings;
