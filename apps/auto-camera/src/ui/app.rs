@@ -14,6 +14,9 @@
 //! them, but the next tick's cannot. The window repaints at about the
 //! monitor rate while the engine runs.
 //!
+//! The config's load warnings (a missing `schema` key) open the window as
+//! a notice in the status bar ([`OperatorApp::with_warnings`]).
+//!
 //! An output session the engine cannot hold awake (no `caffeinate` on this
 //! platform, or one that cannot start or ends early) is noted on stderr
 //! once, from the output view ([`crate::awake::SessionNotes`]).
@@ -30,7 +33,7 @@ use ac_engine::{Engine, EngineCommand, EngineHandle, PendingReply, StudioConfig}
 use eframe::egui;
 
 use super::console::Console;
-use super::notices::notice_for;
+use super::notices::{notice_for, warnings_notice};
 use crate::awake::{self, SessionNotes};
 use crate::signals::QuitSignal;
 
@@ -82,6 +85,15 @@ impl OperatorApp {
     /// The same app, closing its window once `quit` is requested.
     pub fn with_quit(mut self, quit: QuitSignal) -> Self {
         self.quit = quit;
+        self
+    }
+
+    /// The same app, opening with the config's load `warnings` in the
+    /// status bar (for as long as any notice stays).
+    pub fn with_warnings(mut self, warnings: &[String]) -> Self {
+        if let Some((text, error)) = warnings_notice(warnings) {
+            self.console.raise_on_open(text, error);
+        }
         self
     }
 
@@ -216,7 +228,14 @@ mod tests {
     #[test]
     fn frames_draw_and_shortcuts_reach_the_engine() {
         let config = small_studio();
-        let mut app = OperatorApp::new(start(&config, EngineOptions::default()), &config);
+        let warning = "studio.toml: no `schema` key".to_owned();
+        let mut app = OperatorApp::new(start(&config, EngineOptions::default()), &config)
+            .with_warnings(&[warning]);
+        assert!(
+            app.console
+                .notice(&app.handle.snapshot())
+                .is_some_and(|(_, error)| !error)
+        );
         let ctx = egui::Context::default();
         let key = |key| egui::Event::Key {
             key,

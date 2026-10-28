@@ -7,6 +7,9 @@
 #
 #   cargo run -p auto-camera -- --config config/sam3-sidecar.example.toml
 #
+# `--check` in place of a run lists every missing file or tool, the venv
+# included, without starting the studio or the sidecar.
+#
 # Copy this file, then point `path` at a video and `command` at the venv and
 # weights described in sidecars/sam3-mlx/README.md. The paths below are
 # placeholders laid out as on Noah's Mac: the venv in models/sam3/.venv and
@@ -20,6 +23,9 @@
 # 20 at 0.3, against OWLv2's 1 of 20; measured on Noah's footage), but every
 # prompt gets SAM's false hits too. It is a studio for trying prompts, not a
 # show setup.
+
+# The layout this file is written in (README, "Studio configuration").
+schema = 1
 
 [[sources]]
 id = "cam-1"
@@ -124,4 +130,7 @@ fps = 30
 # Program audio comes from this source's embedded audio track.
 audio_source = "cam-1"
 # rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
-record_path = "../recordings/sam3-sidecar.mp4"
+# Unlike the paths above, a relative recording path is taken from the
+# working folder (the repository root, run as above), as one typed at Start
+# Output is; so is a relative `ffmpeg` path. `--check` says where.
+record_path = "recordings/sam3-sidecar.mp4"

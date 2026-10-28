@@ -8,7 +8,8 @@
 //! switched by hand), a take the switcher dropped when the transition
 //! before it ended ([`dropped_notice`]), a suggestion the director did not
 //! stage because the operator's shot holds preview ([`held_back_notice`]),
-//! and the engine stopping ([`stopped_notice`]). The newest raised notice
+//! the engine stopping ([`stopped_notice`]), and, as the window opens, the
+//! config's load warnings ([`warnings_notice`]). The newest raised notice
 //! is shown for [`NOTICE_FOR`] and then cleared; while the engine is
 //! stopped, its notice replaces any other, since nothing else matters then.
 //!
@@ -85,6 +86,12 @@ pub fn held_back_notice(snap: &EngineSnapshot, seen: u64) -> Option<(String, boo
         ),
         false,
     ))
+}
+
+/// The notice for the config's load warnings (a missing `schema` key), all
+/// of them in order; not an error, since the studio runs.
+pub fn warnings_notice(warnings: &[String]) -> Option<(String, bool)> {
+    (!warnings.is_empty()).then(|| (format!("warning: {}", warnings.join(" · ")), false))
 }
 
 /// The notice for an engine that is no longer running, with the reason when
@@ -285,6 +292,24 @@ mod tests {
         assert_eq!(dropped_notice(&snap, 2), None, "already shown");
         snap.switcher.last_dropped = None;
         assert_eq!(dropped_notice(&snap, 1), None, "no reason, no notice");
+    }
+
+    #[test]
+    fn config_warnings_are_one_notice_that_is_not_an_error() {
+        assert_eq!(warnings_notice(&[]), None);
+        let one = ["studio.toml: no `schema` key; add `schema = 1`".to_owned()];
+        assert_eq!(
+            warnings_notice(&one),
+            Some((
+                "warning: studio.toml: no `schema` key; add `schema = 1`".into(),
+                false
+            ))
+        );
+        let two = ["a".to_owned(), "b".to_owned()];
+        assert_eq!(
+            warnings_notice(&two),
+            Some(("warning: a · b".into(), false))
+        );
     }
 
     #[test]

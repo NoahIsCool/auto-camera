@@ -44,10 +44,17 @@ use app::OperatorApp;
 
 /// Starts the engine from `config` with `options` and runs the window until
 /// it is closed, or until `quit` is requested (a termination signal), which
-/// closes it. The engine has stopped when this returns, whether the window
-/// opened or not.
-pub fn run(config: StudioConfig, options: EngineOptions, quit: QuitSignal) -> Result<(), String> {
+/// closes it. The window opens with `warnings`, the config's, in its status
+/// bar. The engine has stopped when this returns, whether the window opened
+/// or not.
+pub fn run(
+    config: StudioConfig,
+    options: EngineOptions,
+    warnings: &[String],
+    quit: QuitSignal,
+) -> Result<(), String> {
     let engine = Engine::start_with(config.clone(), options).map_err(|e| e.to_string())?;
+    let warnings = warnings.to_vec();
     let title = match config.sources.as_slice() {
         [one] => format!("Auto Camera · {}", one.display_name()),
         many => format!("Auto Camera · {} sources", many.len()),
@@ -68,7 +75,11 @@ pub fn run(config: StudioConfig, options: EngineOptions, quit: QuitSignal) -> Re
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 ctx.request_repaint();
             });
-            Ok(Box::new(OperatorApp::new(engine, &config).with_quit(quit)))
+            Ok(Box::new(
+                OperatorApp::new(engine, &config)
+                    .with_quit(quit)
+                    .with_warnings(&warnings),
+            ))
         }),
     )
     .map_err(|e| format!("cannot open the operator window: {e}"))
