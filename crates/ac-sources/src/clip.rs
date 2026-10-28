@@ -13,8 +13,8 @@
 //! and no clock; ffmpeg runs ahead of the reader by one pipe buffer at most.
 //!
 //! Frames are numbered as a file source numbers them: sequence numbers from
-//! 0 and `pts = seq / fps` at the probed rate, starting with the frame at
-//! the segment's start ([`crate::segment`]). The same file therefore gives
+//! 0 and `pts = seq / fps` at the probed rate, starting with the first frame
+//! at or after the segment's start ([`crate::segment`]). The same file therefore gives
 //! the same picture for the same sequence number and PTS here and in a live
 //! file source, so a detection log recorded on one replays on the other. A
 //! looping clip restarts its decoder at the end and keeps counting, as a
@@ -108,9 +108,8 @@ impl ClipReader {
         let probe = probe(&options.tools, &path)?;
         let (width, height) = output_size(probe.video.display_size(), options.max_width)?;
         let rate = probe.video.frame_rate;
-        let args = options
-            .segment
-            .apply(video_args(&path, &probe.video, (width, height), rate));
+        let cut = options.segment.cut(&probe);
+        let args = video_args(&path, &probe.video, (width, height), rate, &cut);
         let mut reader = Self {
             info: SourceInfo {
                 id,

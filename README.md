@@ -170,9 +170,12 @@ and replay it.
 
 A file source can play part of its file as a clip of its own: `start_s`
 seconds in (default 0), for `duration_s` seconds (default: to the end).
-The frame at `start_s` comes first, with PTS 0, so a segment of a long
-recording is scored like a short clip, and a detection log recorded on the
-segment replays on it.
+The first frame at or after `start_s` comes first, with PTS 0, and the
+audio starts with it, so a segment of a long recording is scored like a
+short clip, and a detection log recorded on the segment replays on it. The
+cut is exact in MP4 and Matroska files, and in a container without a seek
+index, such as an MPEG-TS recording, when it has a keyframe at least every
+15 s.
 
 ## Studio configuration
 
@@ -380,7 +383,7 @@ than for a show; choosing a model per query comes later.
 |---|---|
 | `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
 | `ac-media` | Frames, audio blocks and the source trait, with latest-frame mailboxes |
-| `ac-sources` | File (ffmpeg) and synthetic sources; injectable clocks |
+| `ac-sources` | File (ffmpeg) and synthetic sources, file segments, a frame-by-frame clip reader for offline tools; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector, replay of recorded detections |
 | `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |

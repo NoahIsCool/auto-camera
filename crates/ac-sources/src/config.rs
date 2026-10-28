@@ -11,8 +11,8 @@
 //! ```
 //!
 //! A file's `start_s` and `duration_s` play a segment of it, as if it were a
-//! clip of its own: its first frame is the one at `start_s`, with PTS 0
-//! ([`crate::segment`]).
+//! clip of its own: its first frame is the first at or after `start_s`, with
+//! PTS 0, and its audio starts with that frame ([`crate::segment`]).
 //!
 //! [`open_source`] turns a config into a running source behind the
 //! [`VideoSource`] trait, so callers never depend on the concrete type.
@@ -56,8 +56,9 @@ pub enum SourceConfig {
         /// Decode the file's audio when it has any (default `true`).
         #[serde(default = "default_audio")]
         audio: bool,
-        /// Start this many seconds into the file (default 0); the frame
-        /// there is delivered first, with PTS 0 ([`crate::segment`]).
+        /// Start this many seconds into the file (default 0); the first
+        /// frame at or after that time is delivered first, with PTS 0
+        /// ([`crate::segment`]).
         #[serde(default)]
         start_s: Option<f64>,
         /// Play at most this many seconds from `start_s` (default: to the
