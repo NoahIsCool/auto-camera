@@ -28,7 +28,9 @@
 //! detector phrase, and `literal = true` sends the text as typed. Explicit
 //! `presets` always win over shot words. A role that names an action draws
 //! a notice unless the `detector` sees actions
-//! ([`DetectorSettings::sees_actions`]); see [`crate::queries`].
+//! ([`DetectorSettings::sees_actions`]); see [`crate::queries`]. A query's
+//! `priority`, 1 to 5 (default 3), ranks its subjects for the director;
+//! only differences between queries count ([`QuerySettings`]).
 //!
 //! The `detector` table picks one detector `kind` for the whole studio:
 //! `"none"`, `"synthetic"` (ground truth of synthetic sources), `"owl"`

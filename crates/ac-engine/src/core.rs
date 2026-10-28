@@ -28,7 +28,8 @@
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
 //! 5. **Framing.** Every shot's framer steps by `dt` and is rescored.
 //! 6. **Switching.** The switcher advances its transition; the director
-//!    proposes (and in Auto mode takes) a shot.
+//!    proposes (and in Auto mode takes) a shot, weighing each shot's
+//!    quality and its subject's query priority.
 //! 7. **Rendering.** The compositor renders the program; monitors and
 //!    multiview tiles are rendered at their own, lower rates.
 //! 8. **Discovery requests** are issued for sources that are due (at most
@@ -217,6 +218,10 @@ pub struct EngineCore {
     /// Prompt queries in creation order, each prompt read once when the
     /// query was created ([`crate::queries`]).
     queries: Vec<Query>,
+    /// The director priority of each live query: from the config, or the
+    /// default for a query added by command. Kept in step with `queries`
+    /// by the commands that add and remove them.
+    priorities: HashMap<QueryId, u8>,
     /// How prompts of queries added by command are read: the studio's
     /// lexicon and what its detector sees ([`crate::queries`]).
     prompts: PromptReader,
@@ -309,6 +314,11 @@ impl EngineCore {
             });
         }
         let queries = config.build_queries().map_err(|e| e.to_string())?;
+        let priorities = config
+            .queries
+            .iter()
+            .map(|q| (q.query_id(), q.priority))
+            .collect();
         let mut switcher = Switcher::new();
         switcher
             .set_transition(config.switcher.to_transition())
@@ -323,6 +333,7 @@ impl EngineCore {
         let mut core = Self {
             sources,
             queries,
+            priorities,
             prompts: PromptReader::of(config),
             discovery: config.discovery,
             shared_detector: config.detector.is_shared(),

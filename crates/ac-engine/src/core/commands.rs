@@ -17,7 +17,7 @@ use ac_director::DirectorConfig;
 
 use super::EngineCore;
 use crate::command::{CommandError, CommandReply, EngineCommand};
-use crate::config::slug;
+use crate::config::{QuerySettings, slug};
 use crate::queries::build_query;
 
 impl EngineCore {
@@ -63,6 +63,7 @@ impl EngineCore {
                 };
                 // Removed first, so results already in flight are filtered.
                 self.queries.remove(pos);
+                self.priorities.remove(query);
                 for s in &mut self.sources {
                     s.vision.remove_query(query);
                     s.discovery.matches.remove(query);
@@ -128,7 +129,7 @@ impl EngineCore {
 
     /// Reads the prompt once with the studio's reader (its lexicon and
     /// what its detector sees), settles the presets ([`crate::queries`])
-    /// and adds the query.
+    /// and adds the query, at the default priority.
     fn add_query(
         &mut self,
         name: &str,
@@ -143,6 +144,8 @@ impl EngineCore {
             return Err(CommandError::DuplicateQuery(id));
         }
         self.queries.push(query);
+        self.priorities
+            .insert(id.clone(), QuerySettings::DEFAULT_PRIORITY);
         Ok(CommandReply::QueryAdded { id })
     }
 

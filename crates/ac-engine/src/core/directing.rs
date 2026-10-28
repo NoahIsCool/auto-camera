@@ -13,14 +13,32 @@
 //!
 //! Staging is skipped during a transition, since the switcher refuses to
 //! change preview while one runs.
+//!
+//! # Priority
+//!
+//! Each candidate carries a priority level, the `p` of the director's
+//! score ([`ac_director::candidate`]): how many levels the highest-priority
+//! live query its subject answers, as primary query or alias, stands above
+//! the lowest-priority live query. Priority belongs to the subject, not to
+//! the query whose preset made a shot: a person found by both "person" and
+//! "pastor" is the pastor in every size, so all their shots carry the
+//! pastor's level. Wides, and subjects whose queries were all removed (an
+//! orphan kept on air), stand with the lowest, at 0. Counting from the
+//! lowest live query makes only differences matter: with every query at
+//! one priority every level is 0 and the director scores exactly as without
+//! priorities, and removing or adding a query (live, at the default
+//! priority) moves the floor with it.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
-use ac_core::ShotId;
+use ac_core::{QueryId, ShotId};
 use ac_director::{DirectorInput, DirectorMode, ShotCandidate};
 use ac_switcher::TransitionKind;
 
 use super::EngineCore;
+use crate::catalog::ShotEntry;
+use crate::config::QuerySettings;
 
 impl EngineCore {
     /// Book-keeps program changes: on-air time, last use and change count.
@@ -39,10 +57,11 @@ impl EngineCore {
         }
     }
 
-    /// Runs the director and acts on its decision for the current mode.
-    pub(super) fn run_director(&mut self) {
-        let candidates: Vec<ShotCandidate> = self
-            .catalog
+    /// The director's view of the catalog: one candidate per shot, in
+    /// display order, with its priority level (see the module docs).
+    pub(super) fn director_candidates(&self) -> Vec<ShotCandidate> {
+        let levels = self.priority_levels();
+        self.catalog
             .entries()
             .iter()
             .map(|e| ShotCandidate {
@@ -53,8 +72,49 @@ impl EngineCore {
                 quality: e.quality,
                 available: e.available,
                 recently_used_at: e.last_on_program,
+                priority: self.shot_priority(e, &levels),
             })
-            .collect();
+            .collect()
+    }
+
+    /// How many levels each live query's priority stands above the lowest
+    /// live query's.
+    fn priority_levels(&self) -> HashMap<&QueryId, u8> {
+        let priority = |id: &QueryId| {
+            self.priorities
+                .get(id)
+                .copied()
+                .unwrap_or(QuerySettings::DEFAULT_PRIORITY)
+        };
+        let lowest = self
+            .queries
+            .iter()
+            .map(|q| priority(&q.id))
+            .min()
+            .unwrap_or_default();
+        self.queries
+            .iter()
+            .map(|q| (&q.id, priority(&q.id) - lowest))
+            .collect()
+    }
+
+    /// The level of shot `e`: that of the highest-priority live query its
+    /// subject answers, 0 for a wide or a subject that answers none.
+    fn shot_priority(&self, e: &ShotEntry, levels: &HashMap<&QueryId, u8>) -> u8 {
+        let Some(subject) = e.subject else {
+            return 0;
+        };
+        self.sources[e.source]
+            .vision
+            .store()
+            .record(subject)
+            .and_then(|r| r.queries().filter_map(|q| levels.get(q).copied()).max())
+            .unwrap_or(0)
+    }
+
+    /// Runs the director and acts on its decision for the current mode.
+    pub(super) fn run_director(&mut self) {
+        let candidates = self.director_candidates();
         let input = DirectorInput {
             now: self.now,
             program: self.switcher.program(),
