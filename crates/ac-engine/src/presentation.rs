@@ -115,9 +115,10 @@
 //! mailbox has replaced by the time the tick looks, so each buffer holds a
 //! ring of up to [`CAPACITY`] frames: deliberately the one exception to
 //! taking only the newest frame from a source (the encoder's bounded queues
-//! are on the way out). It keeps the rule's purpose. The ring has a fixed
-//! capacity and a new frame evicts the oldest, so a slow engine never
-//! builds a backlog and is never shown a frame more than a few periods old;
+//! carry program frames out, not source frames in). It keeps the rule's
+//! purpose. The ring has a fixed capacity and a new frame evicts the
+//! oldest, so a slow engine never builds a backlog and is never shown a
+//! frame more than a few periods old;
 //! it holds no frame older than the one presented last, so between ticks it
 //! holds that frame and those that arrived since (two or three for a source
 //! at the tick rate, four for one twice as fast); and it is owned by the
