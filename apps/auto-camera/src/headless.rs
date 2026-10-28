@@ -93,7 +93,7 @@ mod summary;
 pub use flags::HeadlessOptions;
 pub use summary::{
     DirectorSummary, MatchSummary, OutputSummary, ProgramSummary, QuerySummary, ShotSummary,
-    SourceSummary, SubjectSummary, Summary, TimingSummary, TraceSummary,
+    SourceSummary, StreamSummary, SubjectSummary, Summary, TimingSummary, TraceSummary,
 };
 
 use report::{Totals, failed_to_start, summarize};
@@ -401,6 +401,9 @@ struct Sampler {
     log: Vec<(f64, String)>,
     /// Crop size range of every shot seen, by shot id.
     crops: HashMap<String, CropRange>,
+    /// The stream's health in the newest snapshot whose output was running
+    /// (once ffmpeg has exited the stream is down by definition).
+    stream: Option<ac_output::StreamHealth>,
 }
 
 impl Sampler {
@@ -420,6 +423,11 @@ impl Sampler {
                 .entry(shot.id.0.clone())
                 .and_modify(|r| r.widen(shot.crop))
                 .or_insert_with(|| CropRange::new(shot.crop));
+        }
+        if snap.output.state == OutputState::Running
+            && let Some(stream) = snap.output.stats.as_ref().and_then(|s| s.stream)
+        {
+            self.stream = Some(stream);
         }
         self.last = Some(snap.clone());
     }

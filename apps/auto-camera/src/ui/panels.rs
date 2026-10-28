@@ -22,7 +22,8 @@ use super::keys;
 use super::query_form::{self, QueryForm};
 use super::text::{
     Tone, destinations, dropped_line, encoder_lines, match_lines, output_state, percent,
-    query_hover, query_line, shot_name, source_hover, source_line, source_tone, timing_line,
+    query_hover, query_line, shot_name, source_hover, source_line, source_tone, stream_status,
+    timing_line,
 };
 
 /// Amber, for warnings such as a prompt with no matches.
@@ -297,6 +298,14 @@ pub fn output(
         for line in encoder_lines(stats) {
             ui.label(RichText::new(line).monospace());
         }
+    }
+    if let Some((line, tone)) = stream_status(out) {
+        let text = RichText::new(line).monospace();
+        ui.label(match tone {
+            Tone::Plain => text,
+            Tone::Warning => text.color(AMBER),
+            Tone::Weak => text.weak(),
+        });
     }
     if let Some(a) = &out.audio {
         ui.label(format!(

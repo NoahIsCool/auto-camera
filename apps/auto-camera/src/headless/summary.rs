@@ -17,7 +17,9 @@
 //! static performers), whether each shot is zoom-limited and which shot it
 //! then looks the same as, and the subjects at the end with the queries
 //! they answer, so duplicate subjects and their roles can be told apart
-//! without a contact sheet.
+//! without a contact sheet. An output that streams also reports how the
+//! stream's connection stood while the output last ran, and how often it
+//! was lost and opened again (spec M14).
 
 use std::path::PathBuf;
 
@@ -267,6 +269,27 @@ pub struct OutputSummary {
     pub exit_code: Option<i32>,
     /// Newest ffmpeg error line.
     pub last_error: Option<String>,
+    /// The stream, when the session streamed.
+    pub stream: Option<StreamSummary>,
+}
+
+/// The stream in the summary: its connection as the output last saw it
+/// while running, and the session's counts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StreamSummary {
+    /// `connecting`, `connected`, `reconnecting` or `down`.
+    pub state: String,
+    /// The reconnection attempt under way, while reconnecting.
+    pub attempt: Option<u32>,
+    /// The ingest had stopped taking packets and they were being dropped.
+    pub stalled: bool,
+    /// Times the connection was lost over the session.
+    pub outages: u32,
+    /// Times it was opened again after a loss.
+    pub reconnects: u32,
+    /// What the ingest took over the newest two seconds of media, in
+    /// kbit/s to one decimal; `null` when this ffmpeg cannot tell.
+    pub bitrate_kbps: Option<f64>,
 }
 
 /// The per-tick trace in the summary.

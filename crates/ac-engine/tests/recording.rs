@@ -3,8 +3,11 @@
 
 mod common;
 
+use std::net::TcpListener;
+
 use ac_core::ShotId;
 use ac_engine::{CommandError, CommandReply, EngineCommand, OutputState};
+use ac_output::StreamState;
 
 use common::{WAIT, have, start, studio, temp_path};
 
@@ -89,5 +92,64 @@ fn a_recording_session_writes_a_playable_file() {
         let text = String::from_utf8_lossy(&out.stdout);
         assert_eq!(text.trim(), "h264,320,180", "ffprobe: {text}");
     }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_stream_outage_shows_in_the_view_and_leaves_the_session_running() {
+    if !have("ffmpeg") {
+        eprintln!("skipped: ffmpeg is not installed");
+        return;
+    }
+    let path = temp_path("streamed.mp4");
+    // A loopback port that was free a moment ago refuses the connection, so
+    // the stream reconnects while the recording goes on.
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let engine = start(studio(1));
+    let h = engine.handle();
+    h.send(EngineCommand::StartOutput {
+        rtmp_url: Some(format!("rtmp://127.0.0.1:{port}/live/engine-test-key")),
+        record_path: Some(path.clone()),
+    })
+    .unwrap();
+    let stream_state = |s: &ac_engine::EngineSnapshot| {
+        s.output
+            .stats
+            .as_ref()
+            .and_then(|st| st.stream)
+            .map(|st| st.state)
+    };
+    let out = h
+        .wait_until(WAIT, |s| {
+            matches!(stream_state(s), Some(StreamState::Reconnecting { .. }))
+        })
+        .expect("the refused stream reconnects");
+    assert_eq!(out.output.state, OutputState::Running, "{:?}", out.output);
+    let stats = out.output.stats.as_ref().unwrap();
+    assert!(stats.stream.unwrap().outages >= 1, "{stats:?}");
+    let err = stats.last_error.as_deref().expect("the outage is reported");
+    assert!(!err.contains("engine-test-key"), "key leaked: {err}");
+    let url = out.output.rtmp_url.as_deref().unwrap();
+    assert!(!url.contains("engine-test-key"), "key shown: {url}");
+
+    h.send(EngineCommand::StopOutput).unwrap();
+    let done = h
+        .wait_until(WAIT, |s| {
+            !matches!(s.output.state, OutputState::Stopping | OutputState::Running)
+        })
+        .expect("the encoder finishes");
+    assert_eq!(
+        done.output.state,
+        OutputState::Finished,
+        "{:?}",
+        done.output
+    );
+    assert_eq!(stream_state(&done), Some(StreamState::Down));
+    engine.shutdown().unwrap();
+    assert!(std::fs::metadata(&path).is_ok_and(|m| m.len() > 0));
     let _ = std::fs::remove_file(&path);
 }

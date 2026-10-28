@@ -30,6 +30,12 @@
 //!   stream that is isolated behind ffmpeg's `fifo` muxer with
 //!   `onfail=ignore`, so a slow, failing or unreachable ingest never stalls or
 //!   stops the recording. See [`args`].
+//! * **Stream health from the log.** ffmpeg's log lines say when the
+//!   stream's connection fails, is being reopened and is open again; the
+//!   [`stream`] monitor turns them into [`StreamState`]s (connecting,
+//!   connected, reconnecting with the attempt number, down) and measures
+//!   the stream's bitrate from per-packet mux statistics. A reconnection
+//!   clears the stream's error.
 //! * **Broadcast-legal picture.** Full-range RGBA is converted to limited-range
 //!   BT.709 `yuv420p` and tagged as such in the container and the H.264 VUI;
 //!   no B-frames; a fixed GOP of `keyframe_seconds * fps` frames.
@@ -47,15 +53,22 @@
 //! * The RTMP URL, stream key included, is an ffmpeg argument and therefore
 //!   visible to local users through the process list. Logs and `Debug`
 //!   output redact it.
-//! * ffmpeg cannot report a bitrate for tee output; the reported bitrate is
-//!   the recording's average, and there is none when only streaming.
+//! * ffmpeg cannot report a bitrate for tee output; the progress report's
+//!   bitrate is the recording's average, and there is none when only
+//!   streaming. The stream's own bitrate comes from mux statistics, which
+//!   need ffmpeg 6.0 or newer.
+//! * Nothing is logged when the stream's first connection succeeds, so
+//!   "connected" is inferred from a few seconds of media without a
+//!   complaint (see [`stream`]).
 //! * The frame rate is a whole number (no 29.97).
 
 pub mod args;
 pub mod config;
 pub mod encoder;
 pub mod keep_awake;
+pub mod logline;
 pub mod progress;
+pub mod stream;
 mod transport;
 
 use std::path::PathBuf;
@@ -69,9 +82,11 @@ pub use config::{
 };
 pub use encoder::{
     DEFAULT_FINISH_TIMEOUT, EncoderStats, ProgramEncoder, Push, detect_encoder, encoder_works,
+    mux_stats_supported,
 };
 pub use keep_awake::{AwakeMode, Caffeinate, KeepAwake, NotHeld, caffeinate_args};
 pub use progress::Progress;
+pub use stream::{StreamHealth, StreamState};
 
 /// Errors from configuring, running or stopping the program encoder.
 #[derive(Debug, Error)]
