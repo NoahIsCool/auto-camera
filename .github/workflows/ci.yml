@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+# A newer push or label on the same pull request cancels the older run;
+# pushes to main each run to the end.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Every job only reads the repository.
 permissions:
@@ -22,13 +30,19 @@ env:
 # commit of its master branch and always given an explicit `toolchain`.
 # Every job has a timeout, so a hung test or encoder fails instead of
 # holding a runner for GitHub's six-hour default.
+#
+# macOS minutes count ten times against the account's Actions allowance
+# (they were about 87% of October's use), so a pull request runs the
+# check, onnx and release jobs on Linux only. Pushes to main, manual runs
+# (workflow_dispatch) and pull requests labelled `macos-ci` add the macOS
+# legs. The three matrices carry the same expression, marked `# OS_MATRIX`.
 
 jobs:
   check:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }} # OS_MATRIX
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -83,7 +97,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }} # OS_MATRIX
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -176,7 +190,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }} # OS_MATRIX
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
