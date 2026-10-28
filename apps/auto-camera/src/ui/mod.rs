@@ -21,6 +21,7 @@ mod app;
 mod fixtures;
 mod keys;
 mod layout;
+mod meter;
 mod multiview;
 mod panels;
 mod query_form;

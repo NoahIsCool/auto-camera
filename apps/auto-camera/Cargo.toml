@@ -13,6 +13,7 @@ default = []
 onnx = ["ac-engine/onnx"]
 
 [dependencies]
+ac-audio.workspace = true
 ac-core.workspace = true
 ac-director.workspace = true
 ac-engine.workspace = true

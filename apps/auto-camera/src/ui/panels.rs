@@ -258,6 +258,9 @@ pub fn output(ui: &mut Ui, snap: &EngineSnapshot, form: &mut OutputForm) -> Vec<
             a.pushed, a.silence, a.dropped
         ));
     }
+    if let Some(reading) = &out.loudness {
+        super::meter::show(ui, reading);
+    }
     commands
 }
 

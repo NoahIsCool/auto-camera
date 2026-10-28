@@ -24,6 +24,7 @@ ac-switcher.workspace = true
 ac-compositor.workspace = true
 ac-output.workspace = true
 ac-sidecar.workspace = true
+ac-audio.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 serde_json = "1.0"

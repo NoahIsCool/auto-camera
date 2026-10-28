@@ -89,6 +89,9 @@ pub struct OutputController {
     encoder: Option<ProgramEncoder>,
     /// Program audio pacing for the running session.
     pacer: Option<AudioPacer>,
+    /// Program loudness and peaks of the session, fed what the pacer
+    /// pushes (kept after the session ends, so its readings stay final).
+    meter: Option<ac_audio::LoudnessMeter>,
     /// Frames handed to the encoder this session.
     frames_pushed: u64,
     /// Destinations of the current session.
@@ -126,6 +129,7 @@ impl OutputController {
             session: 0,
             encoder: None,
             pacer: None,
+            meter: None,
             frames_pushed: 0,
             rtmp_url: None,
             record_path: None,
@@ -190,6 +194,10 @@ impl OutputController {
                 AUDIO_MAX_LEAD,
             )
         });
+        // The format passed `validate` (8 to 192 kHz, 1 to 8 channels),
+        // which is within what the meter takes.
+        self.meter =
+            audio.and_then(|a| ac_audio::LoudnessMeter::new(a.sample_rate, a.channels).ok());
         let tx = self.sender.clone();
         let session = self.session + 1;
         let helper = std::thread::Builder::new()

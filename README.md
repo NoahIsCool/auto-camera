@@ -305,12 +305,28 @@ This is Phase 2 of the model-picker design: one detector for the studio.
 Every prompt gets SAM's false hits too, so it is for trying prompts rather
 than for a show; choosing a model per query comes later.
 
+## Program loudness
+
+While the output runs with program audio (`output.audio_source`), the
+paced audio the encoder gets is also metered after ITU-R BS.1770-4 and
+EBU R 128 (`crates/ac-audio`): momentary (400 ms) and short-term (3 s)
+loudness, integrated loudness over the session (gated at −70 LUFS and
+10 LU below the programme, so silence and pauses do not count), and the
+session's sample and 4× oversampled true peak. The output panel shows
+momentary and short-term as bars, integrated loudness and the true peak as
+numbers (amber above −1 dBTP), and "—" where there is no reading yet or
+the program is silent. A headless run reports the session's values in
+`output.loudness` (`integrated_lufs`, `momentary_lufs`, `short_term_lufs`,
+`sample_peak_dbfs`, `true_peak_dbtp`, `null` without a reading, and the
+`seconds` of audio measured).
+
 ## Crates
 
 | Crate | Role |
 |---|---|
 | `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
 | `ac-media` | Frames, audio blocks and the source trait, with latest-frame mailboxes |
+| `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak |
 | `ac-sources` | File (ffmpeg) and synthetic sources; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector |
 | `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
