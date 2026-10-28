@@ -1,0 +1,112 @@
+# Default thresholds of the framing, tracking and switching scorers
+# (`ac_eval::thresholds`). Copy this file to change a limit: every section
+# and every parameter (the IoUs, bands, speeds, dwell and wide times that
+# define an event) must be present, and a limit (a bound on a metric) left
+# out, or commented out as below, means the metric is reported but not
+# checked ("unchecked" in the report).
+#
+# The numbers are the rebuild specification's proposed targets
+# (lay-of-the-land, sections C.3 and C.4), each with its source. Where the
+# specification names a metric but gives no number, the limit is left out
+# for Noah to set once the evaluation set has been scored. Fractions of the
+# frame are of the crop's (the output frame's) height or width; times are in
+# seconds of media time.
+
+version = 1
+
+[framing]
+# C.3 framing quality (MVP): head/torso inside the crop on >= 99% of
+# on-air frames.
+min_head_torso_inside = 0.99
+# C.3's 99% bar, applied to the C.4 headroom bands below: the share of
+# on-air frames whose crown sits inside its shot size's band.
+min_headroom_in_band = 0.99
+# C.4 headroom, crown to top edge as a fraction of frame height: CU 0-4%,
+# MCU 5-8%, MS 7-10%, MLS/FS 8-12% (eye line at 0.28-0.38 from the top).
+headroom_close = [0.0, 0.04]
+headroom_medium_close = [0.05, 0.08]
+headroom_medium = [0.07, 0.10]
+headroom_full = [0.08, 0.12]
+# C.4 defines shot sizes by anatomical cut lines but gives no tolerance,
+# in head heights, for where the bottom edge falls.
+# max_lower_cut_error = 0.25
+# The specification gives no target for the whole subject inside the crop
+# (C.3's 99% is for the head and torso).
+# min_subject_containment = 0.99
+# C.4 shot sizes: no cuts at joints, the bottom edge >= 4-6% of frame
+# height from a joint.
+min_joint_clearance = 0.04
+
+[motion]
+# C.4 acceleration/jerk: explicit caps; the PoC baseline peak of about
+# 1,200 px/s^2 was acceptable (8,759 px/s^2 was rejected).
+max_peak_acceleration = 1200.0
+# C.4 asks for explicit caps but gives no RMS acceleration or jerk number.
+# max_rms_acceleration = 400.0
+# max_peak_jerk = 20000.0
+# max_rms_jerk = 5000.0
+# C.4 peak pan speed 0.25-0.5 crop widths/s: no shot pans faster than the
+# top of the range.
+max_pan_speed = 0.5
+# C.4 zoom rate cap 0.15-0.3 log-width/s: the top of the range.
+max_zoom_rate = 0.3
+# C.4 minimum static hold after settle 0.5-1.0 s: the bottom of the range.
+min_static_hold_s = 0.5
+# C.3 framing quality: no visible jitter at rest. Visible means one output
+# pixel: a relative change d in crop height moves the picture's top and
+# bottom edges by d * 540 px at 1080p (C.3 output format), so d < 1/540.
+max_jitter_at_rest = 0.0019
+# The specification gives no settle time (C.4's pan spring T90 of
+# 0.8-1.4 s is to 90%, not to rest).
+# max_settle_s = 1.4
+# C.4 dead-zone release: speed < 0.5% span/s. A crop moving slower, in
+# crop spans per second, is still; so is a labelled person moving slower,
+# in source spans per second.
+rest_speed = 0.005
+# C.4 dead-zone release: error < 25% of the engage threshold. The tightest
+# engage threshold is 4% of crop height (vertical), so a crop within 1% of
+# its final size and position on every axis has settled.
+settle_band = 0.01
+# C.4 minimum static hold after settle 0.5-1.0 s: a labelled person still
+# for the top of the range is at rest, and their shots are scored for
+# jitter and settle time.
+min_rest_s = 1.0
+
+[tracking]
+# V9: recall at IoU 0.5 (the MOT Challenge's match threshold).
+match_iou = 0.5
+# V9 names recall, false subjects, ID switches and IDF1 without targets.
+# min_recall = 0.9
+# max_false_subjects_per_frame = 0.1
+# max_id_switches = 0
+# min_idf1 = 0.8
+# C.3 semantic (discovery) rate >= 0.5 Hz per camera: a person is found
+# within one discovery period of appearing, and found again within one of
+# being lost.
+max_time_to_acquire_s = 2.0
+max_time_to_reacquire_s = 2.0
+
+[switching]
+# C.4 auto-director: no cut where IoU(from, to) > 0.4 on the same source.
+jump_cut_iou = 0.4
+max_jump_cuts = 0
+# C.4 auto-director: minimum dwell 3-5 s for talk, 2-3 s for music; a
+# take before the bottom of the range is a violation.
+min_dwell_talk_s = 3.0
+min_dwell_music_s = 2.0
+max_dwell_violations = 0
+# C.4 auto-director: a wide shot <= about 10 s.
+max_wide_s = 10.0
+max_long_wides = 0
+# C.3 reliability (MVP): no on-air swaps.
+max_on_air_swaps = 0
+# M9 health guard: never take a stale or unavailable source.
+max_takes_onto_unavailable = 0
+# Loss on program is expected for as long as the fallback takes; the
+# specification limits that time, not the total.
+# max_time_unavailable_s = 5.0
+# C.4 loss behaviour: the auto-director falls back to wide after >= 0.5 s
+# of low confidence on PGM. The trace shows the loss, not the confidence,
+# and the specification gives no ceiling: this allows the 0.5 s wait and
+# as long again for the take.
+max_time_to_fall_back_s = 1.0
