@@ -18,11 +18,11 @@
 //!   does not find them at its start.
 //!
 //! `--config` opens a studio file or a show saved from one ([`show`]): the
-//! window's Save show, or `--save-show PATH` at the end of a headless run,
-//! writes the sources, queries, director, transition and destinations to a
-//! show file, which opens again as its studio file with the show laid over
-//! it. A `--save-show` path the app cannot save to (the studio file
-//! itself) is a usage error before anything starts.
+//! window's Save show writes the queries, director and transition to a
+//! show file (`--save-show PATH`, or a default one), which opens again as
+//! its studio file with the show laid over it. A `--save-show` path the
+//! window cannot save to (the studio file itself) is a usage error before
+//! anything starts.
 //!
 //! Ctrl-C, `SIGTERM` and `SIGHUP` shut the engine down as closing the
 //! window does ([`signals`]), so the detector sidecar never outlives the
@@ -93,25 +93,13 @@ fn main() -> ExitCode {
     for warning in &loaded.warnings {
         eprintln!("auto-camera: warning: {warning}");
     }
-    let target = show::ShowTarget::for_run(
-        &loaded,
-        &cli.config,
-        cli.save_show.as_deref(),
-        show::shows_dir(),
-    );
-    if let (Some(_), Err(e)) = (&cli.save_show, &target) {
-        eprintln!("auto-camera: --save-show: {e}");
-        return ExitCode::from(2);
-    }
-    let (config, warnings) = (loaded.config, loaded.warnings);
     if cli.headless {
         let options = headless::HeadlessOptions {
             seconds: cli.seconds,
             record: cli.record,
             trace: cli.trace,
-            save_show: target.ok().filter(|_| cli.save_show.is_some()),
         };
-        let summary = headless::run(config, &cli.config, &options, &quit);
+        let summary = headless::run(loaded.config, &cli.config, &options, &quit);
         match serde_json::to_string_pretty(&summary) {
             Ok(json) => println!("{json}"),
             Err(e) => eprintln!("auto-camera: cannot print the summary: {e}"),
@@ -124,7 +112,23 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     } else {
-        run_window(config, &warnings, cli.trace.as_deref(), target, &quit)
+        let target = show::ShowTarget::for_run(
+            &loaded,
+            &cli.config,
+            cli.save_show.as_deref(),
+            show::shows_dir(),
+        );
+        if let (Some(_), Err(e)) = (&cli.save_show, &target) {
+            eprintln!("auto-camera: --save-show: {e}");
+            return ExitCode::from(2);
+        }
+        run_window(
+            loaded.config,
+            &loaded.warnings,
+            cli.trace.as_deref(),
+            target,
+            &quit,
+        )
     }
 }
 

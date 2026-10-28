@@ -23,8 +23,10 @@
 //! * Every warning starts with the path of the file it is about, so both
 //!   the studio file's (a missing `schema` key) and the show's (an older
 //!   show schema) reach the operator.
-//! * [`LoadedConfig::studio`] is the studio file read, and
-//!   [`LoadedConfig::show`] says whether a show was laid over it.
+//! * [`LoadedConfig::studio`] is the studio file read,
+//!   [`LoadedConfig::show`] says whether a show was laid over it, and
+//!   [`LoadedConfig::base`] is that studio file's config before any show
+//!   was laid over it.
 
 use std::path::Path;
 
@@ -96,6 +98,7 @@ fn read_studio(path: &Path, text: &str, json: bool) -> Result<LoadedConfig, Conf
         config.resolve_paths(dir);
     }
     Ok(LoadedConfig {
+        base: config.clone(),
         config,
         warnings: named(path, warnings),
         studio: path.into(),

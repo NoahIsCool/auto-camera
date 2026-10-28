@@ -6,8 +6,10 @@
 //! priorities), the director's mode and profile, and the selected
 //! transition. The rest no command changes, so the core keeps it as the
 //! config gave it ([`ShowBase`]): the sources (their paths resolved) and
-//! the output's default destinations, which the runtime's output
-//! controller also starts from.
+//! the default recording path, which the app's save leaves out where they
+//! only repeat the studio file ([`Show::leave_out_repeats`]). The RTMP URL
+//! is never exported: it carries the stream key, which stays in the studio
+//! file ([`crate::show`]).
 //!
 //! # Queries
 //!
@@ -31,6 +33,8 @@
 //!   query added after the restart gets the default rather than one below
 //!   the last.
 
+use std::path::PathBuf;
+
 use ac_core::Preset;
 
 use super::EngineCore;
@@ -45,19 +49,17 @@ use crate::show::{SHOW_VERSION, Show, ShowDirector, ShowOutput, ShowSwitcher};
 pub(super) struct ShowBase {
     /// The source entries, their paths resolved.
     sources: Vec<SourceEntry>,
-    /// The output's default destinations.
-    output: ShowOutput,
+    /// The output's default recording path.
+    record_path: Option<PathBuf>,
 }
 
 impl ShowBase {
-    /// The parts of `config` the show holds and no command changes.
+    /// The parts of `config` the show holds and no command changes: never
+    /// the RTMP URL, which carries the stream key.
     pub(super) fn of(config: &StudioConfig) -> Self {
         Self {
             sources: config.sources.clone(),
-            output: ShowOutput {
-                rtmp_url: config.output.rtmp_url.clone(),
-                record_path: config.output.record_path.clone(),
-            },
+            record_path: config.output.record_path.clone(),
         }
     }
 }
@@ -65,8 +67,8 @@ impl ShowBase {
 impl EngineCore {
     /// The show as it stands: the sources, the queries as they would be
     /// written in a config (see the module docs), the director's mode and
-    /// profile, the selected transition and the output's default
-    /// destinations. `studio` is left for the caller to name.
+    /// profile, the selected transition and the default recording path.
+    /// `studio` is left for the caller to name.
     pub fn export_show(&self) -> Show {
         let director = self.director.config();
         let transition = self.switcher.transition();
@@ -83,7 +85,9 @@ impl EngineCore {
                 transition: Some(transition.kind),
                 duration: Some(transition.duration),
             },
-            output: self.show_base.output.clone(),
+            output: ShowOutput {
+                record_path: self.show_base.record_path.clone(),
+            },
         }
     }
 

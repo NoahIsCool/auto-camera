@@ -14,10 +14,11 @@
 //! A save that fails before the rename removes its temp file.
 //!
 //! The temp file is created new (never one that exists) and, on Unix,
-//! readable and writable by its owner only (`0600`), so the show, which may
-//! carry a stream key, is never readable by others, not even while it is
-//! written; the rename keeps that mode. A folder that has to be created is
-//! made `0700`. Syncing the folder is best effort: the rename has already
+//! readable and writable by its owner only (`0600`); the rename keeps that
+//! mode. A show holds no stream key (that stays in the studio file), but it
+//! is the operator's own: it names their studio file and folders and the
+//! people their queries frame, so it is never readable by others, not even
+//! while it is written. A folder that has to be created is made `0700`. Syncing the folder is best effort: the rename has already
 //! happened, and some file systems refuse to sync a folder, so a failure
 //! there leaves the flush to the system rather than failing a save that
 //! is in place.

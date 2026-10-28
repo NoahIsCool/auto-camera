@@ -33,6 +33,7 @@ fn folder(name: &str) -> (PathBuf, ShowTarget) {
     std::fs::write(&studio, STUDIO).unwrap();
     let target = ShowTarget {
         path: dir.join("sunday.show.toml"),
+        base: StudioConfig::read_file(&studio).unwrap().base,
         studio,
     };
     (dir, target)

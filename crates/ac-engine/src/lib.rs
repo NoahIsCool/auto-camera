@@ -37,7 +37,8 @@
 //!   crops, program and preview) from the engine thread to a writer, such
 //!   as the app's `--trace` file, for scoring with `ac_eval`.
 //! * [`show`] is what the operator built on a studio (queries, director
-//!   mode and profile, transition, sources, destinations): the core
+//!   mode and profile, transition; sources and recording path where they
+//!   differ from the studio file's, never the stream key): the core
 //!   exports it on [`EngineCommand::ExportShow`], the app saves it, and a
 //!   show file opens as its studio file with the show laid over it.
 //! * [`queries`] reads each query's prompt once, when it is created: the

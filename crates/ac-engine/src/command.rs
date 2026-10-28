@@ -157,8 +157,8 @@ pub enum EngineCommand {
     /// Finish the program encoder (the recording is finalized).
     StopOutput,
     /// Export the show: the sources, queries, director mode and profile,
-    /// transition and output destinations as they stand
-    /// ([`crate::show`]). Changes nothing; the reply is
+    /// transition and default recording path as they stand, never the
+    /// stream key ([`crate::show`]). Changes nothing; the reply is
     /// [`CommandReply::Show`], which the sender saves.
     ExportShow,
     /// Stop everything and end the engine thread.

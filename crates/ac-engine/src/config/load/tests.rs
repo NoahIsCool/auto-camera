@@ -101,6 +101,7 @@ fn a_studio_file_reads_as_itself() {
         (path.as_path(), false)
     );
     assert_eq!(loaded.config.queries.len(), 1);
+    assert_eq!(loaded.base, loaded.config, "no show was laid over it");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -124,6 +125,10 @@ fn a_show_file_opens_as_its_studio_with_the_show_laid_over_it() {
         assert_eq!(c.director.profile, ContentProfile::Talk, "the studio's");
         assert!(matches!(c.detector, DetectorSettings::Synthetic { .. }));
         assert_eq!(c.sources[0].id, "stage");
+        // The base is the studio file's, without the show.
+        assert_eq!(loaded.base.queries.len(), 1);
+        assert_eq!(loaded.base.director.mode, DirectorMode::Suggest);
+        assert_eq!(loaded.base.sources, c.sources);
         // The studio file's warning names the studio file.
         let [warning] = loaded.warnings.as_slice() else {
             panic!("{:?}", loaded.warnings);

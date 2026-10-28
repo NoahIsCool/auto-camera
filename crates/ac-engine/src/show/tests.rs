@@ -64,7 +64,6 @@ fn full_show() -> Show {
             duration: Some(1.5),
         },
         output: ShowOutput {
-            rtmp_url: Some("rtmp://live.example.com/app/KEY".into()),
             record_path: Some("recordings/sunday.mp4".into()),
         },
     }
@@ -145,6 +144,8 @@ fn versions_this_build_does_not_read_and_unknown_keys_are_errors() {
         "show = 1\n[director]\ntakeover = \"pause\"\n",
         "show = 1\n[switcher]\nspeed = 2\n",
         "show = 1\n[output]\nwidth = 640\n",
+        // The stream key is the studio file's alone.
+        "show = 1\n[output]\nrtmp_url = \"rtmp://live.example.com/app/KEY\"\n",
     ] {
         let err = Show::parse_with_warnings(bad, false).unwrap_err();
         assert!(err.contains("unknown field"), "{bad}: {err}");
@@ -260,7 +261,7 @@ fn a_show_lies_over_its_studio_key_by_key() {
     // Each key given replaces that value only.
     let (show, _) = Show::parse_with_warnings(
         "show = 1\nqueries = []\n[director]\nmode = \"auto\"\n[switcher]\n\
-         transition = \"mix\"\n[output]\nrtmp_url = \"\"\n",
+         transition = \"mix\"\n[output]\nrecord_path = \"\"\n",
         false,
     )
     .unwrap();
@@ -275,8 +276,16 @@ fn a_show_lies_over_its_studio_key_by_key() {
         (c.switcher.transition, c.switcher.duration),
         (TransitionKind::Mix, 2.0)
     );
-    assert_eq!(c.output.rtmp_url.as_deref(), Some(""), "empty means none");
-    assert_eq!(c.output.record_path, Some(PathBuf::from("r.mp4")));
+    assert_eq!(
+        c.output.record_path,
+        Some(PathBuf::new()),
+        "empty means none"
+    );
+    assert_eq!(
+        c.output.rtmp_url.as_deref(),
+        Some("rtmp://a/b"),
+        "the studio's"
+    );
     c.validate().unwrap();
     // A full show replaces every list and key it holds.
     let mut c = base.clone();
@@ -285,8 +294,55 @@ fn a_show_lies_over_its_studio_key_by_key() {
     assert_eq!(Some(&c.sources), show.sources.as_ref());
     assert_eq!(Some(&c.queries), show.queries.as_ref());
     assert_eq!(c.switcher.duration, 1.5);
-    assert_eq!(c.output.rtmp_url, show.output.rtmp_url);
+    assert_eq!(c.output.record_path, show.output.record_path);
+    assert_eq!(
+        c.output.rtmp_url, base.output.rtmp_url,
+        "always the studio's"
+    );
     assert_eq!(c.detector, base.detector, "the studio's tables stay");
+}
+
+#[test]
+fn a_show_leaves_out_what_only_repeats_its_studio_file() {
+    let base = studio("\n[output]\nrecord_path = \"r.mp4\"\n");
+    let repeating = Show {
+        sources: Some(base.sources.clone()),
+        output: ShowOutput {
+            record_path: base.output.record_path.clone(),
+        },
+        ..full_show()
+    };
+    let mut left = repeating.clone();
+    left.leave_out_repeats(&base);
+    assert_eq!(left.sources, None, "the studio file's own sources");
+    assert_eq!(left.output, ShowOutput::default(), "and recording path");
+    assert_eq!(
+        (&left.queries, left.director, left.switcher),
+        (&repeating.queries, repeating.director, repeating.switcher),
+        "what commands change is always kept"
+    );
+    let text = left.to_text(false).unwrap();
+    for absent in ["[[sources]]", "[output]", "record_path"] {
+        assert!(!text.contains(absent), "{absent} in {text}");
+    }
+    // Laid over that studio file, it builds the same config.
+    let (mut a, mut b) = (base.clone(), base.clone());
+    repeating.apply_to(&mut a);
+    left.apply_to(&mut b);
+    assert_eq!(a, b);
+    // Its own sources and recording path, even an empty one, are kept.
+    let mut own = full_show();
+    own.output.record_path = Some(PathBuf::new());
+    let mut left = own.clone();
+    left.leave_out_repeats(&base);
+    assert_eq!(left, own);
+    // A studio file without a recording path leaves none to repeat.
+    let mut none = Show {
+        output: ShowOutput::default(),
+        ..full_show()
+    };
+    none.leave_out_repeats(&studio(""));
+    assert_eq!(none.output, ShowOutput::default());
 }
 
 #[test]

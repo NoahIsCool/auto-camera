@@ -347,8 +347,8 @@ pub struct EngineCore {
     next_thumbs_at: Duration,
     /// Shots drawn black on the newest program frame.
     render_issues: Vec<String>,
-    /// The sources and default destinations, as configured, for the show
-    /// export ([`show`]).
+    /// The sources and default recording path, as configured, for the
+    /// show export ([`show`]).
     show_base: show::ShowBase,
 }
 

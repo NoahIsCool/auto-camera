@@ -4,21 +4,23 @@
 //! # Theory
 //!
 //! A studio file ([`crate::config`]) is written by hand and says what the
-//! studio is: its sources, detector, tuning and encoder. While a show runs
-//! the operator changes part of that: adds and removes queries, sets the
-//! director's mode and profile, picks a transition. A [`Show`] is that part
-//! as it stands, a layer over the studio file it names (`studio`), which
-//! stays the base:
+//! studio is: its sources, detector, tuning, encoder and destinations, the
+//! RTMP URL with its stream key among them. While a show runs the operator
+//! changes part of that: adds and removes queries, sets the director's mode
+//! and profile, picks a transition. A [`Show`] is that part as it stands, a
+//! layer over the studio file it names (`studio`), which stays the base:
 //!
 //! * The engine core exports it as a pure value
 //!   ([`EngineCore::export_show`](crate::EngineCore::export_show), the
-//!   `ExportShow` command): the sources, the queries with their presets and
-//!   priorities, the director's mode and profile, the transition and the
-//!   output's default destinations. Nothing is exported unasked: saving is
-//!   the operator's act (the window's Save show, `--save-show`), never a
-//!   side effect of a change.
-//! * The app names the studio file and writes the show to a show file, off
-//!   the engine thread, replacing the previous one atomically.
+//!   `ExportShow` command): the queries with their presets and priorities,
+//!   the director's mode and profile and the transition, with the sources
+//!   and the default recording path the core was configured with, which no
+//!   command changes. Nothing is exported unasked: saving is the
+//!   operator's act (the window's Save show), never a side effect of a
+//!   change.
+//! * The app names the studio file, leaves out what the show only repeats
+//!   of it ([`Show::leave_out_repeats`]) and writes the show to a show
+//!   file, off the engine thread, replacing the previous one atomically.
 //! * Opening a show file (`--config`, `--check`, any loader of
 //!   [`StudioConfig`]) reads the studio file it names and lays the show
 //!   over it ([`Show::apply_to`]): a list the show gives (`sources`,
@@ -55,22 +57,35 @@
 //! a version and a step each, tested as the step of a pretend version is
 //! in this module's tests.
 //!
-//! # Stream keys
+//! # What a show leaves to its studio file
 //!
-//! The default RTMP URL carries a stream key. A show holds the one its
-//! studio config held (the destinations are the config's defaults; a URL
-//! typed at Start Output is not part of the show), so a show file says no
-//! more than its studio file did, and the app writes it readable by its
-//! owner only.
+//! A show holds what the operator's commands change. The rest is the
+//! studio file's, so an edit to it (a camera added, a recording path
+//! changed, a stream key rotated) is there the next time the show opens:
+//!
+//! * The RTMP URL is never in a show: it carries the stream key, which the
+//!   studio file alone holds. [`ShowOutput`] has no key for it, so a show
+//!   that gives one is refused, and a URL typed at Start Output is not
+//!   part of the show either.
+//! * The sources and the default recording path are in a saved show only
+//!   where they differ from the studio file's as the run read it, before
+//!   any show was laid over it ([`LoadedConfig::base`]): a show opened with
+//!   its own keeps them through a save, and a run on the studio file's own
+//!   writes neither. They are compared with the studio file as the run
+//!   read it, not as it is at the save, so an edit made to the studio file
+//!   while the show runs is not pinned by the save.
 //!
 //! # Invariants
 //!
 //! * A show the core exports, laid over the studio file it was started
 //!   from, builds a core whose export is that show again: queries (ids,
 //!   prompts, presets, literal flags, priorities), director mode and
-//!   profile, transition and destinations survive a restart.
-//! * Parsing, laying over and writing out are pure; reading the files is
-//!   the loader's (`config::load`).
+//!   profile, transition, sources and recording path survive a restart.
+//!   Leaving out what the show repeats of that studio file changes nothing
+//!   it builds over it.
+//! * No show holds a stream key: the RTMP URL is the studio file's.
+//! * Parsing, laying over, leaving out and writing out are pure; reading
+//!   the files is the loader's (`config::load`).
 //! * [`Show::to_text`] writes [`SHOW_VERSION`] first, so the file says
 //!   what it is before anything else, and parses back to the same value.
 
@@ -104,10 +119,10 @@ const LAYOUT: Layout<'static> = Layout {
 
 /// The comment a written TOML show starts with, before its `show` key.
 const HEADER: &str = "\
-# An Auto Camera show, written by Save show: the sources, queries, director,
-# transition and output destinations as they stood, laid over the studio
-# file `studio`. A key left out is the studio file's. Open it with
-# `auto-camera --config <this file>`.
+# An Auto Camera show, written by Save show: the queries, director and
+# transition as they stood, laid over the studio file `studio`. A key left
+# out is the studio file's, and the stream key is only ever there. Open it
+# with `auto-camera --config <this file>`.
 
 ";
 
@@ -136,7 +151,7 @@ pub struct Show {
     /// The transition.
     #[serde(default, skip_serializing_if = "ShowSwitcher::is_empty")]
     pub switcher: ShowSwitcher,
-    /// The output's default destinations.
+    /// The output's default recording path.
     #[serde(default, skip_serializing_if = "ShowOutput::is_empty")]
     pub output: ShowOutput,
 }
@@ -180,13 +195,12 @@ impl ShowSwitcher {
 }
 
 /// The `[output]` keys a show holds, each replacing the studio's; an empty
-/// value means none, as in a studio file.
+/// value means none, as in a studio file. There is no `rtmp_url`: the URL
+/// carries the stream key, which only the studio file holds (see the module
+/// docs), so a show that gives one is refused.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShowOutput {
-    /// Default RTMP URL, with its stream key.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rtmp_url: Option<String>,
     /// Default recording path, taken from the working folder as in a
     /// studio file.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,7 +208,7 @@ pub struct ShowOutput {
 }
 
 impl ShowOutput {
-    /// True when the show gives neither key.
+    /// True when the show gives no key.
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
@@ -262,6 +276,21 @@ impl Show {
         crate::config::open_show(self, path)
     }
 
+    /// Leaves out the sources and the default recording path where they are
+    /// `studio`'s, the studio file's config as the run read it before any
+    /// show was laid over it ([`LoadedConfig::base`]): no command changes
+    /// them, so a saved show keeps them only where it gives its own (see
+    /// the module docs). Laid over `studio`, the show builds the same
+    /// config as before.
+    pub fn leave_out_repeats(&mut self, studio: &StudioConfig) {
+        if self.sources.as_ref() == Some(&studio.sources) {
+            self.sources = None;
+        }
+        if self.output.record_path == studio.output.record_path {
+            self.output.record_path = None;
+        }
+    }
+
     /// Lays the show over `studio`: each list and key the show gives
     /// replaces the studio's, and the rest is left as it is (see the module
     /// docs). The result is not checked; the loader validates it as it
@@ -282,9 +311,6 @@ impl Show {
         } = self.switcher;
         studio.switcher.transition = transition.unwrap_or(studio.switcher.transition);
         studio.switcher.duration = duration.unwrap_or(studio.switcher.duration);
-        if let Some(url) = &self.output.rtmp_url {
-            studio.output.rtmp_url = Some(url.clone());
-        }
         if let Some(path) = &self.output.record_path {
             studio.output.record_path = Some(path.clone());
         }

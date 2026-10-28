@@ -340,18 +340,16 @@ made, a `max_width` below 2) stops the start.
 
 ```sh
 auto-camera [--config PATH] [--save-show PATH]                # Save show in the window
-auto-camera [--config PATH] --headless --save-show PATH       # saved when the run ends
 auto-camera --config sunday.show.toml [--check]               # open or check a show
 ```
 
-A show is what the operator built on a studio: its sources, the queries
-(with their presets, literal flags and priorities, those added while it
-ran included), the director's mode and profile, the transition and the
-output's default destinations. The window's **Save show** button writes
-it to a show file, and so does a headless run given `--save-show PATH`,
-when it ends without an error. Nothing is saved on a change: saving is
-always asked for. A show file is TOML (or JSON, by extension) that starts
-with `show = 1`, its own layout number, and names the studio file it lies
+A show is what the operator built on a studio: the queries (with their
+presets, literal flags and priorities, those added while it ran
+included), the director's mode and profile and the transition. The
+window's **Save show** button writes it to a show file; nothing is saved
+on a change, and a headless run, which changes none of these, saves
+nothing. A show file is TOML (or JSON, by extension) that starts with
+`show = 1`, its own layout number, and names the studio file it lies
 over:
 
 ```toml
@@ -367,6 +365,13 @@ presets = ["medium", "medium_close"]
 mode = "auto"
 ```
 
+The studio file stays the base. A show never holds the RTMP URL, so the
+stream key stays in the studio file alone, and a show that gives
+`rtmp_url` is refused. A saved show holds `sources` and `[output]
+record_path` only where they differ from the studio file's (a show
+written by hand with its own), so a camera added to the studio file, or
+a recording path changed there, is in the show the next time it opens.
+
 `--config` and `--check` take a show file as they take a studio file: the
 studio file is read, the lists the show gives (`sources`, `queries`)
 replace its lists, the keys it gives in `[director]`, `[switcher]` and
@@ -376,16 +381,19 @@ layout is upgraded as it is read, with a warning (1 is the first), and a
 newer one is an error.
 
 Save show writes to `--save-show PATH` when given, back to the show file
-the window opened, and otherwise to `<studio>.show.toml` in the `shows`
-folder of the data dir: `AC_DATA_DIR` when set, else
-`~/Library/Application Support/auto-camera` on macOS and
+the window opened, and otherwise to the `shows` folder of the data dir,
+named after the studio file and a short hash of its full path (as in
+`sunday-4b3716bc.show.toml`), so studio files named alike in different
+folders get shows of their own. The data dir is `AC_DATA_DIR` when set,
+which must be an absolute path (a relative one makes Save show fail and
+say so), else `~/Library/Application Support/auto-camera` on macOS and
 `$XDG_DATA_HOME/auto-camera` or `~/.local/share/auto-camera` elsewhere.
-A show that would not open is not written, a file that is not a show is
-never replaced, and neither is the studio file. The write goes to a temp
-file beside the target, readable by its owner only (`0600`, since the
-default RTMP URL carries the studio file's stream key), synced, then
-renamed over the target, so a failed save leaves the previous show as it
-was. The status bar says where the show went, or why it did not.
+A show that would not open is not written, and a file that is not a
+show, the show of another studio file and the studio file itself are
+never replaced. The write goes to a temp file beside the target,
+readable by its owner only (`0600`), synced, then renamed over the
+target, so a failed save leaves the previous show as it was. The status
+bar says where the show went, or why it did not.
 
 ## Prompts
 

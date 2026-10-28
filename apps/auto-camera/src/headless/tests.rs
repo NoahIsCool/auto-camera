@@ -51,7 +51,6 @@ fn options(seconds: f64, record: Option<PathBuf>) -> HeadlessOptions {
         seconds,
         record,
         trace: None,
-        save_show: None,
     }
 }
 

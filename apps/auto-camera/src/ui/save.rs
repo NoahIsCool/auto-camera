@@ -21,8 +21,8 @@ use crate::show::{SaveJob, ShowTarget};
 pub const SAVE_SHOW: &str = "Save show";
 
 /// What the button's hover says it does.
-const SAVE_HOVER: &str = "Write the sources, queries, director, transition and output \
-                          destinations to the show file, which --config opens again";
+const SAVE_HOVER: &str = "Write the queries, director and transition to the show file, \
+                          which --config opens again over the studio file";
 
 /// Why a window opened without a target cannot save.
 const NO_TARGET: &str = "this window has no show file to save to";

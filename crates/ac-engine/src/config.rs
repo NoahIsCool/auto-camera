@@ -161,6 +161,11 @@ pub struct LoadedConfig {
     pub studio: PathBuf,
     /// The file was a show, laid over `studio`.
     pub show: bool,
+    /// The studio file's config as read, before a show was laid over it
+    /// (so `config` itself, unvalidated, when the file is a studio file):
+    /// what a show saved from this config leaves out where it only repeats
+    /// it ([`crate::Show::leave_out_repeats`]).
+    pub base: StudioConfig,
 }
 
 /// Errors from loading or validating a [`StudioConfig`].

@@ -152,12 +152,34 @@ fn the_export_holds_the_studio_parts_no_command_changes() {
     assert_eq!(
         show.output,
         ShowOutput {
-            rtmp_url: None,
             record_path: Some("recordings/show.mp4".into()),
         }
     );
     assert_eq!(show.director.mode, Some(DirectorMode::Off));
     assert_eq!(show.switcher.transition, Some(TransitionKind::Mix));
+}
+
+#[test]
+fn the_export_never_holds_the_stream_key() {
+    let mut base = studio(&[("Pastor", "person", None)]);
+    base.output.rtmp_url = Some("rtmp://live.example.com/app/SECRET".into());
+    let show = core(&base).export_show();
+    for json in [false, true] {
+        let text = show.to_text(json).unwrap();
+        assert!(!text.contains("SECRET") && !text.contains("rtmp"), "{text}");
+    }
+    // Laid over its studio, the show streams with the studio's URL, as
+    // that file gives it.
+    let mut config = base.clone();
+    show.apply_to(&mut config);
+    assert_eq!(config.output.rtmp_url, base.output.rtmp_url);
+    let mut rotated = base.clone();
+    rotated.output.rtmp_url = Some("rtmp://live.example.com/app/NEWKEY".into());
+    show.apply_to(&mut rotated);
+    assert_eq!(
+        rotated.output.rtmp_url.as_deref(),
+        Some("rtmp://live.example.com/app/NEWKEY")
+    );
 }
 
 #[test]
