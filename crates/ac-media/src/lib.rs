@@ -201,8 +201,16 @@ pub enum MediaError {
 /// Implementations decode on their own thread and publish into a
 /// [`LatestFrame`] mailbox, so readers never wait and never see a backlog.
 pub trait VideoSource: Send {
-    /// Static description.
+    /// Static description, fixed when the source started.
     fn info(&self) -> &SourceInfo;
+    /// The description of what the source delivers now. A plain source's
+    /// never changes, so this is [`VideoSource::info`]; a supervised one
+    /// (`ac-sources`) describes its newest connection, which may differ from
+    /// the description it started with, such as the caller's placeholder of
+    /// an input that was not there yet.
+    fn current_info(&self) -> SourceInfo {
+        self.info().clone()
+    }
     /// Current health.
     fn state(&self) -> SourceState;
     /// The newest decoded frame, if any.

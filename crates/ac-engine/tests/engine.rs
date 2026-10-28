@@ -250,20 +250,26 @@ fn start_reports_unusable_setups() {
         Err(EngineError::Config(_))
     ));
     // A missing file starts offline (tests/reconnect.rs), but a pattern
-    // that cannot be made is a mistake no retry mends.
-    let unusable = StudioConfig::with_source(
-        "s",
-        SourceConfig::Synthetic {
-            width: 320,
-            height: 180,
-            fps: 0.0,
-            subjects: 1,
-        },
-    );
-    assert!(matches!(
-        Engine::start_with(unusable, fast_time()),
-        Err(EngineError::Config(_))
-    ));
+    // that cannot be made, or a width no picture can be scaled to, is a
+    // mistake no retry mends.
+    let pattern = SourceConfig::Synthetic {
+        width: 320,
+        height: 180,
+        fps: 0.0,
+        subjects: 1,
+    };
+    let narrow = SourceConfig::File {
+        path: "/nonexistent/auto-camera/clip.mp4".into(),
+        loop_playback: false,
+        max_width: Some(1),
+        audio: false,
+    };
+    for (input, why) in [(pattern, "frame rate"), (narrow, "max_width")] {
+        match Engine::start_with(StudioConfig::with_source("s", input), fast_time()) {
+            Err(EngineError::Config(e)) => assert!(e.to_string().contains(why), "{e}"),
+            other => panic!("{why}: {other:?}"),
+        }
+    }
     let mut owl = studio(1);
     owl.detector = DetectorSettings::Owl {
         model: "/nonexistent/owl.onnx".into(),

@@ -20,6 +20,7 @@ use ac_media::{MediaError, VideoSource};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{Clock, WallClock};
+use crate::ffmpeg::check_max_width;
 use crate::file::{FileOptions, FileSource};
 use crate::synthetic::{SyntheticPattern, SyntheticSource};
 
@@ -66,12 +67,14 @@ pub enum SourceConfig {
 }
 
 impl SourceConfig {
-    /// Checks what can be checked before the source is opened: a synthetic
-    /// pattern's parameters. A file is not looked for, since it may appear
-    /// later and a supervised source then picks it up ([`crate::supervisor`]).
+    /// Checks what can be checked before the source is opened, the mistakes
+    /// no reopening can mend: a synthetic pattern's parameters and a file's
+    /// `max_width` ([`check_max_width`]). A file is not looked for, since it
+    /// may appear later and a supervised source then picks it up
+    /// ([`crate::supervisor`]).
     pub fn validate(&self) -> Result<(), MediaError> {
         match self {
-            SourceConfig::File { .. } => Ok(()),
+            SourceConfig::File { max_width, .. } => check_max_width(*max_width),
             SourceConfig::Synthetic {
                 width,
                 height,
@@ -221,6 +224,7 @@ mod tests {
         let mut src = open_source_with_clock(&config, SourceId("s".into()), clock).unwrap();
         assert_eq!(src.info().id, SourceId("s".into()));
         assert_eq!(src.info().fps, 30.0);
+        assert_eq!(&src.current_info(), src.info(), "a plain source's is fixed");
         let deadline = Instant::now() + Duration::from_secs(10);
         while src.latest().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(2));
@@ -262,6 +266,24 @@ mod tests {
             audio: true,
         };
         assert!(missing.validate().is_ok(), "it may appear later");
+        // A width no picture can be scaled to fails before any file is
+        // looked for, and as opening it would.
+        for (max_width, ok) in [(Some(0), false), (Some(1), false), (Some(2), true)] {
+            let file = SourceConfig::File {
+                path: "/nonexistent/auto-camera/clip.mp4".into(),
+                loop_playback: false,
+                max_width,
+                audio: true,
+            };
+            match file.validate() {
+                Ok(()) => assert!(ok, "{max_width:?} accepted"),
+                Err(e) => {
+                    assert!(!ok, "{max_width:?} rejected: {e}");
+                    let e = e.to_string();
+                    assert!(e.contains("max_width must be at least 2"), "{e}");
+                }
+            }
+        }
     }
 
     #[test]

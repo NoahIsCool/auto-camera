@@ -55,7 +55,7 @@ pub use audio::BLOCK_MILLIS;
 pub use clock::{Clock, MAX_SLEEP_SLICE, VirtualClock, WallClock};
 pub use config::{SourceConfig, open_source, open_source_with_clock};
 pub use fault::{FlakySynthetic, OpenAttempt, OpenLog, Outage};
-pub use ffmpeg::output_size;
+pub use ffmpeg::{check_max_width, output_size};
 pub use file::{DEFAULT_AUDIO_QUEUE_BLOCKS, FileOptions, FileSource};
 pub use frame_rate::FrameRate;
 pub use probe::{

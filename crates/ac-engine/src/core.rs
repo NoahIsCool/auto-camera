@@ -77,8 +77,10 @@
 //!   is in media time;
 //! * a source that was missing when the engine started is described by a
 //!   placeholder ([`crate::config::SourceEntry::placeholder_info`]); its
-//!   first frame gives the core its real picture size. A source's size is
-//!   otherwise fixed: a later connection is taken to have the first one's.
+//!   first frame gives the core its real picture size, and the description
+//!   of the connection that delivered it ([`SourceFeed::info`]) its frame
+//!   rate. A source's description is otherwise fixed: a later connection is
+//!   taken to have the first one's.
 //!
 //! Given the same configuration, frames, results and commands, the core
 //! produces the same program, which is what the deterministic tests rely on.
@@ -127,6 +129,12 @@ pub struct SourceFeed {
     /// Why the source is not delivering, when an error is the reason: what
     /// stopped it, or what keeps it offline while it reconnects.
     pub error: Option<String>,
+    /// The description of what the source delivers now
+    /// (`VideoSource::current_info`), read after `frame`, so it is that
+    /// frame's connection's or a newer one's; `None` when not known. The
+    /// core takes it with the source's first frame only (see the module
+    /// docs).
+    pub info: Option<SourceInfo>,
 }
 
 /// What a tick produced for the runtime.
@@ -198,7 +206,9 @@ struct SourceSlot {
     id: SourceId,
     /// Operator-facing name.
     name: String,
-    /// Static description from the source.
+    /// The source's description: as given to [`EngineCore::new`], with the
+    /// size and rate of its first frame's connection once one arrived (see
+    /// [`SourceSlot::describe`]).
     info: SourceInfo,
     /// Picture aspect (width / height).
     aspect: f64,
@@ -224,6 +234,25 @@ struct SourceSlot {
 }
 
 impl SourceSlot {
+    /// Takes the description of a source's first frame, `frame`, and of the
+    /// connection that delivered it, `connection` (see the module docs): a
+    /// source missing at start was given a placeholder, and nothing has been
+    /// tracked or framed on its picture yet. The size comes from the frame,
+    /// the rate from the connection. An empty size, a description of another
+    /// source and a rate that is not positive and finite are ignored.
+    fn describe(&mut self, frame: &VideoFrame, connection: Option<&SourceInfo>) {
+        let size = (frame.width, frame.height);
+        if size != (self.info.width, self.info.height) && size.0 > 0 && size.1 > 0 {
+            self.info.width = frame.width;
+            self.info.height = frame.height;
+            self.aspect = frame.aspect();
+        }
+        let usable = |c: &&SourceInfo| c.id == self.id && c.fps.is_finite() && c.fps > 0.0;
+        if let Some(c) = connection.filter(usable) {
+            self.info.fps = c.fps;
+        }
+    }
+
     /// True when the source is delivering and has a fresh frame at `now`.
     fn available(&self, now: Duration) -> bool {
         matches!(self.state, SourceState::Starting | SourceState::Running)
@@ -462,7 +491,8 @@ impl EngineCore {
     /// Takes a source's health and newest frame and advances its vision when
     /// the frame is new, and whether its detector is still loading: its own
     /// loader, or, when `studio_loading`, the shared detector's (see the
-    /// module docs). The first frame of a source sets its picture size.
+    /// module docs). The first frame of a source sets its picture size and
+    /// rate ([`SourceSlot::describe`]).
     fn ingest_feed(&mut self, i: usize, feed: &SourceFeed, studio_loading: bool) {
         let now = self.now;
         let s = &mut self.sources[i];
@@ -476,13 +506,8 @@ impl EngineCore {
         if frame.source != s.id || s.frame.as_ref().is_some_and(|f| frame.seq <= f.seq) {
             return;
         }
-        let size = (frame.width, frame.height);
-        if s.frame.is_none() && size != (s.info.width, s.info.height) && size.0 > 0 && size.1 > 0 {
-            // A placeholder's size (the source was missing at start): nothing
-            // has been tracked or framed on its picture yet.
-            s.info.width = frame.width;
-            s.info.height = frame.height;
-            s.aspect = frame.aspect();
+        if s.frame.is_none() {
+            s.describe(frame, feed.info.as_ref());
         }
         let expected = s.frame.as_ref().map_or(0, |f| f.seq + 1);
         s.missed += frame.seq.saturating_sub(expected);

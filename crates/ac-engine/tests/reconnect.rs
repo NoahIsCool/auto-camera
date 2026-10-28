@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use ac_core::{ShotId, SourceId};
 use ac_engine::discovery::{DiscoveryRequest, DiscoveryResult, synthetic_detector};
 use ac_engine::{
-    CommandError, DetectorSettings, EngineCommand, EngineCore, OutputView, PassOutcome,
-    SourceEntry, SourceFeed, SourceView, TimingView,
+    CommandError, CommandReply, DetectorSettings, EngineCommand, EngineCore, OutputState,
+    OutputView, PassOutcome, SourceEntry, SourceFeed, SourceView, TimingView,
 };
 use ac_media::{SourceInfo, SourceState, VideoFrame, VideoSource};
 use ac_sources::{
@@ -76,6 +76,7 @@ impl Rig {
             frame: Some(frame.clone()),
             detector_loading: false,
             error: src.error(),
+            info: Some(src.current_info()),
         };
         let results = std::mem::take(&mut self.pending);
         let out = self.core.tick(self.now, &[feed], results);
@@ -252,6 +253,74 @@ fn fails_at_10_s_returns_at_13_s_in_a_new_epoch_and_older_detections_are_dropped
     assert_eq!(src.state(), SourceState::Stopped);
 }
 
+/// The view of the only source of a core built with a placeholder for it
+/// (the program's 320x180 at an unknown rate, as for a file missing at
+/// start), after its first frame (160x120) came with `connection` and its
+/// second with a description of 60 fps.
+fn described(connection: Option<SourceInfo>) -> SourceView {
+    let mut config = studio(1);
+    config.detector = DetectorSettings::None;
+    let stage = SourceId("stage".into());
+    let placeholder = SourceInfo {
+        id: stage.clone(),
+        width: 320,
+        height: 180,
+        fps: 0.0,
+        audio: None,
+    };
+    let mut core = EngineCore::new(&config, vec![placeholder.clone()], &[false]).unwrap();
+    let pattern = SyntheticPattern::new(160, 120, 25.0, 1).unwrap();
+    let later = SourceInfo {
+        fps: 60.0,
+        ..placeholder
+    };
+    for (seq, info) in [(0, connection), (1, Some(later))] {
+        let feed = SourceFeed {
+            state: SourceState::Running,
+            frame: Some(pattern.frame(&stage, seq)),
+            detector_loading: false,
+            error: None,
+            info,
+        };
+        let now = secs(seq as f64 / 25.0);
+        core.tick(now, &[feed], Vec::new());
+    }
+    let snap = core.snapshot(OutputView::default(), TimingView::default(), true);
+    snap.sources[0].clone()
+}
+
+/// A source described by a placeholder takes its size from its first
+/// frame and its rate from the description of that frame's connection.
+/// Later descriptions, one of another source and a rate that is not
+/// positive and finite change nothing.
+#[test]
+fn a_placeholder_takes_its_first_frames_size_and_its_connections_rate() {
+    let own = |id: &str, fps: f64| SourceInfo {
+        id: SourceId(id.into()),
+        width: 160,
+        height: 120,
+        fps,
+        audio: Some((48_000, 2)),
+    };
+    let view = described(Some(own("stage", 25.0)));
+    assert_eq!(
+        (view.width, view.height, view.nominal_fps),
+        (160, 120, 25.0)
+    );
+    for connection in [
+        None,
+        Some(own("other", 25.0)),
+        Some(own("stage", 0.0)),
+        Some(own("stage", f64::NAN)),
+        Some(own("stage", f64::INFINITY)),
+    ] {
+        let why = format!("{connection:?}");
+        let view = described(connection);
+        assert_eq!((view.width, view.height), (160, 120), "{why}");
+        assert_eq!(view.nominal_fps, 0.0, "{why}: still unknown");
+    }
+}
+
 /// A studio of the synthetic `stage` and a file source `later` reading
 /// `path`, which need not exist, without a detector (the synthetic one
 /// needs every source synthetic).
@@ -330,7 +399,9 @@ fn the_engine_starts_with_one_of_two_sources_missing_and_runs_the_other() {
 }
 
 /// A source missing at start is retried and goes on air once its file
-/// appears, at the size of its first frame.
+/// appears, described as the file is: the size of its first frame, the
+/// file's frame rate, and its audio, which an output started from then on
+/// carries when the source is the program audio source.
 #[test]
 fn a_source_missing_at_start_goes_on_air_when_its_file_appears() {
     if !have("ffmpeg") || !have("ffprobe") {
@@ -338,7 +409,12 @@ fn a_source_missing_at_start_goes_on_air_when_its_file_appears() {
         return;
     }
     let path = temp_path("appears.mkv");
-    let engine = start(studio_with_file(&path));
+    let mut config = studio_with_file(&path);
+    if let SourceConfig::File { audio, .. } = &mut config.sources[1].input {
+        *audio = true;
+    }
+    config.output.audio_source = Some("later".into());
+    let engine = start(config);
     let h = engine.handle();
     h.wait_until(WAIT, |s| {
         later(s).error.is_some() && s.sources[0].frames > 0
@@ -354,7 +430,13 @@ fn a_source_missing_at_start_goes_on_air_when_its_file_appears() {
             "-i",
             "testsrc=size=160x120:rate=30:duration=2",
         ])
-        .args(["-c:v", "mpeg4", "-q:v", "4"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=2",
+        ])
+        .args(["-c:v", "mpeg4", "-q:v", "4", "-c:a", "pcm_s16le"])
         .arg(&part)
         .status()
         .unwrap();
@@ -369,7 +451,42 @@ fn a_source_missing_at_start_goes_on_air_when_its_file_appears() {
     assert_eq!(on.state, SourceState::Running);
     assert_eq!(on.error, None);
     assert_eq!((on.width, on.height), (160, 120), "its first frame's size");
+    assert_eq!(on.nominal_fps, 30.0, "the file's rate, no longer unknown");
     assert!(snap.sources[0].available, "the stage kept running");
+    // Its audio is the program's from the next output on.
+    let record = temp_path("appears.mp4");
+    assert_eq!(
+        h.send(EngineCommand::StartOutput {
+            rtmp_url: None,
+            record_path: Some(record.clone()),
+        }),
+        Ok(CommandReply::OutputStarting)
+    );
+    h.wait_until(WAIT, |s| {
+        s.output.state == OutputState::Running && s.output.audio.is_some_and(|a| a.pushed > 0)
+    })
+    .expect("the program carries the file's audio");
+    h.send(EngineCommand::StopOutput).unwrap();
+    let done = h
+        .wait_until(WAIT, |s| {
+            !matches!(s.output.state, OutputState::Stopping | OutputState::Running)
+        })
+        .expect("the encoder finishes");
+    assert_eq!(
+        done.output.state,
+        OutputState::Finished,
+        "{:?}",
+        done.output
+    );
     engine.shutdown().unwrap();
+    let streams = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "stream=codec_type"])
+        .args(["-of", "csv=p=0"])
+        .arg(&record)
+        .output()
+        .unwrap();
+    let streams = String::from_utf8_lossy(&streams.stdout);
+    assert!(streams.lines().any(|l| l.trim() == "audio"), "{streams}");
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&record);
 }

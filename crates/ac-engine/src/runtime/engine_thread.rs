@@ -25,6 +25,8 @@ use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
+use ac_output::AudioFormat;
+
 use super::{EngineReport, Runtime};
 use crate::command::{CommandReply, EngineCommand};
 use crate::core::SourceFeed;
@@ -111,9 +113,11 @@ impl Runtime {
                 EngineCommand::StartOutput {
                     rtmp_url,
                     record_path,
-                } => self
-                    .output
-                    .start(rtmp_url.clone(), record_path.clone(), self.audio_format),
+                } => {
+                    let audio = self.program_audio_format();
+                    self.output
+                        .start(rtmp_url.clone(), record_path.clone(), audio)
+                }
                 EngineCommand::StopOutput => self.output.stop(),
                 other => self.core.apply(other),
             };
@@ -124,6 +128,20 @@ impl Runtime {
                 return true;
             }
         }
+    }
+
+    /// The format of program audio for an output starting now: the audio
+    /// source's, as its newest connection describes it, so a source that
+    /// was missing when the engine started gives the program its audio
+    /// once it has been on air. `None` without an audio source, or while
+    /// it has given no description with audio.
+    fn program_audio_format(&self) -> Option<AudioFormat> {
+        let source = self.sources.get(self.audio_source?)?;
+        let (sample_rate, channels) = source.current_info().audio?;
+        Some(AudioFormat {
+            sample_rate,
+            channels,
+        })
     }
 
     /// One tick: feed the core, dispatch discovery, push the program
@@ -143,6 +161,9 @@ impl Runtime {
                 frame: s.latest(),
                 detector_loading: w.as_mut().is_some_and(DiscoveryWorker::is_loading),
                 error: s.error(),
+                // After `frame` (fields are evaluated in order), so it
+                // describes that frame's connection or a newer one.
+                info: Some(s.current_info()),
             })
             .collect();
         let reference = feeds

@@ -337,6 +337,8 @@ fn the_summary_is_json() {
     );
     assert!(v["output"].is_null());
     let source = &v["sources"][0];
+    assert_eq!(source["state"], "running");
+    assert!(source["error"].is_null());
     assert_eq!(source["discovery_preparing"], false);
     assert!(source["detector_ready_s"].is_number());
     let wide = &v["shots"][0];
@@ -614,5 +616,88 @@ fn no_picture_says_what_keeps_each_source_offline() {
         no_picture(&snap),
         "no source delivered a picture in time; \
          source stage: cannot open source: cannot open later.mkv"
+    );
+}
+
+#[test]
+fn never_delivered_names_each_source_that_stayed_off_the_air() {
+    let mut snap = (*first_snapshot(&studio())).clone();
+    assert_eq!(
+        never_delivered(&snap).as_deref(),
+        Some("source stage never delivered a picture")
+    );
+    let mut later = snap.sources[0].clone();
+    later.id = ac_core::SourceId("later".into());
+    later.error = Some("cannot open source: cannot open later.mkv".into());
+    snap.sources.push(later);
+    snap.sources[0].frames = 1;
+    assert_eq!(
+        never_delivered(&snap).as_deref(),
+        Some("source later never delivered a picture: cannot open source: cannot open later.mkv")
+    );
+    snap.sources[0].frames = 0;
+    assert_eq!(
+        never_delivered(&snap).as_deref(),
+        Some(
+            "source stage never delivered a picture; \
+             source later never delivered a picture: cannot open source: cannot open later.mkv"
+        )
+    );
+    for s in &mut snap.sources {
+        s.frames = 1;
+    }
+    assert_eq!(never_delivered(&snap), None, "every source delivered");
+}
+
+/// A run with one of two sources missing runs the other, but nobody would
+/// notice the missing one, so the run fails, saying which source never
+/// delivered and why, and its summary shows that source offline.
+#[test]
+fn a_run_with_a_source_that_never_delivers_fails_and_says_why() {
+    let mut config = studio();
+    // The synthetic detector needs every source synthetic.
+    config.detector = DetectorSettings::None;
+    config.sources.push(ac_engine::SourceEntry {
+        id: "later".into(),
+        name: None,
+        input: SourceConfig::File {
+            path: temp_path("missing.mkv"),
+            loop_playback: false,
+            max_width: None,
+            audio: false,
+        },
+    });
+    let s = run(
+        config,
+        Path::new("x.toml"),
+        &options(0.5, None),
+        &QuitSignal::new(),
+    );
+    assert!(!s.ok);
+    let error = s.error.unwrap();
+    assert!(
+        error.starts_with("source later never delivered a picture: ")
+            && error.contains("missing.mkv"),
+        "{error}"
+    );
+    let later = &s.sources[1];
+    assert!(
+        matches!(later.state.as_str(), "offline" | "reconnecting"),
+        "{}",
+        later.state
+    );
+    let why = later.error.as_deref().unwrap_or_default();
+    assert!(why.contains("missing.mkv"), "{why}");
+    assert_eq!(later.frames, 0);
+    let stage = &s.sources[0];
+    assert_eq!(
+        (stage.state.as_str(), stage.error.as_deref()),
+        ("running", None)
+    );
+    assert!(stage.frames > 0);
+    assert_eq!(
+        s.program.last.as_deref(),
+        Some("stage/wide"),
+        "the stage ran"
     );
 }

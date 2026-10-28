@@ -12,7 +12,8 @@
 //! Until it opens, it is described by [`SourceEntry::placeholder_info`]:
 //! what its config says about its picture, and the program's size for a
 //! file, whose picture only the file knows. The engine takes the real size
-//! from the source's first frame.
+//! from the source's first frame, and the real rate and audio from the
+//! description of the connection that delivered it.
 
 use ac_core::SourceId;
 use ac_media::SourceInfo;

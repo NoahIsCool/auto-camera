@@ -27,17 +27,29 @@ use ac_media::MediaError;
 use crate::frame_rate::FrameRate;
 use crate::probe::{AudioStreamInfo, FfmpegTools, VideoStreamInfo, file_url};
 
-/// Size of decoded frames: the upright picture, scaled down to at most
-/// `max_width` wide with the aspect ratio kept.
-///
-/// When scaling, both sides are rounded to even numbers so frames can be
-/// encoded as 4:2:0 later without cropping. A `max_width` below 2 is invalid.
-pub fn output_size(display: (u32, u32), max_width: Option<u32>) -> Result<(u32, u32), MediaError> {
-    let (w, h) = display;
+/// Checks a file's `max_width` on its own, before any file is probed: below
+/// 2 it is invalid (no even width fits), whatever the picture.
+/// [`output_size`] applies the same rule, so a config this accepts never
+/// fails there for its `max_width`.
+pub fn check_max_width(max_width: Option<u32>) -> Result<(), MediaError> {
     match max_width {
         Some(m) if m < 2 => Err(MediaError::Open(format!(
             "max_width must be at least 2, got {m}"
         ))),
+        _ => Ok(()),
+    }
+}
+
+/// Size of decoded frames: the upright picture, scaled down to at most
+/// `max_width` wide with the aspect ratio kept.
+///
+/// When scaling, both sides are rounded to even numbers so frames can be
+/// encoded as 4:2:0 later without cropping. A `max_width` below 2 is invalid
+/// ([`check_max_width`]).
+pub fn output_size(display: (u32, u32), max_width: Option<u32>) -> Result<(u32, u32), MediaError> {
+    check_max_width(max_width)?;
+    let (w, h) = display;
+    match max_width {
         Some(m) if w > m => {
             let out_w = m & !1;
             let half_h = (h as f64 * out_w as f64 / w as f64 / 2.0).round() as u32;
@@ -174,6 +186,11 @@ mod tests {
                 output_size((640, 360), Some(m)),
                 Err(MediaError::Open(_))
             ));
+            let err = check_max_width(Some(m)).unwrap_err().to_string();
+            assert!(err.contains(&format!("at least 2, got {m}")), "{err}");
+        }
+        for ok in [None, Some(2), Some(u32::MAX)] {
+            assert!(check_max_width(ok).is_ok(), "{ok:?}");
         }
     }
 

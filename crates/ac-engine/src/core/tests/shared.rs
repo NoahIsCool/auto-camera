@@ -78,6 +78,7 @@ impl Studio {
                     frame: Some(self.pattern.frame(id, tick)),
                     detector_loading: loading,
                     error: None,
+                    info: None,
                 })
                 .collect();
             let (done, running): (Vec<_>, Vec<_>) = std::mem::take(&mut self.passes)
@@ -291,6 +292,7 @@ fn a_late_answer_does_not_free_the_slot_of_a_newer_request() {
             frame: Some(pattern.frame(&cam(), tick)),
             detector_loading: false,
             error: None,
+            info: None,
         };
         let out = core.tick(now, &[feed], std::mem::take(&mut late));
         for (_, req) in out.requests {

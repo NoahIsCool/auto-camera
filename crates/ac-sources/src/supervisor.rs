@@ -10,7 +10,11 @@
 //!   attempt fails, the source starts [`SourceState::Offline`] instead of
 //!   failing: [`SupervisedSource::start_error`] says why, and
 //!   [`VideoSource::info`] is the caller's description of the source, since
-//!   the input's own is not known yet.
+//!   the input's own is not known yet. [`VideoSource::current_info`] is that
+//!   description too until a connection delivers, and from then on the
+//!   description of the newest connection that delivered, so whoever was
+//!   given the caller's learns the input's own (its frame rate, its audio)
+//!   once it is there.
 //! * **Failure.** A connection that stops with an error (ffmpeg killed or
 //!   crashed, a device unplugged) is stopped, its children reaped, and the
 //!   source goes `Offline`. After a [`Backoff`] delay it goes
@@ -250,6 +254,10 @@ struct Health {
     state: SourceState,
     /// Why the source went offline; cleared once a connection delivers.
     error: Option<String>,
+    /// The description of the newest connection that delivered (the first
+    /// connection's from the start, when `start` opened one), else the
+    /// caller's; set before that connection's first frame is passed on.
+    info: SourceInfo,
 }
 
 /// State shared by a [`SupervisedSource`] and its thread.
@@ -276,9 +284,22 @@ impl Shared {
         lock(&self.health).state = state;
     }
 
-    /// Sets the state and the error.
+    /// Sets the state and the error, keeping the description.
     fn set(&self, state: SourceState, error: Option<String>) {
-        *lock(&self.health) = Health { state, error };
+        let mut health = lock(&self.health);
+        health.state = state;
+        health.error = error;
+    }
+
+    /// Marks the source `Running` on a connection described by `info`,
+    /// clearing the error: called before the connection's first frame is
+    /// passed on.
+    fn delivering(&self, info: SourceInfo) {
+        *lock(&self.health) = Health {
+            state: SourceState::Running,
+            error: None,
+            info,
+        };
     }
 }
 
@@ -318,27 +339,25 @@ impl SupervisedSource {
     ) -> Result<Self, MediaError> {
         backoff.validate().map_err(MediaError::Open)?;
         let mut ledger = Ledger::new(backoff, clock.now());
+        let name = format!("ac-supervise-{}", offline.id.0);
+        let (first, state, info, start_error) = match opener.open() {
+            Ok(source) => {
+                let info = source.info().clone();
+                let stamp = ledger.connect(ledger.origin);
+                (Some((source, stamp)), SourceState::Starting, info, None)
+            }
+            Err(e) => (None, SourceState::Offline, offline, Some(e.to_string())),
+        };
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
             latest: LatestFrame::new(),
             audio: AudioQueue::new(DEFAULT_AUDIO_QUEUE_BLOCKS),
             health: Mutex::new(Health {
-                state: SourceState::Starting,
-                error: None,
+                state,
+                error: start_error.clone(),
+                info: info.clone(),
             }),
         });
-        let name = format!("ac-supervise-{}", offline.id.0);
-        let (first, info, start_error) = match opener.open() {
-            Ok(source) => {
-                let info = source.info().clone();
-                let stamp = ledger.connect(ledger.origin);
-                (Some((source, stamp)), info, None)
-            }
-            Err(e) => {
-                shared.set(SourceState::Offline, Some(e.to_string()));
-                (None, offline, Some(e.to_string()))
-            }
-        };
         let supervisor = Supervisor {
             opener: Box::new(opener),
             clock,
@@ -386,6 +405,10 @@ impl VideoSource for SupervisedSource {
 
     fn error(&self) -> Option<String> {
         lock(&self.shared.health).error.clone()
+    }
+
+    fn current_info(&self) -> SourceInfo {
+        lock(&self.shared.health).info.clone()
     }
 
     fn stop(&mut self) {
@@ -514,11 +537,12 @@ impl Supervisor {
             };
             if let Some(frame) = source.wait_newer(last, wait) {
                 last = Some(frame.seq);
-                // Running before the first frame is out, so a reader that
-                // sees a frame of this epoch never sees an older state.
+                // Running, and described as this connection, before the
+                // first frame is out, so a reader that sees a frame of this
+                // epoch never sees an older state or description.
                 if up_since.is_none() {
                     up_since = Some(self.clock.now());
-                    self.shared.set(SourceState::Running, None);
+                    self.shared.delivering(source.info().clone());
                 }
                 let frame = stamp.frame(frame);
                 self.ledger.frame_delivered(&frame);

@@ -117,8 +117,11 @@ across connections, and the time away counts as elapsed media time. The
 core only compares epochs: a source that is not delivering is unavailable,
 and a detection about an older epoch's picture is dropped however recent
 its PTS. A source that cannot be opened at start does not stop the engine;
-it starts offline, described by its config (a file by the program size,
-replaced by its first frame's), and the other sources run meanwhile.
+it starts offline, described by its config (a file by the program size at
+an unknown rate), and the other sources run meanwhile. Once it delivers,
+the supervisor describes it as its input does: the core takes the size of
+its first frame and the rate of that frame's connection, and an output
+started from then on carries its audio.
 
 ### Shutdown
 

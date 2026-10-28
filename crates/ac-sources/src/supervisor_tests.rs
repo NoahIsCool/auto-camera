@@ -241,6 +241,7 @@ fn a_source_that_fails_at_10_s_and_returns_at_13_s_resumes_under_a_new_epoch() {
         (64, 36),
         "the input's own"
     );
+    assert_eq!(&src.current_info(), src.info());
     at_retry.recv_timeout(Duration::from_secs(10)).unwrap();
     // The connection failed on the frame due at 10 s; 0.5 s later the
     // supervisor is trying again, saying why.
@@ -285,6 +286,7 @@ fn a_source_that_fails_at_10_s_and_returns_at_13_s_resumes_under_a_new_epoch() {
     );
     assert_eq!(src.state(), SourceState::Running);
     assert_eq!(src.error(), None, "running again");
+    assert_eq!(&src.current_info(), src.info(), "the same input again");
     src.stop();
     assert_eq!(src.state(), SourceState::Stopped);
 }
@@ -302,11 +304,22 @@ fn a_source_missing_at_start_starts_offline_and_connects_when_it_appears() {
     let src = SupervisedSource::start(opener, offline_info(), clock, Backoff::default()).unwrap();
     assert!(src.start_error().unwrap().contains("gone until"));
     assert_eq!(src.info(), &offline_info(), "described by the caller");
+    assert_eq!(src.current_info(), offline_info(), "until it delivers");
     let mut first = None;
     assert!(eventually(|| {
         first = first.take().or_else(|| src.wait_newer(None, ms(5)));
         first.is_some()
     }));
+    // Whoever sees its first frame sees the input's own description.
+    let own = SourceInfo {
+        id: cam(),
+        width: 32,
+        height: 18,
+        fps: 30.0,
+        audio: None,
+    };
+    assert_eq!(src.current_info(), own);
+    assert_eq!(src.info(), &offline_info(), "fixed at start");
     let at: Vec<f64> = log.attempts().iter().map(|a| a.at.as_secs_f64()).collect();
     assert_eq!(at, [0.0, 0.5, 1.5, 3.5, 7.5]);
     let first = first.unwrap();
