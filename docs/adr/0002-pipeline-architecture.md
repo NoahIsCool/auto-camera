@@ -61,10 +61,10 @@ Two clocks, never mixed:
   as *old epoch* when its frame is from an earlier connection than the
   source's newest frame, as *superseded* when a newer frame's result was
   already applied, and as *too old* when its frame's PTS is more than
-  `discovery.max_result_age_s` behind the source's newest frame. A subject's track observations count
-  only while a detection has seen it within `discovery.max_undetected_s`
-  (detections vouch for existence; the tracker alone cannot keep a subject
-  alive).
+  `discovery.max_result_age_s` behind the source's newest frame. A
+  subject's track observations count only while a detection has seen it
+  within `discovery.max_undetected_s` (detections vouch for existence; the
+  tracker alone cannot keep a subject alive).
 - The **master clock** is the tick index times the output frame period.
   Framing steps, transitions, the director's dwell and hold times and the
   encoder's constant frame rate all run on it, and program audio is paced

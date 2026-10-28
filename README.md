@@ -74,19 +74,21 @@ still loading then), starts recording when `--record` is given
 (the stream also goes to `output.rtmp_url` if the config sets one), runs for
 `--seconds` (default 10) after recording started, finalizes the recording,
 shuts down and prints a JSON summary on stdout. Besides counters, each
-source says whether its detector was still preparing and when it was ready
-(`discovery_preparing`, `detector_ready_s`), `queries` says how each prompt
-was read (with the parse's `notes`), each shot gives the range of its crop
-size over the run (`crop_width_min` to `crop_height_max`) and whether the
-zoom ceiling limits it (`limited_by_zoom`, with `same_picture_as` naming
-the shot it then looks the same as), and `subjects` lists the subjects at
-the end with the queries they answer:
+source gives its `state` and the `error` that keeps it off the air (`null`
+while it delivers), and says whether its detector was still preparing and
+when it was ready (`discovery_preparing`, `detector_ready_s`), `queries`
+says how each prompt was read (with the parse's `notes`), each shot gives
+the range of its crop size over the run (`crop_width_min` to
+`crop_height_max`) and whether the zoom ceiling limits it
+(`limited_by_zoom`, with `same_picture_as` naming the shot it then looks
+the same as), and `subjects` lists the subjects at the end with the
+queries they answer:
 
 ```json
 {
   "ok": true,
   "ticks": 160,
-  "sources": [{ "id": "stage", "fps": 31.0, "frames": 155, "missed": 3, "discovery_preparing": false, "detector_ready_s": 0.03, "discovery_applied": 40 }],
+  "sources": [{ "id": "stage", "state": "running", "error": null, "fps": 31.0, "frames": 155, "missed": 3, "discovery_preparing": false, "detector_ready_s": 0.03, "discovery_applied": 40 }],
   "queries": [{ "prompt": "person", "detector_phrase": "person", "presets": ["medium", "close"], "basis": "person",
                 "parse": "Detector sees: person · Framing: no shot words (person)",
                 "matches": [{ "source": "stage", "count": 3, "best": 0.9, "seq": 148, "pts_seconds": 4.933 }] }],
@@ -101,9 +103,9 @@ the end with the queries they answer:
 (abridged). Each query's `matches` is the prompt feedback of the window:
 what the newest applied detector pass of each source found for it, and on
 which frame. The exit status is 0 on success, 1 when the engine or the output
-failed (`ok` is false and `error` says why), 2 for usage and configuration
-errors. Recordings are never overwritten: an existing `--record` path is an
-error.
+failed or a source never delivered a picture during the run (`ok` is false
+and `error` says why), 2 for usage and configuration errors. Recordings
+are never overwritten: an existing `--record` path is an error.
 
 ## Studio configuration
 
@@ -158,6 +160,16 @@ Further sections tune the `tracker`, `subjects` (limits and lost/retire
 times), `framing`, `switcher` (default transition), `monitors` (monitor
 and multiview tile sizes and rates) and `lexicon` (below); see
 `crates/ac-engine/src/config.rs`.
+
+A source that cannot be opened when the engine starts (a file that is not
+there yet) does not stop it: the other sources run, the window's status
+line shows that source `OFFLINE` (or `RECONNECTING`) with the reason, and
+it is retried with a backoff of 0.5 s doubling to 8 s, so it goes on air
+once its input appears. A source that loses its input while running (its
+ffmpeg killed or crashed) is reopened the same way. If it is the
+`audio_source`, an output started after it came on air carries its audio.
+Only a source setting no retry can fix (a synthetic pattern that cannot be
+made, a `max_width` below 2) stops the start.
 
 ## Prompts
 
