@@ -30,8 +30,8 @@
 //!   output, director, framing) as TOML or JSON, in a layout named by its
 //!   `schema` key ([`SCHEMA_VERSION`]).
 //! * [`readiness`] checks a studio before a show without starting it: the
-//!   config's every problem, and the files, tools and folders it names
-//!   (`auto-camera --check`).
+//!   problems in the config's values, and the files, tools and folders it
+//!   names (`auto-camera --check`).
 //! * [`queries`] reads each query's prompt once, when it is created: the
 //!   detector is asked for the parsed phrase ("speaker upper body" asks for
 //!   "a person speaking"), and the prompt's shot words pick its framings

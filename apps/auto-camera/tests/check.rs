@@ -2,14 +2,15 @@
 //! made of fake files laid out as on Noah's Mac (an ffmpeg and ffprobe that
 //! only print a version, empty model files, a venv whose python would
 //! leave a mark if it ever ran), a config with three problems lists all
-//! three, and the `schema` key is checked. Nothing here needs a camera, a
-//! model, a network or a real ffmpeg. Unix only: the fakes are shell
-//! scripts.
+//! three, also when they are in one table, the `schema` key is checked, and
+//! the default config path gets a hint only when nothing is there. Nothing
+//! here needs a camera, a model, a network or a real ffmpeg. Unix only: the
+//! fakes are shell scripts.
 //!
-//! The app runs in the tree's `config` folder. A relative recording path
-//! is taken from the working folder (the config's other paths from the
-//! config's folder), so the examples' `../recordings/...` then names the
-//! tree's `recordings` folder.
+//! The app runs at the tree's root, as the examples say to run it from the
+//! repository root. A relative recording path is taken from the working
+//! folder (the config's other paths from the config's folder), so the
+//! examples' `recordings/...` then names the tree's `recordings` folder.
 //!
 //! Writing an executable while another thread forks can leave the child a
 //! writable copy of it, and executing it then fails ("text file busy"), so
@@ -121,16 +122,20 @@ impl Studio {
         to
     }
 
-    /// Runs the app with `args` in the tree's `config` folder, its tools
-    /// being the tree's fakes; waits up to a minute and kills it after
-    /// that.
+    /// Runs the app with `args` at the tree's root, its tools being the
+    /// tree's fakes; waits up to a minute and kills it after that.
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with(args, &self.path("bin/ffmpeg"))
+    }
+
+    /// [`Self::run`] with `ffmpeg` as the ffmpeg (`AC_FFMPEG`).
+    fn run_with(&self, args: &[&str], ffmpeg: &Path) -> Output {
         let child = {
             let _fork = FORK.lock().unwrap_or_else(|e| e.into_inner());
             Command::new(APP)
                 .args(args)
-                .current_dir(self.path("config"))
-                .env("AC_FFMPEG", self.path("bin/ffmpeg"))
+                .current_dir(&self.root)
+                .env("AC_FFMPEG", ffmpeg)
                 .env("AC_FFPROBE", self.path("bin/ffprobe"))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -152,11 +157,7 @@ impl Studio {
 
     /// `--check` on `config`: the exit status and stdout.
     fn check(&self, config: &Path) -> (Option<i32>, String) {
-        let out = self.run(&["--check", "--config", config.to_str().unwrap()]);
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.is_empty(), "nothing on stderr: {stderr}");
-        (out.status.code(), stdout)
+        stdout_of(self.run(&["--check", "--config", config.to_str().unwrap()]))
     }
 
     /// What the fake tools were asked, one line per run.
@@ -167,6 +168,17 @@ impl Studio {
             .map(str::to_owned)
             .collect()
     }
+}
+
+/// The exit status and stdout of a `--check` run, which prints nothing on
+/// stderr.
+fn stdout_of(out: Output) -> (Option<i32>, String) {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.is_empty(), "nothing on stderr: {stderr}");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
 }
 
 /// The problem lines of a report.
@@ -228,7 +240,7 @@ fn a_config_with_three_problems_lists_all_three() {
         &config,
         "schema = 1\n\n[[sources]]\nid = \"cam-1\"\nkind = \"file\"\n\
          path = \"../media/missing.mp4\"\n\n[output]\nkeyframe_seconds = 30\n\
-         record_path = \"../no-such-folder/show.mp4\"\n",
+         record_path = \"no-such-folder/show.mp4\"\n",
     )
     .unwrap();
     let (code, report) = studio.check(&config);
@@ -253,6 +265,51 @@ fn a_config_with_three_problems_lists_all_three() {
     assert!(
         report.ends_with("3 problems found; fix them and check again.\n"),
         "{report}"
+    );
+
+    let one_table = studio.path("config/output.toml");
+    fs::write(
+        &one_table,
+        "schema = 1\n\n[[sources]]\nid = \"stage\"\nkind = \"synthetic\"\nwidth = 640\n\
+         height = 360\nfps = 30\n\n[output]\nkeyframe_seconds = 30\nvideo_bitrate_kbps = 50\n\
+         audio_bitrate_kbps = 1\n",
+    )
+    .unwrap();
+    let (code, report) = studio.check(&one_table);
+    assert_eq!(code, Some(2), "{report}");
+    assert_eq!(
+        problems(&report),
+        [
+            "config: output: video_bitrate_kbps = 50 is outside 100..=100000",
+            "config: output: keyframe_seconds = 30 is outside 1..=10",
+            "config: output: audio_bitrate_kbps = 1 is outside 32..=512",
+        ],
+        "all three, though they are in one table"
+    );
+}
+
+#[test]
+fn the_default_path_gets_a_hint_only_when_nothing_is_there() {
+    let studio = Studio::new("hint");
+    let hint = "(run from the repository root, or pass --config PATH)";
+    let (code, report) = stdout_of(studio.run(&["--check"]));
+    assert_eq!(code, Some(2), "{report}");
+    assert!(
+        problems(&report)[0].starts_with("cannot read config/demo.toml"),
+        "{report}"
+    );
+    assert!(report.contains(hint), "{report}");
+    studio.example("demo.toml");
+    let missing = studio.path("bin/no-such-ffmpeg");
+    let (code, report) = stdout_of(studio.run_with(&["--check"], &missing));
+    assert_eq!(code, Some(2), "{report}");
+    let [only] = problems(&report)[..] else {
+        panic!("{report}");
+    };
+    assert!(only.starts_with("output.ffmpeg: "), "{only}");
+    assert!(
+        !report.contains(hint),
+        "the default config loaded, so the path is not the problem: {report}"
     );
 }
 

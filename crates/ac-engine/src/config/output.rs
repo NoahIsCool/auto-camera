@@ -14,7 +14,8 @@
 //! 32..=512 kbit/s audio, a keyframe every 1..=10 s). A config that passed
 //! looser checks of its own would load and then fail when the operator
 //! starts the output, possibly minutes into a show, so
-//! [`OutputSettings::validate`] asks the encoder's own check instead of
+//! [`OutputSettings::problems`] asks the encoder's own check
+//! ([`OutputConfig::problems`], every bad value at once) instead of
 //! repeating its numbers: it builds the session config a start would build,
 //! with a stand-in recording path when the table names no destination and
 //! a stand-in audio format so the AAC bitrate is checked whether or not
@@ -24,7 +25,7 @@
 
 use std::path::PathBuf;
 
-use ac_output::{AudioFormat, Encoder, OutputConfig, OutputError};
+use ac_output::{AudioFormat, Encoder, OutputConfig};
 use serde::{Deserialize, Serialize};
 
 /// The recording path checked when the table names no destination: any
@@ -80,15 +81,17 @@ pub struct OutputSettings {
     pub encoder: EncoderSetting,
     /// ffmpeg executable. Defaults to the one file sources decode with:
     /// `AC_FFMPEG`, else `ffmpeg` on `PATH` (on macOS also Homebrew's
-    /// directories), so one setting serves both.
+    /// directories), so one setting serves both. Unlike the config's file
+    /// paths, it is run as given: a bare name is looked up on `PATH` and a
+    /// relative path is taken from the working folder, not the config's.
     pub ffmpeg: PathBuf,
     /// Default RTMP URL (with stream key) for `StartOutput`; `rtmp://` or
     /// `rtmps://`. Empty means none.
     pub rtmp_url: Option<String>,
     /// Default recording path for `StartOutput`; it must not exist when the
-    /// output starts. Empty means none. Unlike the config's other paths, a
-    /// relative one is taken from the working folder, as a path typed at
-    /// Start Output is.
+    /// output starts. Empty means none. Like `ffmpeg` and unlike the
+    /// config's other paths, a relative one is taken from the working
+    /// folder, as a path typed at Start Output is.
     pub record_path: Option<PathBuf>,
     /// Source whose embedded audio becomes program audio; silent when unset.
     pub audio_source: Option<String>,
@@ -115,9 +118,15 @@ impl Default for OutputSettings {
 }
 
 impl OutputSettings {
-    /// Checks every value with the encoder's own ranges, as a start would
-    /// (see the module docs); the message names the key.
+    /// Checks every value with the encoder's own ranges, as a start would,
+    /// failing on the first of [`Self::problems`].
     pub fn validate(&self) -> Result<(), String> {
+        self.problems().into_iter().next().map_or(Ok(()), Err)
+    }
+
+    /// Every value the encoder would refuse (see the module docs), each
+    /// message naming its key; empty when the table is fine.
+    pub fn problems(&self) -> Vec<String> {
         let rtmp_url = self.rtmp_url.clone().filter(|u| !u.trim().is_empty());
         let record_path = self
             .record_path
@@ -128,11 +137,10 @@ impl OutputSettings {
             (_, path) => path,
         };
         self.to_output_config(rtmp_url, record_path, Some(STAND_IN_AUDIO))
-            .validate()
-            .map_err(|e| match e {
-                OutputError::InvalidConfig(message) => format!("output: {message}"),
-                other => format!("output: {other}"),
-            })
+            .problems()
+            .into_iter()
+            .map(|p| format!("output: {p}"))
+            .collect()
     }
 
     /// The encoder config for one output session.

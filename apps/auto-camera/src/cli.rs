@@ -49,7 +49,7 @@ pub struct Cli {
     /// Record program to this MP4 during a headless run; it must not exist.
     #[arg(long, value_name = "PATH", requires = "headless")]
     pub record: Option<PathBuf>,
-    /// Check the studio without starting it: list every problem with the
+    /// Check the studio without starting it: list the problems with the
     /// config and the files, tools and folders it names, then exit 0 when
     /// there is none and 2 otherwise.
     #[arg(long, conflicts_with_all = ["headless", "seconds", "record"])]

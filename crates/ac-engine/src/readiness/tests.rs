@@ -1,6 +1,8 @@
 //! Tests for the readiness check against a fake machine: what is checked
 //! for each kind of source, detector and output, that every problem is
-//! listed, and what a config file that cannot be read yields.
+//! listed (and each once), that the repository's example configs are ready
+//! on a machine with their files, and what a config file that cannot be
+//! read yields.
 
 use std::collections::{HashMap, HashSet};
 
@@ -377,6 +379,34 @@ fn a_tool_that_does_not_run_says_how_to_name_another() {
 }
 
 #[test]
+fn an_empty_ffmpeg_is_one_problem_and_a_relative_one_is_from_the_working_folder() {
+    let mut c = synthetic("");
+    c.output.ffmpeg = "".into();
+    let fake = Fake::default().tool("/bin/ffmpeg");
+    let r = check_build(&c, &fake, false);
+    assert_eq!(
+        only_problem(&r),
+        "config: output: ffmpeg path is empty",
+        "said once, by the config's check"
+    );
+    assert!(fake.ran.borrow().is_empty(), "nothing is run");
+
+    c.output.ffmpeg = "tools/ffmpeg".into();
+    let r = check_build(&c, &Fake::default().tool("tools/ffmpeg"), false);
+    assert!(
+        r.at(Level::Ok)
+            .any(|m| m.starts_with("output.ffmpeg: tools/ffmpeg (from the working folder) runs")),
+        "{r:?}"
+    );
+    c.output.ffmpeg = "ffmpeg".into();
+    let r = check_build(&c, &Fake::default(), false);
+    assert!(
+        only_problem(&r).starts_with("output.ffmpeg: ffmpeg does not run"),
+        "a bare name is looked up on PATH: {r:?}"
+    );
+}
+
+#[test]
 fn a_recording_needs_a_new_name_in_a_folder_that_takes_files() {
     let c = synthetic(
         "[output]\nrecord_path = \"/studio/recordings/show.mp4\"\n\
@@ -434,6 +464,23 @@ fn a_recording_needs_a_new_name_in_a_folder_that_takes_files() {
 }
 
 #[test]
+fn an_rtmp_url_of_the_wrong_form_is_only_a_config_problem() {
+    let c = synthetic("[output]\nrtmp_url = \"http://live.example.com/app/SECRET-KEY\"\n");
+    let r = check_build(&c, &Fake::default().tool("/bin/ffmpeg"), false);
+    assert_eq!(
+        only_problem(&r),
+        "config: output: rtmp_url must start with rtmp:// or rtmps://"
+    );
+    assert!(
+        !r.findings
+            .iter()
+            .any(|f| f.message.contains("output.rtmp_url")),
+        "no line says the URL is fine: {r:?}"
+    );
+    assert!(!format!("{r:?}").contains("SECRET"));
+}
+
+#[test]
 fn every_problem_is_listed_bad_values_included() {
     let c = file_studio(
         "[output]\nkeyframe_seconds = 30\nrecord_path = \"/studio/recordings/show.mp4\"\n",
@@ -460,10 +507,150 @@ fn every_problem_is_listed_bad_values_included() {
     .into_iter()
     .map(str::to_owned)
     .collect::<Vec<_>>();
-    assert_eq!(p.len(), 3, "one per table: {p:?}");
+    assert_eq!(p.len(), 3, "{p:?}");
     assert!(p[0].contains("source id \"a b\""));
     assert!(p[1].contains("discovery.rate_hz"));
     assert!(p[2].contains("output: fps = 0"));
+}
+
+#[test]
+fn every_bad_key_of_a_table_is_listed_not_only_the_first() {
+    let c = synthetic(
+        "[[queries]]\nname = \"Band\"\nprompt = \"person\"\npresets = [\"wide\"]\n\
+         [[queries]]\nname = \"Host\"\nprompt = \"person\"\n\
+         [[queries]]\nname = \"Host\"\nprompt = \"speaker\"\n\
+         [discovery]\nrate_hz = 0.0\ntimeout_s = 0.0\n\
+         [output]\nwidth = 15\nvideo_bitrate_kbps = 50\nkeyframe_seconds = 30\n\
+         [monitors]\nwidth = 0\nthumb_rate_hz = 500.0\n",
+    );
+    let r = check_build(&c, &Fake::default().tool("/bin/ffmpeg"), false);
+    let p = problems(&r);
+    assert_eq!(p.len(), 9, "{p:#?}");
+    assert_eq!(
+        p[0],
+        "config: query \"Band\": preset \"wide\" is a wide; every source already has a \
+         wide shot"
+    );
+    assert_eq!(p[1], "config: duplicate query id \"host\"");
+    assert_eq!(
+        p[2..],
+        [
+            "config: discovery.rate_hz 0 must be in (0, 30]",
+            "config: discovery.timeout_s 0 must be in (0, 3600]",
+            "config: output: width = 15 is outside 16..=7680",
+            "config: output: video_bitrate_kbps = 50 is outside 100..=100000",
+            "config: output: keyframe_seconds = 30 is outside 1..=10",
+            "config: monitors.width 0 must be within 16..=3840",
+            "config: monitors.thumb_rate_hz 500 must be in 0..=120",
+        ]
+    );
+    let owl = file_studio(
+        "[detector]\nkind = \"owl\"\nmodel = \"/m.onnx\"\ntokenizer = \"/t.json\"\n\
+         input_size = 8\nscore_threshold = 2.0\n",
+    );
+    let p = owl.problems();
+    assert_eq!(
+        p,
+        [
+            "detector.input_size must be in 32..=4096",
+            "detector.score_threshold must be in 0..=1",
+        ]
+    );
+}
+
+#[test]
+fn a_source_its_opener_would_refuse_is_a_config_problem() {
+    let c = synthetic("");
+    let fake = Fake::default().tool("/bin/ffmpeg");
+    let mut bad = c.clone();
+    bad.sources[0].input = SourceConfig::Synthetic {
+        width: 0,
+        height: 360,
+        fps: 0.0,
+        subjects: 33,
+    };
+    let r = check_build(&bad, &fake, false);
+    assert_eq!(
+        problems(&r),
+        [
+            "config: source \"stage\": synthetic size 0x360 is outside 1..=8192",
+            "config: source \"stage\": synthetic fps 0 is not a usable frame rate (more than 0, \
+             at most 1000)",
+            "config: source \"stage\": 33 synthetic subjects, at most 32 allowed",
+        ]
+    );
+    assert!(bad.validate().is_err(), "a load fails too");
+    let mut edge = c.clone();
+    edge.sources[0].input = SourceConfig::Synthetic {
+        width: 8192,
+        height: 1,
+        fps: 29.97,
+        subjects: 32,
+    };
+    assert!(edge.problems().is_empty(), "{:?}", edge.problems());
+
+    let narrowed = |m: u32| file_studio(&format!("max_width = {m}\n")).problems();
+    assert_eq!(
+        narrowed(1),
+        ["source \"cam-1\": max_width must be at least 2, got 1"]
+    );
+    assert_eq!(narrowed(2), Vec::<String>::new());
+}
+
+/// The repository's example configs.
+const EXAMPLES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config");
+
+/// `rel` under the examples' folder, as the config's paths are resolved.
+fn example_path(rel: &str) -> String {
+    Path::new(EXAMPLES).join(rel).display().to_string()
+}
+
+#[test]
+fn every_example_config_is_ready_on_a_machine_with_its_files() {
+    let executable = Entry::File {
+        readable: true,
+        executable: true,
+    };
+    let python_home = "/opt/homebrew/opt/python@3.12/bin";
+    let cfg = example_path("../models/sam3/.venv/pyvenv.cfg");
+    let mut fake = Fake::default()
+        .tool("/bin/ffmpeg")
+        .tool("/bin/ffprobe")
+        .file(&example_path("../media/rehearsal.mp4"))
+        .file(&example_path("../models/owlv2-split-onnx/detector.onnx"))
+        .file(&example_path(
+            "../models/owlv2-split-onnx/text_encoder.onnx",
+        ))
+        .file(&example_path("../models/owlv2-split-onnx/tokenizer.json"))
+        .at(&example_path("../models/sam3/.venv/bin/python"), executable)
+        .file(&cfg)
+        .dir(python_home)
+        .file(&example_path("../sidecars/sam3-mlx/server.py"))
+        .dir(&example_path("../models/sam31-mlx"))
+        .dir("recordings");
+    fake.texts.insert(
+        cfg.into(),
+        format!("home = {python_home}\nversion = 3.12.4\n"),
+    );
+    for name in [
+        "demo.toml",
+        "file-source.example.toml",
+        "sam3-sidecar.example.toml",
+    ] {
+        let loaded = StudioConfig::read_file(&Path::new(EXAMPLES).join(name)).unwrap();
+        assert_eq!(loaded.warnings, Vec::<String>::new(), "{name}");
+        let config = with_ffmpeg(loaded.config);
+        let r = check_build(&config, &fake, true);
+        assert!(r.is_ready(), "{name}: {:#?}", problems(&r));
+        if let Some(record) = &config.output.record_path {
+            assert!(
+                record.starts_with("recordings"),
+                "{name}: a recording lands in the working folder's recordings, as the \
+                 README says: {}",
+                record.display()
+            );
+        }
+    }
 }
 
 #[test]

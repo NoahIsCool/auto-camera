@@ -10,21 +10,27 @@
 //! into a show. The check asks about all of them before the show and lists
 //! every answer ([`check`]):
 //!
-//! * **the config**: its schema (a missing key is a warning) and every
-//!   problem in its values ([`StudioConfig::problems`]);
+//! * **the config**: its schema (a missing key is a warning) and the
+//!   problems in its values ([`StudioConfig::problems`]: every bad key of
+//!   the engine's own tables and of each source, the first of each table
+//!   another crate checks);
 //! * **sources**: each file source's video is a readable file;
 //! * **ffmpeg**: `output.ffmpeg -version` runs, and with file sources so do
-//!   the ffmpeg and ffprobe they decode with (`AC_FFMPEG`, `AC_FFPROBE`);
+//!   the ffmpeg and ffprobe they decode with (`AC_FFMPEG`, `AC_FFPROBE`).
+//!   Like the program itself, the check runs a tool as named: a bare name
+//!   from `PATH`, a relative path from the working folder;
 //! * **the detector's files**: OWL's model, text encoder and tokenizer are
 //!   readable files, in a build with the `onnx` feature; a sidecar's
 //!   program is found and executable (in a venv, a link that still points
 //!   somewhere and a base Python whose folder, `pyvenv.cfg`'s `home`, is
 //!   still there) and every path in its command exists and is readable;
 //! * **the recording**: `output.record_path` does not exist yet (recordings
-//!   are never overwritten) and its folder takes a new file. Unlike the
-//!   config's other paths, a relative recording path is taken from the
-//!   working folder, as it is when the output starts, so it is checked
-//!   there.
+//!   are never overwritten) and its folder takes a new file. Like
+//!   `output.ffmpeg` and unlike the config's other paths, a relative
+//!   recording path is taken from the working folder, as it is when the
+//!   output starts, so it is checked there;
+//! * **the RTMP URL**: shown, its stream key redacted, once its form passes
+//!   (a bad form is a config problem).
 //!
 //! The check opens no camera, source or model, starts no sidecar, contacts
 //! no RTMP server and runs nothing but the ffmpeg tools' `-version`; it
@@ -42,7 +48,9 @@
 //! # Invariants
 //!
 //! * Every finding names the key or the file it is about, so the operator
-//!   knows what to fix.
+//!   knows what to fix, and a problem is reported once: a value the config
+//!   check refuses (an empty `output.ffmpeg` or sidecar program, an RTMP
+//!   URL of the wrong form) gets no finding of its own after that.
 //! * A file that cannot be read or parsed yields that one problem and
 //!   nothing else, since nothing in it can be trusted; a config that
 //!   parses but has bad values is still inspected, so one run shows the
@@ -342,6 +350,8 @@ impl Checker<'_> {
                 what.insert_str(0, "output.ffmpeg and ");
                 *hint = "output.ffmpeg or AC_FFMPEG";
             }
+            // An empty path is a config problem already.
+            None if output.as_os_str().is_empty() => {}
             None => tools.push((
                 "output.ffmpeg".into(),
                 output.clone(),
@@ -349,11 +359,11 @@ impl Checker<'_> {
             )),
         }
         for (what, tool, hint) in tools {
+            let shown = tool_shown(&tool);
             match self.inspector.version(&tool) {
-                Ok(version) => self.ok(format!("{what}: {} runs ({version})", tool.display())),
+                Ok(version) => self.ok(format!("{what}: {shown} runs ({version})")),
                 Err(why) => self.problem(format!(
-                    "{what}: {} does not run: {why}; install ffmpeg, or name it with {hint}",
-                    tool.display()
+                    "{what}: {shown} does not run: {why}; install ffmpeg, or name it with {hint}"
                 )),
             }
         }
@@ -461,6 +471,7 @@ impl Checker<'_> {
             .rtmp_url
             .as_deref()
             .filter(|u| !u.trim().is_empty())
+            .filter(|u| ac_output::config::validate_rtmp_url(u).is_ok())
         {
             self.ok(format!(
                 "output.rtmp_url: {} (its form is checked; the server is not contacted)",
@@ -507,6 +518,17 @@ impl Checker<'_> {
             Entry::Unknown(why) => self.problem(format!("{what}: cannot look at {shown}: {why}")),
             _ => self.problem(format!("{what}: {shown} is not a folder")),
         }
+    }
+}
+
+/// How a tool at `path` is shown: a relative path with a folder in it
+/// marked as taken from the working folder; an absolute path, or a bare
+/// name (looked up on `PATH`), as it is.
+fn tool_shown(path: &Path) -> String {
+    if path.is_relative() && path.components().count() > 1 {
+        format!("{} (from the working folder)", path.display())
+    } else {
+        path.display().to_string()
     }
 }
 

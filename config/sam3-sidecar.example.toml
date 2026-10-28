@@ -131,5 +131,6 @@ fps = 30
 audio_source = "cam-1"
 # rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
 # Unlike the paths above, a relative recording path is taken from the
-# working folder, as one typed at Start Output is; `--check` says where.
-record_path = "../recordings/sam3-sidecar.mp4"
+# working folder (the repository root, run as above), as one typed at Start
+# Output is; so is a relative `ffmpeg` path. `--check` says where.
+record_path = "recordings/sam3-sidecar.mp4"

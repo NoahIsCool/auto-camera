@@ -113,8 +113,10 @@ auto-camera [--config PATH] --check
 ```
 
 `--check` finds what would stop a studio before a show, without starting
-it. It lists every problem in the config's values (all of them, not the
-first), and looks at everything the config names: each file source's video,
+it. It lists the problems in the config's values, all of them rather than
+the first (the `lexicon`, `tracker`, `framing`, `subjects` and `director`
+tables, which the crates that use them check, give their first problem
+each), and looks at everything the config names: each file source's video,
 the ffmpeg tools (`-version` of the output's ffmpeg, and of the ffmpeg and
 ffprobe file sources decode with), the detector's model files (and that an
 OWL detector is in the build), the sidecar's program, its venv (a python
@@ -123,7 +125,8 @@ command, and that `output.record_path` does not exist yet, in a folder that
 takes new files. It opens no camera, source or model, starts no sidecar and
 contacts no RTMP server: it runs nothing but the ffmpeg tools' `-version`,
 and writes nothing but an empty probe file in the recording folder, removed
-at once. Each finding is one line:
+at once. Each finding starts a line of its own (a longer message, such as a
+parse error's excerpt of the file, goes on indented under it):
 
 ```text
 Checking config/sam3-sidecar.example.toml
@@ -134,7 +137,7 @@ Checking config/sam3-sidecar.example.toml
   problem  detector.command[0]: config/../models/sam3/.venv/bin/python does not exist; make the sidecar's venv as its README says
   ok       detector.command[1]: config/../sidecars/sam3-mlx/server.py is readable
   problem  detector.command[5]: config/../models/sam31-mlx does not exist
-  problem  output.record_path: folder ../recordings (from the working folder) does not exist (starting the output does not create it)
+  problem  output.record_path: folder recordings (from the working folder) does not exist (starting the output does not create it)
 4 problems found; fix them and check again.
 ```
 
@@ -151,8 +154,9 @@ stderr and in the window's status bar to add it; a newer or unknown schema
 is an error that says which one this build reads, so an older build never
 half-reads a newer file. Every section but `sources` is optional, unknown
 keys are errors, and relative paths are resolved against the config file's
-directory, except `output.record_path`, which, like a path typed at Start
-Output, is taken from the working folder. A studio fed by a local video
+directory, except `output.ffmpeg` and `output.record_path`, which, like a
+path typed at Start Output, are taken from the working folder (a bare
+`ffmpeg` from `PATH`). A studio fed by a local video
 file ([`config/file-source.example.toml`](config/file-source.example.toml)):
 
 ```toml
@@ -196,7 +200,7 @@ height = 720
 fps = 30
 audio_source = "cam-1"       # program audio from this source
 # rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
-record_path = "../recordings/show.mp4"
+record_path = "recordings/show.mp4"
 ```
 
 Further sections tune the `tracker`, `subjects` (limits and lost/retire

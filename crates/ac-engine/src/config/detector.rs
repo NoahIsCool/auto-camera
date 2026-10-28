@@ -118,15 +118,20 @@ impl DetectorSettings {
         matches!(self, DetectorSettings::Sidecar(_))
     }
 
-    /// Checks scores and sizes.
+    /// Checks scores and sizes, failing on the first of [`Self::problems`].
     pub fn validate(&self) -> Result<(), String> {
+        self.problems().into_iter().next().map_or(Ok(()), Err)
+    }
+
+    /// Every score and size out of range, each message naming its key.
+    pub fn problems(&self) -> Vec<String> {
         match self {
-            DetectorSettings::None => Ok(()),
+            DetectorSettings::None => Vec::new(),
             DetectorSettings::Synthetic { score } => {
                 if *score > 0.0 && *score <= 1.0 {
-                    Ok(())
+                    Vec::new()
                 } else {
-                    Err(format!("detector.score {score} must be in (0, 1]"))
+                    vec![format!("detector.score {score} must be in (0, 1]")]
                 }
             }
             DetectorSettings::Owl {
@@ -135,18 +140,19 @@ impl DetectorSettings {
                 person_threshold,
                 ..
             } => {
+                let mut out = Vec::new();
                 if input_size.is_some_and(|s| !(32..=4096).contains(&s)) {
-                    return Err("detector.input_size must be in 32..=4096".into());
+                    out.push("detector.input_size must be in 32..=4096".into());
                 }
                 if score_threshold.is_some_and(|t| !(0.0..=1.0).contains(&t)) {
-                    return Err("detector.score_threshold must be in 0..=1".into());
+                    out.push("detector.score_threshold must be in 0..=1".into());
                 }
                 if person_threshold.is_some_and(|t| !(0.0..=1.0).contains(&t)) {
-                    return Err("detector.person_threshold must be in 0..=1".into());
+                    out.push("detector.person_threshold must be in 0..=1".into());
                 }
-                Ok(())
+                out
             }
-            DetectorSettings::Sidecar(s) => s.validate(),
+            DetectorSettings::Sidecar(s) => s.problems(),
         }
     }
 }

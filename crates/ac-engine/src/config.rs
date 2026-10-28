@@ -50,7 +50,8 @@
 //! crate defaults and unknown keys are rejected. Relative file paths
 //! (`sources[].path`, detector model paths and the path-like elements of a
 //! sidecar's `command`) are resolved against the directory of the config
-//! file.
+//! file; the output's two, `output.ffmpeg` and `output.record_path`, are
+//! taken as given, from the working folder (see [`OutputSettings`]).
 //!
 //! # Layout
 //!
@@ -98,7 +99,8 @@ use std::time::Duration;
 use ac_core::{Lexicon, Preset, Query, ShotSize};
 use ac_director::DirectorConfig;
 use ac_framing::FramerConfig;
-use ac_sources::SourceConfig;
+use ac_media::MediaError;
+use ac_sources::{FrameRate, SourceConfig, SyntheticPattern};
 use ac_subjects::StoreConfig;
 use ac_vision::TemplateTrackerConfig;
 use serde::{Deserialize, Serialize};
@@ -350,10 +352,14 @@ impl StudioConfig {
     }
 
     /// Every problem in the config, in the order checked: the schema, each
-    /// source, then one per table (a table's own check stops at its first
-    /// problem) and each check that spans tables. Empty when the config is
-    /// valid. Pure: it reads no file (whether the files it names exist is
-    /// the readiness check's question, [`crate::readiness`]).
+    /// source (its id, and the values its input's opener would refuse
+    /// before looking at any file), each query, then each table and each
+    /// check that spans tables. Empty when the config is valid. The tables
+    /// checked here list every bad key; those whose checks belong to the
+    /// crate that uses them (`lexicon`, `tracker`, `subjects`, `director`
+    /// and `framing`) give the first problem of each. Pure: it reads no file
+    /// (whether the files it names exist is the readiness check's question,
+    /// [`crate::readiness`]).
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         if self.schema != SCHEMA_VERSION {
@@ -376,6 +382,9 @@ impl StudioConfig {
             if !ids.insert(s.id.as_str()) {
                 out.push(format!("duplicate source id {:?}", s.id));
             }
+            for p in input_problems(&s.input) {
+                out.push(format!("source {:?}: {p}", s.id));
+            }
             if matches!(self.detector, DetectorSettings::Synthetic { .. })
                 && !matches!(s.input, SourceConfig::Synthetic { .. })
             {
@@ -385,34 +394,41 @@ impl StudioConfig {
                 ));
             }
         }
-        let mut note = |result: Result<(), String>| out.extend(result.err());
-        note(self.lexicon.validate().map_err(|e| format!("lexicon: {e}")));
-        note(self.build_queries().map(drop).map_err(invalid_message));
-        note(self.detector.validate());
-        note(self.discovery.validate());
+        out.extend(
+            self.lexicon
+                .validate()
+                .err()
+                .map(|e| format!("lexicon: {e}")),
+        );
+        out.extend(self.each_query().into_iter().filter_map(Result::err));
+        out.extend(self.detector.problems());
+        out.extend(self.discovery.problems());
         if let DetectorSettings::Sidecar(sidecar) = &self.detector
             && sidecar.request_timeout_s >= self.discovery.timeout_s
         {
-            note(Err(format!(
+            out.push(format!(
                 "detector.request_timeout_s ({} s) must be below discovery.timeout_s ({} s), \
                  after which the engine abandons a request",
                 sidecar.request_timeout_s, self.discovery.timeout_s
-            )));
+            ));
         }
-        note(self.tracker.validate().map_err(|e| format!("tracker: {e}")));
-        note(self.store_config().map(drop).map_err(invalid_message));
-        note(self.director_config().map(drop).map_err(invalid_message));
-        note(validate_framing(&self.framing));
-        note(self.switcher.validate());
-        note(self.output.validate());
+        out.extend(
+            self.tracker
+                .validate()
+                .err()
+                .map(|e| format!("tracker: {e}")),
+        );
+        out.extend(self.store_config().err().map(invalid_message));
+        out.extend(self.director_config().err().map(invalid_message));
+        out.extend(validate_framing(&self.framing).err());
+        out.extend(self.switcher.validate().err());
+        out.extend(self.output.problems());
         if let Some(audio) = &self.output.audio_source
             && !ids.contains(audio.as_str())
         {
-            note(Err(format!(
-                "output.audio_source {audio:?} is not a source id"
-            )));
+            out.push(format!("output.audio_source {audio:?} is not a source id"));
         }
-        note(self.monitors.validate());
+        out.extend(self.monitors.problems());
         out
     }
 
@@ -437,27 +453,32 @@ impl StudioConfig {
     /// studio's [`PromptReader`] (its lexicon and its detector); fails on
     /// the first invalid or duplicate query.
     pub fn build_queries(&self) -> Result<Vec<Query>, ConfigError> {
+        self.each_query()
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .map_err(ConfigError::Invalid)
+    }
+
+    /// Each query in config order, built as [`Self::build_queries`] builds
+    /// it, or why it cannot be: an invalid id, a prompt or preset it
+    /// refuses, or an id an earlier query has.
+    fn each_query(&self) -> Vec<Result<Query, String>> {
         let reader = PromptReader::of(self);
         let mut ids = HashSet::new();
-        let mut out = Vec::new();
-        for q in &self.queries {
-            let id = q.query_id();
-            if !valid_id(&id.0) {
-                return Err(ConfigError::Invalid(format!(
-                    "query id {:?} is not a valid id",
-                    id.0
-                )));
-            }
-            let query = q.build(&reader).map_err(ConfigError::Invalid)?;
-            if !ids.insert(id.0.clone()) {
-                return Err(ConfigError::Invalid(format!(
-                    "duplicate query id {:?}",
-                    id.0
-                )));
-            }
-            out.push(query);
-        }
-        Ok(out)
+        self.queries
+            .iter()
+            .map(|q| {
+                let id = q.query_id();
+                if !valid_id(&id.0) {
+                    return Err(format!("query id {:?} is not a valid id", id.0));
+                }
+                let query = q.build(&reader)?;
+                if !ids.insert(id.0.clone()) {
+                    return Err(format!("duplicate query id {:?}", id.0));
+                }
+                Ok(query)
+            })
+            .collect()
     }
 
     /// The subject store tuning, validated. Without `subjects.min_score` the
@@ -496,6 +517,54 @@ fn invalid_message(e: ConfigError) -> String {
         ConfigError::Invalid(message) => message,
         other => other.to_string(),
     }
+}
+
+/// What the opener of `input` would refuse before looking at any file: a
+/// synthetic pattern's size, rate and subject count, against the limits
+/// [`SyntheticPattern::new`] applies, and a file's `max_width`, by
+/// [`ac_sources::output_size`] itself. So a load and `--check` catch them,
+/// not only a start. Whether the file is there is the readiness check's
+/// question.
+fn input_problems(input: &SourceConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    match input {
+        SourceConfig::File { max_width, .. } => {
+            // Any picture will do: only `max_width` is in question.
+            if let Err(e) = ac_sources::output_size((2, 2), *max_width) {
+                out.push(match e {
+                    MediaError::Open(why) => why,
+                    other => other.to_string(),
+                });
+            }
+        }
+        SourceConfig::Synthetic {
+            width,
+            height,
+            fps,
+            subjects,
+        } => {
+            let side = 1..=SyntheticPattern::MAX_SIDE;
+            if !side.contains(width) || !side.contains(height) {
+                out.push(format!(
+                    "synthetic size {width}x{height} is outside 1..={}",
+                    SyntheticPattern::MAX_SIDE
+                ));
+            }
+            if FrameRate::from_f64(*fps).is_none() {
+                out.push(format!(
+                    "synthetic fps {fps} is not a usable frame rate (more than 0, at most {})",
+                    FrameRate::MAX_FPS
+                ));
+            }
+            if *subjects > SyntheticPattern::MAX_SUBJECTS {
+                out.push(format!(
+                    "{subjects} synthetic subjects, at most {} allowed",
+                    SyntheticPattern::MAX_SUBJECTS
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// True for non-empty ids of ASCII letters, digits, `-` and `_`.

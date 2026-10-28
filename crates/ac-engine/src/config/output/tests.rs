@@ -44,6 +44,26 @@ fn a_keyframe_interval_the_encoder_refuses_fails_at_load() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn every_bad_value_in_the_table_is_listed() {
+    let text = studio("keyframe_seconds = 30\nvideo_bitrate_kbps = 50\naudio_bitrate_kbps = 1");
+    let c = StudioConfig::parse(&text, false).unwrap();
+    assert_eq!(
+        c.problems(),
+        [
+            "output: video_bitrate_kbps = 50 is outside 100..=100000",
+            "output: keyframe_seconds = 30 is outside 1..=10",
+            "output: audio_bitrate_kbps = 1 is outside 32..=512",
+        ]
+    );
+    assert_eq!(
+        c.output.validate(),
+        Err("output: video_bitrate_kbps = 50 is outside 100..=100000".into()),
+        "a load fails on the first"
+    );
+    assert!(OutputSettings::default().problems().is_empty());
+}
+
 /// A named change to valid settings and whether the encoder takes it.
 type Case = (&'static str, fn(&mut OutputSettings), bool);
 

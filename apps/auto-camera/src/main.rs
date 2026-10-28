@@ -13,7 +13,7 @@
 //!   time, optionally recording program, and prints a JSON summary, for
 //!   demos, CI and soak tests.
 //!
-//! - **Check** (`--check`, [`check`]): starts nothing; lists every problem
+//! - **Check** (`--check`, [`check`]): starts nothing; lists the problems
 //!   with the config and the files, tools and folders it names, so a show
 //!   does not find them at its start.
 //!

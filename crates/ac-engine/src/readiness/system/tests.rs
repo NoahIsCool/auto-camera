@@ -137,6 +137,66 @@ fn a_hung_tool_is_killed_at_the_deadline() {
     );
 }
 
+/// True once the process `pid` is gone or a zombie (killed, awaiting a
+/// reaper that may never come in a container), within five seconds.
+#[cfg(unix)]
+fn ends(pid: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .expect("ps runs");
+        let stat = String::from_utf8_lossy(&out.stdout);
+        if stat.trim().is_empty() || stat.trim_start().starts_with('Z') {
+            return true;
+        }
+        thread::sleep(POLL);
+    }
+    false
+}
+
+#[test]
+#[cfg(unix)]
+fn a_wrapper_is_stopped_at_the_deadline_with_what_it_started() {
+    let dir = scratch("wrapper");
+    let timeout = Duration::from_millis(300);
+    // The shell forks `sleep`, which holds the output after the shell dies.
+    let started = Instant::now();
+    let msg = sh("sleep 30; :", timeout).unwrap_err();
+    assert!(msg.contains("did not finish within 0.3 s"), "{msg}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "returned at the deadline, after {:?}",
+        started.elapsed()
+    );
+    let pid_file = dir.join("pid");
+    let msg = sh(
+        &format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+        timeout,
+    )
+    .unwrap_err();
+    assert!(msg.contains("did not finish"), "{msg}");
+    let pid = fs::read_to_string(&pid_file).unwrap();
+    assert!(ends(pid.trim()), "the wrapper's child {pid} was killed");
+    // A tool that exits at once but leaves a child holding its output is
+    // not waited for either.
+    let started = Instant::now();
+    let msg = sh(
+        &format!(
+            "echo 'ffmpeg version 7.1'; sleep 30 & echo $! > '{}'",
+            pid_file.display()
+        ),
+        timeout,
+    )
+    .unwrap_err();
+    assert!(msg.contains("did not finish"), "{msg}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let pid = fs::read_to_string(&pid_file).unwrap();
+    assert!(ends(pid.trim()), "the tool's child {pid} was killed");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn the_real_ffmpeg_reports_its_version() {
     let tools = FfmpegTools::from_env();
