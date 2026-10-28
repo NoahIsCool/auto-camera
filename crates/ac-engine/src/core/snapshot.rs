@@ -100,6 +100,14 @@ impl EngineCore {
             reason: self.decision.reason.clone(),
             reason_text: self.decision.reason.to_string(),
             takes: self.director_takes,
+            takeover: config.takeover,
+            pause: config.pause,
+            paused: self.director.paused(self.now),
+            skip: config.skip,
+            skipped: self.director.skipped(self.now),
+            preview_held: self.preview_hold.clone(),
+            held_back: self.held_back,
+            last_held_back: self.last_held_back.clone(),
         };
         let now = self.now;
         let sources = self

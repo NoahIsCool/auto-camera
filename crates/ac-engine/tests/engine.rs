@@ -51,7 +51,10 @@ fn cut_and_auto_change_program() {
         shot: shot("stage/wide"),
     })
     .unwrap();
-    h.send(EngineCommand::Cut).unwrap();
+    h.send(EngineCommand::Cut {
+        preview: Some(shot("stage/wide")),
+    })
+    .unwrap();
     let snap = h
         .wait_until(WAIT, |s| s.switcher.program == Some(shot("stage/wide")))
         .unwrap();
@@ -60,7 +63,10 @@ fn cut_and_auto_change_program() {
         shot: shot("stage/1/medium"),
     })
     .unwrap();
-    h.send(EngineCommand::Auto).unwrap();
+    h.send(EngineCommand::Auto {
+        preview: Some(shot("stage/1/medium")),
+    })
+    .unwrap();
     let snap = h
         .wait_until(WAIT, |s| {
             s.switcher.program == Some(shot("stage/1/medium")) && !s.switcher.in_transition
@@ -82,7 +88,7 @@ fn invalid_commands_are_answered_with_errors() {
         Err(CommandError::UnknownShot(shot("nope")))
     );
     assert_eq!(
-        h.send(EngineCommand::Auto),
+        h.send(EngineCommand::Auto { preview: None }),
         Err(CommandError::Switch(SwitchError::NoPreview))
     );
     assert_eq!(
@@ -105,7 +111,7 @@ fn invalid_commands_are_answered_with_errors() {
     );
     engine.shutdown().unwrap();
     assert!(matches!(
-        h.send(EngineCommand::Cut),
+        h.send(EngineCommand::Cut { preview: None }),
         Err(CommandError::Unavailable(_))
     ));
 }
@@ -119,7 +125,10 @@ fn protected_subjects_are_not_retired_until_they_leave_the_air() {
         shot: shot("stage/1/close"),
     })
     .unwrap();
-    h.send(EngineCommand::Cut).unwrap();
+    h.send(EngineCommand::Cut {
+        preview: Some(shot("stage/1/close")),
+    })
+    .unwrap();
     h.send(EngineCommand::RemoveQuery {
         query: QueryId("person".into()),
     })
@@ -137,7 +146,10 @@ fn protected_subjects_are_not_retired_until_they_leave_the_air() {
         shot: shot("stage/wide"),
     })
     .unwrap();
-    h.send(EngineCommand::Cut).unwrap();
+    h.send(EngineCommand::Cut {
+        preview: Some(shot("stage/wide")),
+    })
+    .unwrap();
     h.send(EngineCommand::SetPreview {
         shot: shot("stage/wide"),
     })
@@ -209,7 +221,10 @@ fn snapshots_carry_monitors_tiles_sources_and_timing() {
         shot: shot("stage/wide"),
     })
     .unwrap();
-    h.send(EngineCommand::Cut).unwrap();
+    h.send(EngineCommand::Cut {
+        preview: Some(shot("stage/wide")),
+    })
+    .unwrap();
     h.send(EngineCommand::SetPreview {
         shot: shot("stage/1/close"),
     })

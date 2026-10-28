@@ -286,7 +286,10 @@ mod unix {
                 shot: ShotId("stage/wide".into()),
             })
             .unwrap();
-            h.send(EngineCommand::Cut).unwrap();
+            h.send(EngineCommand::Cut {
+                preview: Some(ShotId("stage/wide".into())),
+            })
+            .unwrap();
             h.send(EngineCommand::StartOutput {
                 rtmp_url: None,
                 record_path: Some(path.clone()),

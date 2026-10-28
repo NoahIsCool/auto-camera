@@ -16,7 +16,7 @@ use std::time::Duration;
 use ac_core::{
     ParsedPrompt, Preset, QueryId, Rect, ShotId, ShotSize, SourceId, SubjectId, TrackState,
 };
-use ac_director::{CandidateKind, ContentProfile, DirectorMode, Reason};
+use ac_director::{CandidateKind, ContentProfile, DirectorMode, Reason, Takeover};
 use ac_media::{SourceState, VideoFrame};
 use ac_output::EncoderStats;
 use ac_switcher::{Queued, SwitchError, Transition};
@@ -192,6 +192,27 @@ pub struct DirectorView {
     pub reason_text: String,
     /// Takes the director requested so far.
     pub takes: u64,
+    /// What the operator's own switching does in Auto mode.
+    pub takeover: Takeover,
+    /// How long each manual action holds auto-takes with
+    /// [`Takeover::Pause`].
+    pub pause: Duration,
+    /// Time left of a pause of auto-takes the operator's switching started;
+    /// `None` when not paused (always outside Auto mode).
+    pub paused: Option<Duration>,
+    /// How long a skipped shot stays out of the suggestions.
+    pub skip: Duration,
+    /// The shots skipped and still left out, each with the time left of
+    /// its window.
+    pub skipped: Vec<(ShotId, Duration)>,
+    /// The shot the operator staged, which holds preview against the
+    /// director's suggestions until it is taken or released
+    /// ([`crate::core`]'s directing rules).
+    pub preview_held: Option<ShotId>,
+    /// Suggestions the director did not stage because of that hold.
+    pub held_back: u64,
+    /// The newest of them.
+    pub last_held_back: Option<ShotId>,
 }
 
 /// How a source's newest discovery request ended, so the window can tell

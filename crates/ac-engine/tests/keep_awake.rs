@@ -52,8 +52,12 @@ fn start_recording(record: &Path) -> (Engine, PathBuf) {
         .expect("the source delivers frames");
     assert_eq!(snap.output.keep_awake, KeepAwakeState::Idle);
     assert!(!record.exists(), "held before the output started");
-    h.send(EngineCommand::SetPreview { shot: wide }).unwrap();
-    h.send(EngineCommand::Cut).unwrap();
+    h.send(EngineCommand::SetPreview { shot: wide.clone() })
+        .unwrap();
+    h.send(EngineCommand::Cut {
+        preview: Some(wide),
+    })
+    .unwrap();
     let path = temp_path("awake.mp4");
     h.send(EngineCommand::StartOutput {
         rtmp_url: None,

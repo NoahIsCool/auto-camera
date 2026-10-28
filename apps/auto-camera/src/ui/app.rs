@@ -6,8 +6,13 @@
 //! command the operator asked for. Commands are posted, not sent: their
 //! replies are polled on later frames ([`OperatorApp::poll`]), so a slow
 //! command never freezes the window, and the notices they deserve go to
-//! the console with the next frame ([`super::notices`]). The window
-//! repaints at about the monitor rate while the engine runs.
+//! the console with the next frame ([`super::notices`]). Once no reply is
+//! outstanding, the app tells the console from which snapshot tick on
+//! everything it sent shows ([`Console::answered`]): the engine applies
+//! commands at the start of a tick and publishes that tick's snapshot at
+//! its end, so the snapshot read after the last reply may still predate
+//! them, but the next tick's cannot. The window repaints at about the
+//! monitor rate while the engine runs.
 //!
 //! An output session the engine cannot hold awake (no `caffeinate` on this
 //! platform, or one that cannot start or ends early) is noted on stderr
@@ -117,8 +122,12 @@ impl OperatorApp {
         if quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        let snap = self.handle.snapshot();
         let raised = self.poll();
+        // Read after the replies arrived (see the module docs).
+        let snap = self.handle.snapshot();
+        if self.pending.is_empty() {
+            self.console.answered(snap.tick + 1);
+        }
         if let Some(note) = self.awake.note(&snap.output.keep_awake) {
             (self.log)(&note);
         }
@@ -299,6 +308,146 @@ mod tests {
         assert_eq!(notes.borrow().len(), 1, "{:?}", notes.borrow());
         app.shutdown();
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// A studio of synthetic sources named `ids` without subjects, so its
+    /// shots are their wides ("a/wide", ...), small, without monitors and
+    /// with the director off.
+    fn wides(ids: &[&str]) -> StudioConfig {
+        let source = SourceConfig::Synthetic {
+            width: 160,
+            height: 90,
+            fps: 30.0,
+            subjects: 0,
+        };
+        let mut config = StudioConfig::with_source(ids[0], source);
+        for id in &ids[1..] {
+            let mut entry = config.sources[0].clone();
+            entry.id = (*id).into();
+            config.sources.push(entry);
+        }
+        config.output.width = 160;
+        config.output.height = 90;
+        config.director.mode = ac_director::DirectorMode::Off;
+        config.monitors = MonitorSettings::disabled();
+        config
+    }
+
+    /// An app on an engine started from `config` in real time (see
+    /// [`start`]), once every wide is available.
+    fn start_app(config: &StudioConfig) -> OperatorApp {
+        let engine = Engine::start_with(config.clone(), EngineOptions::default()).unwrap();
+        engine
+            .handle()
+            .wait_until(Duration::from_secs(10), |s| {
+                s.shots.len() == config.sources.len() && s.shots.iter().all(|w| w.available)
+            })
+            .expect("the sources deliver frames");
+        OperatorApp::new(engine, config)
+    }
+
+    /// Draws one frame with `keys` pressed.
+    fn frame_with(app: &mut OperatorApp, ctx: &egui::Context, keys: &[egui::Key]) {
+        let events = keys
+            .iter()
+            .map(|&key| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            })
+            .collect();
+        let input = egui::RawInput {
+            events,
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(input, |ui| app.frame(ui));
+    }
+
+    #[test]
+    fn a_frame_drawn_before_the_engine_applies_a_key_still_cuts_the_staged_shot() {
+        let config = wides(&["a", "b"]);
+        let mut app = start_app(&config);
+        let (a, b) = (ShotId("a/wide".into()), ShotId("b/wide".into()));
+        app.handle
+            .send(EngineCommand::SetPreview { shot: a.clone() })
+            .unwrap();
+        app.handle
+            .send(EngineCommand::Cut {
+                preview: Some(a.clone()),
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        frame_with(&mut app, &ctx, &[]);
+        // Key 2 stages "b", and the next frame is drawn at once, almost
+        // always from a snapshot older than the staging: the engine applies
+        // commands only on its next tick.
+        frame_with(&mut app, &ctx, &[egui::Key::Num2]);
+        frame_with(&mut app, &ctx, &[]);
+        app.handle
+            .wait_until(Duration::from_secs(10), |s| {
+                s.switcher.preview.as_ref() == Some(&b)
+            })
+            .expect("b staged");
+        // Space, pressed looking at that frame, takes "b".
+        frame_with(&mut app, &ctx, &[egui::Key::Space]);
+        settle(&mut app, &ctx);
+        let snap = app
+            .handle
+            .wait_until(Duration::from_secs(10), |s| {
+                s.switcher.program.as_ref() == Some(&b)
+            })
+            .expect("b cut to program");
+        assert_eq!(snap.switcher.preview, Some(a));
+        app.shutdown();
+    }
+
+    #[test]
+    fn a_staging_no_snapshot_shows_is_seen_until_the_engine_has_answered() {
+        // With the director setting, a director in Auto mode stages its own
+        // shot over the operator's on the very tick that applies it, so no
+        // snapshot ever shows the operator's shot.
+        let mut config = wides(&["a", "b", "c"]);
+        config.director.mode = ac_director::DirectorMode::Auto;
+        config.director.takeover = ac_director::Takeover::Director;
+        config.switcher.transition = ac_switcher::TransitionKind::Cut;
+        let mut app = start_app(&config);
+        let ctx = egui::Context::default();
+        let snap = app
+            .handle
+            .wait_until(Duration::from_secs(10), |s| {
+                s.switcher.program.is_some() && s.switcher.preview.is_some()
+            })
+            .expect("the director cuts a wide to program and stages another");
+        let theirs = snap.switcher.preview.clone();
+        let takes = snap.director.takes;
+        let mine = snap
+            .shots
+            .iter()
+            .position(|s| {
+                Some(&s.id) != snap.switcher.program.as_ref() && Some(&s.id) != theirs.as_ref()
+            })
+            .expect("a third wide");
+        let digits = [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3];
+        frame_with(&mut app, &ctx, &[]);
+        frame_with(&mut app, &ctx, &[digits[mine]]);
+        settle(&mut app, &ctx);
+        // Once the engine has answered and a later snapshot is drawn, the
+        // window takes what preview shows, the director's shot, as seen.
+        let answered = app.handle.snapshot().tick;
+        app.handle
+            .wait_until(Duration::from_secs(10), |s| s.tick > answered + 1)
+            .expect("the engine ticks");
+        frame_with(&mut app, &ctx, &[]);
+        frame_with(&mut app, &ctx, &[egui::Key::Space]);
+        settle(&mut app, &ctx);
+        let snap = app
+            .handle
+            .wait_until(Duration::from_secs(10), |s| s.switcher.program == theirs)
+            .expect("the cut went through");
+        assert_eq!(snap.director.takes, takes, "the cut was the operator's");
+        app.shutdown();
     }
 
     /// A file removed when dropped, so a failing test leaves no recording
