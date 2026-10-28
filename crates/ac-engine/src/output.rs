@@ -387,6 +387,7 @@ mod tests {
             exit_code: Some(0),
             last_error: None,
             progress: Default::default(),
+            stream: None,
         }
     }
 

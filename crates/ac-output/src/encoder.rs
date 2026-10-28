@@ -4,10 +4,12 @@
 //!
 //! [`ProgramEncoder::start`] validates the config, refuses to overwrite an
 //! existing recording, resolves the H.264 encoder from `ffmpeg -encoders`,
-//! binds the loopback audio listener (when audio is configured), spawns
-//! ffmpeg and starts four threads (video writer, audio writer, progress
-//! reader, stderr reader). The handle is assembled before the threads start,
-//! so a failure at any later step drops it and kills ffmpeg.
+//! asks `ffmpeg -h long` whether it can write mux statistics (when the
+//! encode streams; [`mux_stats_supported`]), binds the loopback audio
+//! listener (when audio is configured), spawns ffmpeg and starts four
+//! threads (video writer, audio writer, progress reader, stderr reader,
+//! which owns the stream monitor). The handle is assembled before the
+//! threads start, so a failure at any later step drops it and kills ffmpeg.
 //!
 //! The engine then calls [`ProgramEncoder::push_video`] exactly once per
 //! program tick and [`ProgramEncoder::push_audio`] with the matching audio;
@@ -41,9 +43,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::OutputError;
-use crate::args::build_ffmpeg_args;
+use crate::args::{build_ffmpeg_args, rtmp_slave_index};
 use crate::config::{Encoder, EncoderChoice, OutputConfig, choose_working_encoder};
 use crate::progress::Progress;
+use crate::stream::{StreamHealth, StreamMonitor, settle_time};
 use crate::transport::{
     self, AUDIO_ACCEPT_TIMEOUT, AUDIO_QUEUE_BLOCKS, Shared, VIDEO_QUEUE_FRAMES,
 };
@@ -95,12 +98,16 @@ pub struct EncoderStats {
     pub ffmpeg_alive: bool,
     /// ffmpeg's exit code once it has exited (`None` if killed by a signal).
     pub exit_code: Option<i32>,
-    /// Newest error line from ffmpeg or a pipe, stream key redacted. It is
-    /// not cleared when the condition passes (for example when a dropped
-    /// RTMP ingest reconnects), so read it together with the counters.
+    /// Newest error line from ffmpeg or a pipe, stream key redacted, as
+    /// `context: message`. When the stream reconnects, an error of the
+    /// stream is cleared (an older error of anything else shows again);
+    /// other errors stay, so read them together with the counters.
     pub last_error: Option<String>,
     /// Newest `-progress` report: encoded frames, fps, bitrate, speed.
     pub progress: Progress,
+    /// The stream's connection and bitrate, when the encode streams (see
+    /// the stream module); `Down` once ffmpeg has exited.
+    pub stream: Option<StreamHealth>,
 }
 
 /// A running program encode. See the module docs for the lifecycle.
@@ -159,6 +166,25 @@ pub fn detect_encoder(ffmpeg: &Path, requested: Encoder) -> Result<EncoderChoice
     choose_working_encoder(requested, &listing, cfg!(target_os = "macos"), || {
         encoder_works(ffmpeg, EncoderChoice::VideoToolbox)
     })
+}
+
+/// True when `ffmpeg` can write per-packet mux statistics
+/// (`-stats_mux_pre`, ffmpeg 6.1 and newer), from which the stream's
+/// bitrate is measured: its `-h long` listing names the option.
+pub fn mux_stats_supported(ffmpeg: &Path) -> bool {
+    Command::new(ffmpeg)
+        .args(["-hide_banner", "-h", "long"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|out| lists_option(&String::from_utf8_lossy(&out.stdout), "-stats_mux_pre"))
+}
+
+/// True when an ffmpeg help listing has a line for `option`, such as
+/// `-stats_mux_pre      write packets stats before muxing`.
+fn lists_option(help: &str, option: &str) -> bool {
+    help.lines()
+        .any(|line| line.split_whitespace().next() == Some(option))
 }
 
 /// Longest a test encode may take before it counts as failed.
@@ -237,7 +263,9 @@ impl ProgramEncoder {
             Some(l) => Some(format!("tcp://{}", l.local_addr()?)),
             None => None,
         };
-        let args = build_ffmpeg_args(&config, &encoder, audio_url.as_deref());
+        let streaming = config.rtmp_url.is_some();
+        let mux_stats = streaming && mux_stats_supported(&config.ffmpeg);
+        let args = build_ffmpeg_args(&config, &encoder, audio_url.as_deref(), mux_stats);
         let mut child = Command::new(&config.ffmpeg)
             .args(&args)
             .stdin(Stdio::piped())
@@ -278,9 +306,16 @@ impl ProgramEncoder {
         enc.threads.push(spawn("ac-output-progress", move || {
             transport::progress_reader(stdout, s, path)
         })?);
+        let monitor = streaming.then(|| {
+            let settle = settle_time(enc.config.fps, enc.config.audio.is_some());
+            StreamMonitor::new(settle, rtmp_slave_index(&enc.config))
+        });
+        if let Some(m) = monitor {
+            enc.shared.publish_stream(m);
+        }
         let (s, url) = (enc.shared.clone(), enc.config.rtmp_url.clone());
         enc.threads.push(spawn("ac-output-stderr", move || {
-            transport::stderr_reader(stderr, s, url)
+            transport::stderr_reader(stderr, s, url, monitor)
         })?);
         Ok(enc)
     }
@@ -305,7 +340,8 @@ impl ProgramEncoder {
         self.child.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// A snapshot of counters, ffmpeg's state and its newest progress report.
+    /// A snapshot of counters, ffmpeg's state, its newest progress report
+    /// and the stream's health at that report's media time.
     pub fn stats(&self) -> EncoderStats {
         let (ffmpeg_alive, exit_code) = match self.lock_child().try_wait() {
             Ok(None) => (true, None),
@@ -314,6 +350,10 @@ impl ProgramEncoder {
         };
         let s = &self.shared;
         let get = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
+        let progress = s.progress();
+        let stream = s
+            .stream()
+            .map(|m| m.health(progress.out_time, ffmpeg_alive, s.muxed_kbps()));
         EncoderStats {
             encoder: self.encoder,
             frames_in: get(&s.frames_in),
@@ -328,7 +368,8 @@ impl ProgramEncoder {
             ffmpeg_alive,
             exit_code,
             last_error: s.last_error(),
-            progress: s.progress(),
+            progress,
+            stream,
         }
     }
 }

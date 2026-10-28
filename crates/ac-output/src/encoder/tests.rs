@@ -83,3 +83,21 @@ fn relative_record_path_in_current_directory_is_allowed() {
     };
     check_record_path(&c).unwrap();
 }
+
+#[test]
+fn help_listings_are_searched_for_whole_options() {
+    let help = "Advanced per-stream options:\n\
+                -stats_enc_post     write encoding stats after encoding\n\
+                -stats_mux_pre      write packets stats before muxing\n\
+                -stats_mux_pre_fmt  format of the stats written with -stats_mux_pre\n";
+    assert!(lists_option(help, "-stats_mux_pre"));
+    assert!(lists_option(help, "-stats_mux_pre_fmt"));
+    // Named only in another option's description, or only as a prefix.
+    assert!(!lists_option(
+        "-other  see -stats_mux_pre\n",
+        "-stats_mux_pre"
+    ));
+    assert!(!lists_option("-stats_mux_pre_fmt  x\n", "-stats_mux_pre"));
+    assert!(!lists_option("", "-stats_mux_pre"));
+    assert!(!mux_stats_supported(&config().ffmpeg));
+}
