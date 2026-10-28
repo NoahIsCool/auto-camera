@@ -36,12 +36,11 @@
 //! * **Who a subject is**: the labelled person its box overlaps most,
 //!   whatever the query, since the picture shows that person. This
 //!   *identity* is what [`rest`] follows and what an on-air swap
-//!   ([`switching`]) changes.
-//! * **Whom a shot frames** ([`framing`]): its subject's identity; when
-//!   the box matches nobody (the tracker drifted, or the subject is held
-//!   after a loss), the person its subject last matched, if they are on
-//!   the keyframe: a held crop that lost them is scored as losing them,
-//!   not skipped.
+//!   ([`switching`]) changes. **Whom a shot frames** ([`framing`]) follows
+//!   from it: its subject's identity; when the box matches nobody (the
+//!   tracker drifted, or the subject is held after a loss), the person its
+//!   subject last matched, if they are on the keyframe: a held crop that
+//!   lost them is scored as losing them, not skipped.
 //!
 //! # On air
 //!

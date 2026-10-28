@@ -30,9 +30,22 @@
 //!   moves less than `rest_speed` crop widths (across) and crop heights
 //!   (down) per second and its log width and log height change slower
 //!   than `rest_speed` per second (C.4's dead-zone release speed). A hold
-//!   is a run of still intervals with motion on both sides; holds that
-//!   start or end a path are cut short by the trace and not counted
-//!   ([`holds`]).
+//!   is a run of still intervals with motion on both sides that the crop
+//!   stopped in rather than turned round in ([`holds`]). Holds that start
+//!   or end a path are cut short by the trace and not counted.
+//!
+//! # Turnarounds
+//!
+//! C.4's hold is the one *after settle*. A crop that follows a pacing
+//! speaker back and forth never settles, yet at each reversal its speed
+//! passes through zero, and for a tick or a few (more the slower the
+//! swing) it is still. A still run is therefore a *turnaround*, not a
+//! hold, when some rate (across, down, log width or log height) is
+//! faster than `rest_speed` on both the interval before it and the one
+//! after it, with opposite signs: the crop went back the way it came
+//! ([`turns_round`]). The samples cannot tell a smooth turn from a crop
+//! that stopped briefly and then went back, so neither is counted; a stop
+//! between two motions the same way, or on different axes, is a hold.
 //!
 //! Peaks and RMS values over no samples are not measurable: a path needs
 //! three samples for an acceleration, four for a jerk.
@@ -77,9 +90,13 @@ pub struct PathMotion {
     pub pan_speed: Vec<f64>,
     /// Zoom rates, natural-log crop widths per second.
     pub zoom_rate: Vec<f64>,
-    /// Interior static holds, seconds.
+    /// Interior static holds, turnarounds left out, seconds.
     pub holds: Vec<f64>,
 }
+
+/// A crop's signed rates over one interval, per second: centre across in
+/// crop widths, centre down in crop heights, log width, log height.
+pub type Rates = [f64; 4];
 
 /// Difference quotients of `samples` (time, value) at the midpoints of
 /// consecutive times; a pair whose time does not advance is skipped.
@@ -166,10 +183,28 @@ pub fn shot_paths(trace: &[TraceRecord], source: &SourceId) -> Vec<ShotPath> {
     done
 }
 
-/// The durations of the interior still runs of a path whose samples are
-/// at `times`, where `still[i]` says whether the crop was still from
-/// `times[i]` to `times[i + 1]`; see the module docs.
-pub fn holds(times: &[f64], still: &[bool]) -> Vec<f64> {
+/// Whether a crop moving at `rates` is still at `rest_speed`: every rate
+/// at most that fast.
+pub fn is_still(rates: &Rates, rest_speed: f64) -> bool {
+    rates.iter().all(|r| r.abs() <= rest_speed)
+}
+
+/// Whether a still run between intervals at `before` and `after` is a
+/// turnaround at `rest_speed`: some rate faster than it on both, with
+/// opposite signs; see the module docs.
+pub fn turns_round(before: &Rates, after: &Rates, rest_speed: f64) -> bool {
+    before
+        .iter()
+        .zip(after)
+        .any(|(b, a)| b.abs() > rest_speed && a.abs() > rest_speed && b.signum() != a.signum())
+}
+
+/// The durations of the holds of a path whose samples are at `times`,
+/// where `rates[i]` is how the crop moved from `times[i]` to
+/// `times[i + 1]`, with `rest_speed` the still threshold: its interior
+/// still runs that are not turnarounds; see the module docs.
+pub fn holds(times: &[f64], rates: &[Rates], rest_speed: f64) -> Vec<f64> {
+    let still: Vec<bool> = rates.iter().map(|r| is_still(r, rest_speed)).collect();
     let mut found = Vec::new();
     let mut i = 0;
     while i < still.len() {
@@ -182,8 +217,8 @@ pub fn holds(times: &[f64], still: &[bool]) -> Vec<f64> {
             i += 1;
         }
         // `start..i` is a maximal still run: interior when motion comes
-        // before it and after it.
-        if start > 0 && i < still.len() {
+        // before it and after it, and a hold unless the crop turned round.
+        if start > 0 && i < still.len() && !turns_round(&rates[start - 1], &rates[i], rest_speed) {
             found.push(times[i] - times[start]);
         }
     }
@@ -215,7 +250,7 @@ pub fn path_motion(
         .collect();
     let mut pan_speed = Vec::new();
     let mut zoom_rate = Vec::new();
-    let mut still = Vec::new();
+    let mut rates = Vec::new();
     for pair in state.windows(2) {
         let Some(&(_, [vx, vy, vw, vh])) = differentiate(pair).first() else {
             continue;
@@ -226,12 +261,7 @@ pub fn path_motion(
         let h = ((pair[0].1[3] + pair[1].1[3]) / 2.0).exp();
         pan_speed.push(vx.abs() / w);
         zoom_rate.push(vw.abs());
-        still.push(
-            vx.abs() / w <= rest_speed
-                && vy.abs() / h <= rest_speed
-                && vw.abs() <= rest_speed
-                && vh.abs() <= rest_speed,
-        );
+        rates.push([vx / w, vy / h, vw, vh]);
     }
     let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
     PathMotion {
@@ -239,7 +269,7 @@ pub fn path_motion(
         jerk: jerk.iter().map(magnitude).collect(),
         pan_speed,
         zoom_rate,
-        holds: holds(&times, &still),
+        holds: holds(&times, &rates, rest_speed),
     }
 }
 

@@ -7,15 +7,21 @@
 //!
 //! # Takes and stints
 //!
-//! The shot program is *headed for* on a tick is the preview shot while a
-//! transition runs (it is coming in, and neither bus can change before the
-//! transition ends) and the program shot otherwise ([`head`]). A *take* is
-//! a tick whose head differs from the previous tick's and is a shot
-//! ([`takes`]): a cut, the start of a mix or dip, a cut made during a
-//! transition. It runs *from* the previous head *to* the new one. A
-//! *stint* is a maximal run of ticks with one head ([`stints`]); it lasts
-//! from its first tick's PTS to the next tick's (the last tick's when the
-//! trace ends first, and the stint is then *open*).
+//! The shot program is *headed for* on a tick ([`heads`]) is the program
+//! shot between transitions. While a transition runs it is the preview
+//! shot, which is coming in (neither bus can change before the transition
+//! ends), unless the transition is *abandoned*: a run of ticks of one
+//! transition (one program and one preview shot) whose next tick still
+//! has the old program shot never changed program (the T-bar went back to
+//! the start, or a cut went back to the outgoing shot), and its head
+//! stays the program shot throughout. A transition still running when the
+//! trace ends is taken to complete. A *take* is a tick whose head differs
+//! from the previous tick's and is a shot ([`takes`]): a cut, the start of
+//! a mix or dip that completes, a cut made during a transition. It runs
+//! *from* the previous head *to* the new one. A *stint* is a maximal run of
+//! ticks with one head ([`stints`]); it lasts from its first tick's PTS to
+//! the next tick's (the last tick's when the trace ends first, and the
+//! stint is then *open*).
 //!
 //! * `switching.jump_cuts`: takes between two shots of one source whose
 //!   crops (the outgoing shot's on the tick before, the incoming one's on
@@ -33,11 +39,23 @@
 //!
 //! # Loss on program
 //!
-//! A shot is *available* on a tick when it exists, its source has a
+//! A shot is *available* on a tick when it exists, its source has a fresh
 //! frame, and (for a subject shot) its subject is listed and tracking
-//! ([`availability`]). A *loss* is a maximal run of ticks whose program
-//! shot is not available; it lasts until the first tick with an available
-//! program shot (or to the last tick, unresolved).
+//! ([`availability`]). A source's frame is *stale* once no new one has
+//! come for longer than `source_stale_s` of record PTS ([`stale_sources`]):
+//! a source that stops delivering (offline, reconnecting or frozen) keeps
+//! its last frame and subjects in the trace, and only its frame's sequence
+//! number standing still while the PTS runs on shows it. The engine marks
+//! such a source's shots unavailable the same way (M9's health guard,
+//! `ac_engine`'s `SOURCE_STALE_AFTER`, 1 s); it also does so at once for a
+//! source that reports itself offline, which the trace does not record,
+//! so the scorer sees that outage only when the frame goes stale. The
+//! trace cannot see before its first record, so each source's frame there
+//! counts as new.
+//!
+//! A *loss* is a maximal run of ticks whose program shot is not available;
+//! it lasts until the first tick with an available program shot (or to
+//! the last tick, unresolved).
 //!
 //! * `switching.time_unavailable_on_program`: the losses' total duration.
 //! * `switching.time_to_fall_back`: the longest loss, whatever ended it (a
@@ -61,16 +79,17 @@
 //! * Every metric here is a count or a duration, always measured: 0 over
 //!   no events, never not measurable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
-use ac_core::{ShotId, TrackState};
+use ac_core::{ShotId, SourceId, TrackState};
 
 use super::join::{Join, shot};
 use super::{Content, seconds_between};
 use crate::labels::TrackId;
 use crate::report::{Limit, Measure, Metric, TOLERANCE};
 use crate::thresholds::SwitchingLimits;
-use crate::trace::{ShotTrace, TraceRecord};
+use crate::trace::{FrameTag, ShotTrace, TraceRecord};
 
 /// A change of the shot program is headed for; see the module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,28 +126,51 @@ pub enum Availability {
     Available,
     /// Its subject is lost: the crop is held where it last was.
     Lost,
-    /// It does not exist, its source has no frame, or its subject is gone.
+    /// It does not exist, its source has no frame or a stale one, or its
+    /// subject is gone.
     Unavailable,
 }
 
-/// The shot program is headed for on `record`: the preview shot during a
-/// transition, else the program shot.
-pub fn head(record: &TraceRecord) -> Option<&ShotId> {
-    let s = &record.switcher;
-    if s.transition.is_some() {
-        s.preview.as_ref()
-    } else {
-        s.program.as_ref()
+/// Whether `next` runs the transition `record` runs: a transition with the
+/// same program and preview shots.
+fn same_transition(record: &TraceRecord, next: &TraceRecord) -> bool {
+    let (a, b) = (&record.switcher, &next.switcher);
+    b.transition.is_some() && a.program == b.program && a.preview == b.preview
+}
+
+/// The shot program is headed for on each record of `trace`; see the
+/// module docs.
+pub fn heads(trace: &[TraceRecord]) -> Vec<Option<&ShotId>> {
+    let mut found = Vec::with_capacity(trace.len());
+    let mut i = 0;
+    while i < trace.len() {
+        let s = &trace[i].switcher;
+        if s.transition.is_none() {
+            found.push(s.program.as_ref());
+            i += 1;
+            continue;
+        }
+        let first = i;
+        while i + 1 < trace.len() && same_transition(&trace[first], &trace[i + 1]) {
+            i += 1;
+        }
+        let abandoned = trace
+            .get(i + 1)
+            .is_some_and(|next| next.switcher.program == s.program);
+        let head = if abandoned { &s.program } else { &s.preview };
+        found.extend(std::iter::repeat_n(head.as_ref(), i + 1 - first));
+        i += 1;
     }
+    found
 }
 
 /// Every take of `trace`, in order.
 pub fn takes(trace: &[TraceRecord]) -> Vec<Take> {
-    trace
+    heads(trace)
         .windows(2)
         .enumerate()
         .filter_map(|(i, w)| {
-            let (before, now) = (head(&w[0]), head(&w[1])?);
+            let (before, now) = (w[0], w[1]?);
             (before != Some(now)).then(|| Take {
                 record: i + 1,
                 from: before.cloned(),
@@ -140,15 +182,16 @@ pub fn takes(trace: &[TraceRecord]) -> Vec<Take> {
 
 /// Every stint of `trace`, in order.
 pub fn stints(trace: &[TraceRecord]) -> Vec<Stint> {
+    let heads = heads(trace);
     let mut found = Vec::new();
     let mut i = 0;
     while i < trace.len() {
-        let Some(shot) = head(&trace[i]) else {
+        let Some(shot) = heads[i] else {
             i += 1;
             continue;
         };
         let first = i;
-        while i + 1 < trace.len() && head(&trace[i + 1]) == Some(shot) {
+        while i + 1 < trace.len() && heads[i + 1] == Some(shot) {
             i += 1;
         }
         let open = i + 1 == trace.len();
@@ -166,15 +209,46 @@ pub fn stints(trace: &[TraceRecord]) -> Vec<Stint> {
     found
 }
 
-/// Whether shot `id` can be shown on `record`; see the module docs.
-pub fn availability(record: &TraceRecord, id: &ShotId) -> Availability {
+/// For each record of `trace`, the sources whose frame is stale there,
+/// with no new frame for more than `stale_after_s` seconds of record PTS;
+/// see the module docs.
+pub fn stale_sources(trace: &[TraceRecord], stale_after_s: f64) -> Vec<BTreeSet<SourceId>> {
+    // Each source's newest frame and the PTS of the record that first had it.
+    let mut newest: BTreeMap<&SourceId, (FrameTag, Duration)> = BTreeMap::new();
+    trace
+        .iter()
+        .map(|record| {
+            record
+                .sources
+                .iter()
+                .filter_map(|source| {
+                    let frame = source.frame?;
+                    let (_, since) = newest
+                        .entry(&source.id)
+                        .and_modify(|seen| {
+                            if seen.0 != frame {
+                                *seen = (frame, record.pts);
+                            }
+                        })
+                        .or_insert((frame, record.pts));
+                    let age = seconds_between(*since, record.pts);
+                    (age > stale_after_s + TOLERANCE).then(|| source.id.clone())
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Whether shot `id` can be shown on `record`, where the sources in
+/// `stale` have a stale frame; see the module docs.
+pub fn availability(record: &TraceRecord, stale: &BTreeSet<SourceId>, id: &ShotId) -> Availability {
     let Some(shot) = shot(record, id) else {
         return Availability::Unavailable;
     };
     let Some(source) = record.sources.iter().find(|s| s.id == shot.source) else {
         return Availability::Unavailable;
     };
-    if source.frame.is_none() {
+    if source.frame.is_none() || stale.contains(&source.id) {
         return Availability::Unavailable;
     }
     let Some(subject) = shot.subject else {
@@ -193,23 +267,25 @@ pub fn is_jump_cut(from: &ShotTrace, to: &ShotTrace, max_iou: f64) -> bool {
     from.source == to.source && from.crop.iou(&to.crop) > max_iou
 }
 
-/// The losses on program in `trace`: (seconds, resolved) each.
-pub fn losses(trace: &[TraceRecord]) -> Vec<(f64, bool)> {
-    let lost = |r: &TraceRecord| {
+/// The losses on program in `trace`, where `stale[i]` holds the sources
+/// stale on record `i` ([`stale_sources`]): (seconds, resolved) each.
+pub fn losses(trace: &[TraceRecord], stale: &[BTreeSet<SourceId>]) -> Vec<(f64, bool)> {
+    let lost = |i: usize| {
+        let r = &trace[i];
         r.switcher
             .program
             .as_ref()
-            .is_some_and(|p| availability(r, p) != Availability::Available)
+            .is_some_and(|p| availability(r, &stale[i], p) != Availability::Available)
     };
     let mut found = Vec::new();
     let mut i = 0;
     while i < trace.len() {
-        if !lost(&trace[i]) {
+        if !lost(i) {
             i += 1;
             continue;
         }
         let first = i;
-        while i < trace.len() && lost(&trace[i]) {
+        while i < trace.len() && lost(i) {
             i += 1;
         }
         let resolved = i < trace.len();
@@ -248,6 +324,8 @@ fn on_air_swaps(join: &Join) -> u64 {
 /// Scores switching over `join` into `out`; see the module docs.
 pub(crate) fn score(join: &Join, limits: &SwitchingLimits, out: &mut Vec<Metric>) {
     let trace = join.trace;
+    let stale = stale_sources(trace, limits.source_stale_s);
+    let available = |i: usize, id: &ShotId| availability(&trace[i], &stale[i], id);
     let all_takes = takes(trace);
     let n_takes = all_takes.len() as u64;
     let jump_cuts = all_takes
@@ -274,11 +352,12 @@ pub(crate) fn score(join: &Join, limits: &SwitchingLimits, out: &mut Vec<Metric>
         Content::Talk => limits.min_dwell_talk_s,
         Content::Music => limits.min_dwell_music_s,
     };
+    let all_heads = heads(trace);
     let all_stints = stints(trace);
     let judged: Vec<&Stint> = all_stints
         .iter()
-        .filter(|s| s.taken && !s.open && head(&trace[s.last + 1]).is_some())
-        .filter(|s| availability(&trace[s.last], &s.shot) == Availability::Available)
+        .filter(|s| s.taken && !s.open && all_heads[s.last + 1].is_some())
+        .filter(|s| available(s.last, &s.shot) == Availability::Available)
         .collect();
     let short = judged
         .iter()
@@ -324,7 +403,7 @@ pub(crate) fn score(join: &Join, limits: &SwitchingLimits, out: &mut Vec<Metric>
 
     let onto_unavailable = all_takes
         .iter()
-        .filter(|t| availability(&trace[t.record], &t.to) != Availability::Available)
+        .filter(|t| available(t.record, &t.to) != Availability::Available)
         .count() as u64;
     out.push(Metric::count(
         "switching.takes_onto_unavailable",
@@ -334,7 +413,7 @@ pub(crate) fn score(join: &Join, limits: &SwitchingLimits, out: &mut Vec<Metric>
         Limit::max_count(limits.max_takes_onto_unavailable),
     ));
 
-    let all_losses = losses(trace);
+    let all_losses = losses(trace, &stale);
     let unresolved = all_losses.iter().filter(|(_, r)| !r).count() as f64;
     // Folded from +0: an empty f64 sum is -0.
     let total = all_losses.iter().fold(0.0, |a, (s, _)| a + s);

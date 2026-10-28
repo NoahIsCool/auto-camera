@@ -54,8 +54,9 @@ max_zoom_rate = 0.3
 min_static_hold_s = 0.5
 # C.3 framing quality: no visible jitter at rest. Visible means one output
 # pixel: a relative change d in crop height moves the picture's top and
-# bottom edges by d * 540 px at 1080p (C.3 output format), so d < 1/540.
-max_jitter_at_rest = 0.0019
+# bottom edges by d * 540 px at 1080p (C.3 output format), so d < 1/540
+# (0.001852), rounded down.
+max_jitter_at_rest = 0.00185
 # The specification gives no settle time (C.4's pan spring T90 of
 # 0.8-1.4 s is to 90%, not to rest).
 # max_settle_s = 1.4
@@ -100,7 +101,10 @@ max_wide_s = 10.0
 max_long_wides = 0
 # C.3 reliability (MVP): no on-air swaps.
 max_on_air_swaps = 0
-# M9 health guard: never take a stale or unavailable source.
+# M9 health guard: never take a stale or unavailable source. The engine
+# counts a source stale, and its shots unavailable, once no new frame has
+# come for 1 s (ac_engine's SOURCE_STALE_AFTER).
+source_stale_s = 1.0
 max_takes_onto_unavailable = 0
 # Loss on program is expected for as long as the fallback takes; the
 # specification limits that time, not the total.

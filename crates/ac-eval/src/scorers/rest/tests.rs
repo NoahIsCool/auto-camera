@@ -110,7 +110,7 @@ fn settle_time_runs_to_the_first_sample_that_stays_in_the_band() {
 fn jitter_is_the_height_variation_after_settling() {
     // 0.300 and 0.301 in turn, final 0.301: every sample is within 1% of
     // it, so the crop settled at once, and its height varies by 0.001 /
-    // 0.301 = 0.00332, more than the 0.0019 of one 1080p output pixel.
+    // 0.301 = 0.00332, more than the 0.00185 of one 1080p output pixel.
     let s = settling(
         &samples(&[0.300, 0.301, 0.300, 0.301, 0.300, 0.301]),
         0.0,

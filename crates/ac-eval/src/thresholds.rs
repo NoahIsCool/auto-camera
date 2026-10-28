@@ -180,6 +180,9 @@ pub struct SwitchingLimits {
     pub max_long_wides: Option<u64>,
     /// Most on-air identity swaps.
     pub max_on_air_swaps: Option<u64>,
+    /// Seconds without a new frame, of record PTS, after which a source's
+    /// frame is stale and its shots are unavailable.
+    pub source_stale_s: f64,
     /// Most takes onto an unavailable or lost shot.
     pub max_takes_onto_unavailable: Option<u64>,
     /// Most seconds in all with program on an unavailable or lost shot.
@@ -333,6 +336,7 @@ impl Thresholds {
             Rule::Positive,
         );
         c.required("switching.max_wide_s", s.max_wide_s, Rule::Positive);
+        c.required("switching.source_stale_s", s.source_stale_s, Rule::Positive);
         c.optional(
             "switching.max_time_unavailable_s",
             s.max_time_unavailable_s,

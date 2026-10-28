@@ -26,7 +26,8 @@ fn the_defaults_are_the_specification_numbers() {
     assert_eq!(t.motion.max_pan_speed, Some(0.5));
     assert_eq!(t.motion.max_zoom_rate, Some(0.3));
     assert_eq!(t.motion.min_static_hold_s, Some(0.5));
-    assert_eq!(t.motion.max_jitter_at_rest, Some(0.0019));
+    assert_eq!(t.motion.max_jitter_at_rest, Some(0.00185));
+    assert!(t.motion.max_jitter_at_rest.unwrap() < 1.0 / 540.0);
     // V9 recall at IoU 0.5; C.4 auto-director constraints; C.3 no on-air
     // swaps.
     assert_eq!(t.tracking.match_iou, 0.5);
@@ -38,6 +39,8 @@ fn the_defaults_are_the_specification_numbers() {
     );
     assert_eq!(t.switching.max_wide_s, 10.0);
     assert_eq!(t.switching.max_on_air_swaps, Some(0));
+    // M9 health guard, as the engine counts a source stale.
+    assert_eq!(t.switching.source_stale_s, 1.0);
     // Numbers the specification does not give are left unchecked.
     assert_eq!(t.framing.max_lower_cut_error, None);
     assert_eq!(t.motion.max_peak_jerk, None);
@@ -143,6 +146,10 @@ fn broken_files_are_refused_naming_the_key() {
     assert_eq!(
         invalid(&edited("max_wide_s = 10.0", "max_wide_s = nan")),
         "switching.max_wide_s"
+    );
+    assert_eq!(
+        invalid(&edited("source_stale_s = 1.0", "source_stale_s = 0.0")),
+        "switching.source_stale_s"
     );
     // Shape errors: a misspelt limit, a missing parameter, a wrong type.
     let syntax = |text: &str| match Thresholds::from_toml(text) {

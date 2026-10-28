@@ -1,6 +1,9 @@
-//! Switching on hand-built timelines: takes through cuts and transitions,
-//! stints, jump cuts at the threshold, dwell by content, long wides,
-//! availability, losses on program and on-air swaps.
+//! Switching on hand-built timelines: takes through cuts and completed or
+//! abandoned transitions, stints, jump cuts at the threshold, dwell by
+//! content, long wides, availability (stale sources included), losses on
+//! program and on-air swaps.
+
+use std::collections::BTreeSet;
 
 use ac_core::{Rect, SourceId};
 
@@ -61,7 +64,10 @@ fn takes_follow_the_shot_program_is_headed_for() {
         .collect();
     trace[5] = transition(trace[5].clone(), "cam/1/close", Some("cam/1/medium"), 0.5);
     trace[6] = transition(trace[6].clone(), "cam/1/close", Some("cam/1/medium"), 0.9);
-    let heads: Vec<&str> = trace.iter().map(|r| head(r).unwrap().0.as_str()).collect();
+    let heads: Vec<&str> = heads(&trace)
+        .into_iter()
+        .map(|h| h.unwrap().0.as_str())
+        .collect();
     assert_eq!(heads[4..7], ["cam/1/medium", "cam/1/close", "cam/1/close"]);
     let found = takes(&trace);
     let summary: Vec<(usize, Option<&str>, &str)> = found
@@ -171,23 +177,222 @@ fn wides_held_past_the_limit_count_open_or_not() {
     assert_eq!((m.value(), m.samples), (Some(2.0), 3));
 }
 
+/// `records` with `preview` coming in over `base` at `overlay`.
+fn mixing(records: &mut [TraceRecord], preview: &str, base: &str, overlay: f64) {
+    for r in records {
+        *r = transition(r.clone(), preview, Some(base), overlay);
+    }
+}
+
 #[test]
-fn availability_needs_the_shot_a_frame_and_a_tracking_subject() {
+fn an_abandoned_transition_is_neither_a_take_nor_a_stint() {
+    // The medium on program throughout. At 30-33 a T-bar move brings the
+    // close-up in a little (overlay 0.05), then goes back to the start: at
+    // 34 the medium is still program. The close-up never reached program.
+    let close = shot("cam/1/close", Some(1), Rect::new(0.35, 0.185, 0.3, 0.3));
+    let mut trace = timeline(60, |_| "cam/1/medium");
+    for r in &mut trace {
+        r.shots.push(close.clone());
+    }
+    mixing(&mut trace[30..34], "cam/1/close", "cam/1/medium", 0.05);
+    trace[34].switcher.preview = Some(ShotId("cam/1/close".into()));
+    assert!(heads(&trace).iter().all(|h| h.unwrap().0 == "cam/1/medium"));
+    assert!(takes(&trace).is_empty());
+    let all = stints(&trace);
+    assert_eq!(
+        all.iter().map(|s| (s.first, s.last)).collect::<Vec<_>>(),
+        [(0, 59)]
+    );
+    // The medium and the close-up overlap with IoU 0.5625, so the take and
+    // the take back would each have been a jump cut, and the 0.4 s of the
+    // close-up a dwell violation.
+    assert!(MEDIUM.iou(&close.crop) > 0.4);
+    let r = switching(&trace, Content::Talk);
+    for name in ["switching.jump_cuts", "switching.dwell_violations"] {
+        let m = r.metric(name, None).unwrap();
+        assert_eq!((m.value(), m.verdict), (Some(0.0), Verdict::Pass), "{name}");
+    }
+}
+
+#[test]
+fn a_take_queued_behind_an_abandoned_transition_is_the_one_take() {
+    // Wide on program. At 30-32 a T-bar move towards the close-up is
+    // abandoned, and the take queued meanwhile runs at once: a mix to the
+    // medium at 33-35, which completes (the medium is program at 36). The
+    // trace ends during a second mix, to the close-up at 58-59, which is
+    // taken to complete.
+    let close = shot("cam/1/close", Some(1), Rect::new(0.35, 0.185, 0.3, 0.3));
+    let mut trace = timeline(60, |f| if f < 36 { "cam/wide" } else { "cam/1/medium" });
+    for r in &mut trace {
+        r.shots.push(close.clone());
+    }
+    mixing(&mut trace[30..33], "cam/1/close", "cam/wide", 0.2);
+    mixing(&mut trace[33..36], "cam/1/medium", "cam/wide", 0.5);
+    mixing(&mut trace[58..60], "cam/1/close", "cam/1/medium", 0.5);
+    let all = takes(&trace);
+    let found: Vec<(usize, &str, &str)> = all
+        .iter()
+        .map(|t| {
+            (
+                t.record,
+                t.from.as_ref().unwrap().0.as_str(),
+                t.to.0.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (33, "cam/wide", "cam/1/medium"),
+            (58, "cam/1/medium", "cam/1/close")
+        ]
+    );
+}
+
+#[test]
+fn availability_needs_the_shot_a_fresh_frame_and_a_tracking_subject() {
     let mut r = at(0, "cam/1/medium");
     let medium = ShotId("cam/1/medium".into());
     let wide_id = ShotId("cam/wide".into());
-    assert_eq!(availability(&r, &medium), Availability::Available);
+    let fresh = BTreeSet::new();
+    assert_eq!(availability(&r, &fresh, &medium), Availability::Available);
     assert_eq!(
-        availability(&r, &ShotId("cam/9/close".into())),
+        availability(&r, &fresh, &ShotId("cam/9/close".into())),
+        Availability::Unavailable
+    );
+    // A stale source's shots are unavailable, wide and subject shot alike.
+    let stale = BTreeSet::from([SourceId(CAM.into())]);
+    assert_eq!(availability(&r, &stale, &medium), Availability::Unavailable);
+    assert_eq!(
+        availability(&r, &stale, &wide_id),
         Availability::Unavailable
     );
     r.sources[0].subjects[0].state = ac_core::TrackState::Lost;
-    assert_eq!(availability(&r, &medium), Availability::Lost);
+    assert_eq!(availability(&r, &fresh, &medium), Availability::Lost);
     r.sources[0].subjects.clear();
-    assert_eq!(availability(&r, &medium), Availability::Unavailable);
-    assert_eq!(availability(&r, &wide_id), Availability::Available);
+    assert_eq!(availability(&r, &fresh, &medium), Availability::Unavailable);
+    assert_eq!(availability(&r, &fresh, &wide_id), Availability::Available);
     r.sources[0].frame = None;
-    assert_eq!(availability(&r, &wide_id), Availability::Unavailable);
+    assert_eq!(
+        availability(&r, &fresh, &wide_id),
+        Availability::Unavailable
+    );
+}
+
+/// `trace` with `cam`'s frame frozen from record `from` to record `to`
+/// (exclusive): the frame of record `from - 1` stays its newest.
+fn frozen(mut trace: Vec<TraceRecord>, from: usize, to: usize) -> Vec<TraceRecord> {
+    let held = trace[from - 1].sources[0].frame;
+    for r in &mut trace[from..to] {
+        r.sources[0].frame = held;
+    }
+    trace
+}
+
+/// `r` with a second source, `side`, delivering a new frame, and its wide.
+fn with_side(mut r: TraceRecord) -> TraceRecord {
+    let mut source = r.sources[0].clone();
+    source.id = SourceId("side".into());
+    source.subjects.clear();
+    r.sources.push(source);
+    let mut wide = wide();
+    wide.id = ShotId("side/wide".into());
+    wide.source = SourceId("side".into());
+    r.shots.push(wide);
+    r
+}
+
+#[test]
+fn a_source_is_stale_once_no_new_frame_comes_for_the_window() {
+    // `cam` delivers frames 0-9, then frame 9 stands still to 29, and new
+    // frames come again from 30. Frame 9 came at 0.9 s, so the source is
+    // stale from 2.0 s (1.1 s without a new frame), not at 1.9 s (1 s,
+    // the window itself). `side` delivers all along.
+    let both = timeline(40, |_| "cam/wide").into_iter().map(with_side);
+    let trace = frozen(both.collect(), 10, 30);
+    let stale = stale_sources(&trace, 1.0);
+    let cam: BTreeSet<SourceId> = BTreeSet::from([SourceId(CAM.into())]);
+    for (f, s) in stale.iter().enumerate() {
+        let expected = if (20..30).contains(&f) {
+            cam.clone()
+        } else {
+            BTreeSet::new()
+        };
+        assert_eq!(s, &expected, "record {f}");
+    }
+    // The trace cannot see before its first record: an old frame there
+    // counts as new, and a source with no frame is not stale (it is
+    // unavailable for having none).
+    let mut late_start = timeline(15, |_| "cam/wide");
+    for r in &mut late_start {
+        r.sources[0].frame = Some(FrameTag {
+            seq: 3,
+            pts: pts(3),
+        });
+    }
+    let stale = stale_sources(&late_start, 1.0);
+    assert!(stale[..11].iter().all(BTreeSet::is_empty));
+    assert!(stale[11..].iter().all(|s| s == &cam));
+    let mut blind = timeline(30, |_| "cam/wide");
+    for r in &mut blind {
+        r.sources[0].frame = None;
+    }
+    assert!(stale_sources(&blind, 1.0).iter().all(BTreeSet::is_empty));
+    assert!(stale_sources(&[], 1.0).is_empty());
+}
+
+/// Records 0-49 of `cam` and `side`, both delivering: `cam`'s wide on
+/// program to 34, `side`'s wide (a fallback) at 35-39, then `cam`'s medium.
+fn fallback_timeline() -> Vec<TraceRecord> {
+    timeline(50, |f| if f < 40 { "cam/wide" } else { "cam/1/medium" })
+        .into_iter()
+        .enumerate()
+        .map(|(f, r)| {
+            let mut r = with_side(r);
+            if (35..40).contains(&f) {
+                r.switcher.program = Some(ShotId("side/wide".into()));
+            }
+            r
+        })
+        .collect()
+}
+
+#[test]
+fn a_frozen_source_on_program_is_a_loss_until_the_fallback() {
+    // `cam`'s frame stands still from 10 (frame 9, at 0.9 s), so its shots
+    // are unavailable from 20. Its wide stays on program until a fallback
+    // cut to `side`'s wide at 35: a loss of 1.5 s, longer than the 1 s
+    // allowed. Then, at 40, a cut back to `cam`'s medium, still frozen.
+    let trace = frozen(fallback_timeline(), 10, 50);
+    let stale = stale_sources(&trace, 1.0);
+    let found = losses(&trace, &stale);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!((found[0].0 - 1.5).abs() < 1e-9 && found[0].1, "{found:?}");
+    assert!((found[1].0 - 0.9).abs() < 1e-9 && !found[1].1, "{found:?}");
+    let r = switching(&trace, Content::Talk);
+    let fall_back = r.metric("switching.time_to_fall_back", None).unwrap();
+    assert!((fall_back.value().unwrap() - 1.5).abs() < 1e-9);
+    assert_eq!(fall_back.verdict, Verdict::Fail);
+    assert_eq!(fall_back.details["unresolved"], 1.0);
+    let total = r
+        .metric("switching.time_unavailable_on_program", None)
+        .unwrap();
+    assert!((total.value().unwrap() - 2.4).abs() < 1e-9);
+    // The fallback is onto a live source; the take back is onto a frozen
+    // one, which the engine would have refused.
+    let onto = r.metric("switching.takes_onto_unavailable", None).unwrap();
+    assert_eq!(
+        (onto.value(), onto.samples, onto.verdict),
+        (Some(1.0), 2, Verdict::Fail)
+    );
+    // With frames coming throughout, nothing was lost and both takes are
+    // sound.
+    let r = switching(&fallback_timeline(), Content::Talk);
+    assert_eq!(
+        value(&r, "switching.time_unavailable_on_program"),
+        Some(0.0)
+    );
+    assert_eq!(value(&r, "switching.takes_onto_unavailable"), Some(0.0));
 }
 
 #[test]
@@ -200,7 +405,7 @@ fn losses_on_program_last_until_an_available_shot_is_on_air() {
     for f in (10..15).chain(30..40).chain(50..60) {
         trace[f].sources[0].subjects[0].state = ac_core::TrackState::Lost;
     }
-    let found = losses(&trace);
+    let found = losses(&trace, &stale_sources(&trace, 1.0));
     let expected = [(0.5, true), (1.0, true), (0.9, false)];
     assert_eq!(found.len(), 3);
     assert!(
