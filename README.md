@@ -53,11 +53,17 @@ source frame rates, tick timing and dropped frames.
 | click a tile | stage it on preview |
 | double-click a tile | cut it straight to program ("Cut now") |
 | right-click a subject tile | pin, hide or re-acquire the subject |
-| `1`–`9` | stage tile 1–9 on preview |
-| `Space` | cut |
-| `Enter` | auto transition |
+| `1`–`9` | stage tile 1–9 on preview (during a transition, for its end) |
+| `Space` | cut (during a transition, cut it short) |
+| `Enter` | auto transition (during one, queue a take of the shot staged meanwhile) |
+| `Esc` | leave a focused field or control, so the shortcuts work again |
 
-Shortcuts are ignored while a text field has focus and on key repeat.
+Shortcuts are paused while a field or control has the keyboard (a prompt or
+number being edited, or a control reached with `Tab`), and the status bar
+then says "shortcuts paused"; they are also ignored on key repeat and with
+Ctrl, Alt or Cmd held. While the output is starting or running, closing the
+window or clicking Stop asks first, so a stray click cannot end the show; a
+termination signal (Ctrl-C, `SIGTERM`) still quits without asking.
 
 A running transition does not block the controls. A shot staged during
 one waits for its end and then lands on preview (the preview caption says
@@ -69,8 +75,10 @@ still available; a shot staged meanwhile then lands on preview, and a take
 queued of it is cancelled. A double click on a tile still puts that tile
 on air at once, ending the transition in the same step. The T-bar and the
 clock never share a transition: the T-bar cannot take over a running Auto,
-and while the T-bar holds a transition CUT is disabled (the lever
-finishes or abandons it).
+and while the T-bar holds a transition CUT is disabled, and `Space` and a
+double click on a tile are refused with a notice (the lever finishes or
+abandons it; the double click's first click still stages the tile for the
+end).
 
 ## Headless mode
 
