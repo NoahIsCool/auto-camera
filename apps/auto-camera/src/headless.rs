@@ -9,7 +9,11 @@
 //!    first, so that the trace has every tick from the first.
 //! 2. **Signal**: wait for a wide shot to become available. A headless run
 //!    has no operator, so unless the director is in Auto mode (which
-//!    establishes a shot by itself) the first wide is cut to program.
+//!    establishes a shot by itself) the first wide is cut to program. A
+//!    source that cannot be opened (a file that is not there) does not stop
+//!    the engine, which keeps retrying it, so this phase waits for it like
+//!    for any source and, when none delivers, says what keeps each offline
+//!    ([`no_picture`]).
 //! 3. **Detector**: when a source has discovery, wait until no source's
 //!    detector is preparing, for at most [`DETECTOR_TIMEOUT`] (a cold
 //!    CoreML compile of OWLv2 takes two to three minutes, and every new
@@ -24,9 +28,13 @@
 //!    ffmpeg runs. The output also streams when the config sets an RTMP URL.
 //! 5. **Run** for the requested time, sampling snapshots to log program
 //!    changes, the largest subject count and each shot's crop size range.
-//! 6. **Stop** the output and wait for the recording to be finalized, then
-//!    shut the engine down, which joins every thread and reaps ffmpeg, and
-//!    wait for the trace writer to write the last record.
+//! 6. **Stop** the output and wait for the recording to be finalized, check
+//!    that every source delivered a picture at some point, then shut the
+//!    engine down, which joins every thread and reaps ffmpeg, and wait for
+//!    the trace writer to write the last record. Nobody watches a headless
+//!    run, so a source that stayed off the air throughout (a file that never
+//!    appeared) fails it, with what kept it offline ([`never_delivered`]),
+//!    instead of passing unseen.
 //!
 //! A termination signal (Ctrl-C, `SIGTERM`, `SIGHUP`) ends whichever phase
 //! is running; the engine is then shut down as after a normal run (which
@@ -48,7 +56,9 @@
 //! tick, so it equals `ticks` unless the writer fell behind (`missing`);
 //! a trace that cannot be created or written fails the run. A run whose
 //! engine does not start removes its empty trace file and reports no
-//! `trace`, so that the path is free when the command is run again.
+//! `trace`, so that the path is free when the command is run again. A run
+//! whose source never delivered a picture did start, so it reports and
+//! keeps its trace, as every run that ticked does.
 //!
 //! This module runs the phases; the run's flags ([`HeadlessOptions`]) are
 //! in `flags`, and the summary's types in [`summary`] and its building
@@ -190,6 +200,35 @@ fn failure_in(snap: &EngineSnapshot, why: &str) -> String {
     }
 }
 
+/// Why phase 2 failed in `snap`: no source delivered a picture in time,
+/// with the error of each source that has one (what keeps it offline).
+fn no_picture(snap: &EngineSnapshot) -> String {
+    let mut why = String::from("no source delivered a picture in time");
+    for s in &snap.sources {
+        if let Some(error) = &s.error {
+            why.push_str(&format!("; source {}: {error}", s.id.0));
+        }
+    }
+    why
+}
+
+/// Why a run failed in which a source of `snap` (the run's newest
+/// snapshot) never delivered a picture, naming each such source with the
+/// error that kept it offline, when it has one; `None` when every source
+/// delivered.
+fn never_delivered(snap: &EngineSnapshot) -> Option<String> {
+    let silent: Vec<String> = snap
+        .sources
+        .iter()
+        .filter(|s| s.frames == 0)
+        .map(|s| match &s.error {
+            Some(error) => format!("source {} never delivered a picture: {error}", s.id.0),
+            None => format!("source {} never delivered a picture", s.id.0),
+        })
+        .collect();
+    (!silent.is_empty()).then(|| silent.join("; "))
+}
+
 /// Why a run that a termination signal cut short failed.
 pub const INTERRUPTED: &str = "interrupted by a termination signal";
 
@@ -223,7 +262,7 @@ fn drive(
         .wait_until(SIGNAL_TIMEOUT, |s| {
             quit.requested() || first_wide(s).is_some()
         })
-        .ok_or_else(|| failure(&h, "no source delivered a picture in time"))?;
+        .ok_or_else(|| failure(&h, &no_picture(&h.snapshot())))?;
     if quit.requested() {
         return Err(INTERRUPTED.into());
     }
@@ -284,7 +323,7 @@ fn drive(
             return Err(format!("the output failed: {:?}", snap.output.state));
         }
     }
-    Ok(())
+    never_delivered(&h.snapshot()).map_or(Ok(()), Err)
 }
 
 /// Phase 3: samples `snapshot` until no source's detector is preparing,

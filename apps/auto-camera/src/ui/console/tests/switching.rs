@@ -79,6 +79,8 @@ impl Studio {
                     state: SourceState::Running,
                     frame: Some(f.pattern.frame(&f.id, f.seq)),
                     detector_loading: false,
+                    error: None,
+                    info: None,
                 })
                 .collect();
             let _ = self.core.tick(now, &feeds, Vec::new());

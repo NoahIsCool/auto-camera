@@ -154,6 +154,8 @@ fn a_source_without_a_detector_never_prepares() {
             state: SourceState::Running,
             frame: Some(pattern.frame(&cam(), seq)),
             detector_loading: true,
+            error: None,
+            info: None,
         };
         let now = Duration::from_secs_f64(seq as f64 / FPS);
         assert!(core.tick(now, &[feed], Vec::new()).requests.is_empty());

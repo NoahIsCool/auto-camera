@@ -79,6 +79,8 @@ pub(super) fn summarize(
                 .iter()
                 .map(|v| SourceSummary {
                     id: v.id.0.clone(),
+                    state: format!("{:?}", v.state).to_lowercase(),
+                    error: v.error.clone(),
                     size: [v.width, v.height],
                     fps: round(v.fps, 2),
                     frames: v.frames,
