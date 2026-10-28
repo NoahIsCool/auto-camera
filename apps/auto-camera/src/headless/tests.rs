@@ -5,6 +5,7 @@ mod summary;
 
 use super::report::round;
 use super::*;
+use crate::testing::{have, temp_path};
 use ac_core::{ShotSize, TrackState};
 use ac_engine::{
     DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, ShotView, SidecarSettings,
@@ -65,32 +66,6 @@ fn first_snapshot(config: &StudioConfig) -> Arc<EngineSnapshot> {
     };
     let core = EngineCore::new(config, vec![info], &[true]).unwrap();
     Arc::new(core.snapshot(OutputView::default(), TimingView::default(), true))
-}
-
-/// True when `tool -version` succeeds. When it does not and
-/// `AC_REQUIRE_FFMPEG` is set (CI), panics instead of letting the caller
-/// skip.
-fn have(tool: &str) -> bool {
-    let found = std::process::Command::new(tool)
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    let required = std::env::var_os("AC_REQUIRE_FFMPEG").is_some_and(|v| !v.is_empty() && v != "0");
-    assert!(
-        found || !required,
-        "{tool} is not installed, and AC_REQUIRE_FFMPEG says it must be"
-    );
-    found
-}
-
-/// A fresh, unique path in the temp directory (not created).
-fn temp_path(name: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    std::env::temp_dir().join(format!("auto-camera-{}-{nanos}-{name}", std::process::id()))
 }
 
 #[test]
@@ -243,6 +218,7 @@ fn a_run_whose_engine_dies_fails_at_once_with_the_reason() {
             ..EngineOptions::default()
         },
         &QuitSignal::new(),
+        awake::log,
     );
     assert!(!s.ok);
     let error = s.error.as_deref().unwrap_or_default();

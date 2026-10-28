@@ -135,7 +135,8 @@ pub struct EngineOptions {
     /// when the monitors show program): the system's `caffeinate` on macOS
     /// ([`Caffeinate::system`]), a stand-in in tests, or [`Caffeinate::Off`]
     /// when the caller holds it awake itself, as a headless run does for
-    /// the whole run.
+    /// the whole run (the output view then says
+    /// [`KeepAwakeState::HeldByCaller`](crate::KeepAwakeState::HeldByCaller)).
     pub keep_awake: Caffeinate,
 }
 

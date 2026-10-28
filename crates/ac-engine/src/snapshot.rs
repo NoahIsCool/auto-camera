@@ -297,9 +297,12 @@ pub enum KeepAwakeState {
     Idle,
     /// `caffeinate` runs, with this process id.
     Held(u32),
+    /// The engine's own hold is turned off ([`ac_output::Caffeinate::Off`])
+    /// because its caller holds the machine awake, as a headless run does
+    /// for the whole run.
+    HeldByCaller,
     /// The session is live but not held awake, and why: another platform,
-    /// turned off because the caller holds it, or `caffeinate` could not
-    /// start or ended early.
+    /// or `caffeinate` could not start or ended early.
     NotHeld(String),
 }
 

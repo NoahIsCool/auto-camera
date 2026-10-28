@@ -232,12 +232,17 @@ impl KeepAwake {
 
     /// Ends the hold: kills the process if it still runs, reaps it and
     /// returns how it ended (`None` when the status could not be read).
+    ///
+    /// A process whose state cannot be read is not signalled: `try_wait`
+    /// fails only when it is no longer this process's child to wait for
+    /// (something else reaped it), so its id may already name another
+    /// process, and the reap then fails at once too instead of blocking.
     pub fn stop(mut self) -> Option<ExitStatus> {
         self.end()
     }
 
-    /// Kills the process if it still runs and reaps it; idempotent, since
-    /// the status of a reaped child is kept.
+    /// [`KeepAwake::stop`], for it and for drop; idempotent, since the
+    /// status of a reaped child is kept.
     fn end(&mut self) -> Option<ExitStatus> {
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();

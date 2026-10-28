@@ -114,11 +114,14 @@ window's monitors show program, and for the whole of a headless run, from
 before the detector loads until the recording is final. `caffeinate` is a
 supervised child like ffmpeg: it is killed and reaped when the session or
 run ends, and `-w` ends it if the app dies. Other platforms have no
-`caffeinate`; the app says so on stderr and runs on. The engine's output
-view (`keep_awake`) says whether a session is held, and if not, why. This
-does not stop App Nap from
-throttling a minimized window: that takes `LSAppNapIsDisabled` in an app
-bundle's `Info.plist`, and the repository builds no bundle yet.
+`caffeinate`; the app says so on stderr and runs on, as it does when
+`caffeinate` cannot start or ends early (the window when an output session
+turns out not to be held, a headless run at its start or its end). The
+engine's output view (`keep_awake`) says whether a live session is held,
+by the engine's own `caffeinate` or by the headless run's, and if not,
+why. This does not stop App Nap from throttling a minimized window: that
+takes `LSAppNapIsDisabled` in an app bundle's `Info.plist`, and the
+repository builds no bundle yet.
 
 ## Studio configuration
 

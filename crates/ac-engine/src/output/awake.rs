@@ -12,16 +12,18 @@
 //! engine thread, unlike the encoder's start and finish.
 //!
 //! The hold is best effort and never touches the output. On a platform
-//! without `caffeinate`, with the hold turned off, or when `caffeinate`
-//! cannot start or ends early, the session runs on and the view says why
-//! ([`KeepAwakeState::NotHeld`]). A `caffeinate` that ended early is reaped
-//! by the next poll and not restarted within the session.
+//! without `caffeinate`, or when `caffeinate` cannot start or ends early,
+//! the session runs on and the view says why ([`KeepAwakeState::NotHeld`]).
+//! A `caffeinate` that ended early is reaped by the next poll and not
+//! restarted within the session. With the hold turned off
+//! ([`Caffeinate::Off`]) the caller holds the machine awake itself, and the
+//! view says so ([`KeepAwakeState::HeldByCaller`]) while a session is live.
 //!
 //! What is kept awake is fixed when the engine starts: the display too when
 //! program feeds one
 //! ([`MonitorSettings::feeds_display`](crate::MonitorSettings::feeds_display)).
 
-use ac_output::{AwakeMode, Caffeinate, KeepAwake};
+use ac_output::{AwakeMode, Caffeinate, KeepAwake, NotHeld};
 
 use super::OutputController;
 use crate::snapshot::{KeepAwakeState, OutputState};
@@ -58,6 +60,7 @@ impl SessionAwake {
                 self.state = KeepAwakeState::Held(hold.pid());
                 self.hold = Some(hold);
             }
+            Err(NotHeld::Off) => self.state = KeepAwakeState::HeldByCaller,
             Err(why) => self.state = KeepAwakeState::NotHeld(why.to_string()),
         }
     }
@@ -77,8 +80,9 @@ impl SessionAwake {
             Ok(Some(status)) => format!("caffeinate exited with {status}"),
             Err(e) => format!("cannot watch caffeinate: {e}"),
         };
-        // Dropping the hold reaps it (and kills it if it could not be
-        // watched).
+        // Dropping the hold reaps it; one that could not be watched is no
+        // longer this process's child to wait for, so it is let go without
+        // a signal (see `KeepAwake::stop`).
         self.hold = None;
         self.state = KeepAwakeState::NotHeld(ended);
     }
@@ -100,7 +104,7 @@ impl SessionAwake {
 impl OutputController {
     /// Holds the machine awake in `mode` with `caffeinate` while each
     /// session is live; see the `awake` module. A controller built without
-    /// this holds nothing ([`Caffeinate::Off`]).
+    /// this leaves that to its caller ([`Caffeinate::Off`]).
     pub fn with_keep_awake(mut self, caffeinate: Caffeinate, mode: AwakeMode) -> Self {
         self.awake = SessionAwake::new(caffeinate, mode);
         self
@@ -147,15 +151,11 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_controller_holds_nothing() {
+    fn a_bare_controller_leaves_the_hold_to_its_caller() {
         let mut c = OutputController::new(settings());
         assert_eq!(c.view().keep_awake, KeepAwakeState::Idle);
         c.start(None, Some(path("bare")), None).unwrap();
-        assert!(
-            matches!(&c.view().keep_awake, KeepAwakeState::NotHeld(why) if why.contains("turned off")),
-            "{:?}",
-            c.view().keep_awake
-        );
+        assert_eq!(c.view().keep_awake, KeepAwakeState::HeldByCaller);
         until_over(&mut c);
         assert_eq!(c.view().keep_awake, KeepAwakeState::Idle);
     }
@@ -230,6 +230,33 @@ mod tests {
             c.shutdown();
             assert_eq!(c.view().keep_awake, KeepAwakeState::Idle);
             assert!(!exists(again), "{again} is left behind");
+        }
+
+        #[test]
+        fn the_hold_lasts_until_the_recording_is_final() {
+            use crate::output::{Event, tests::stats};
+            // A session whose encoder is finishing: ffmpeg flushes the
+            // recording until the helper reports the finish.
+            let mut c = OutputController::new(settings())
+                .with_keep_awake(stand_in("exec sleep 60"), AwakeMode::System);
+            c.awake.hold();
+            c.state = OutputState::Stopping;
+            let pid = held(&c);
+            for _ in 0..3 {
+                c.poll();
+                assert_eq!(c.view().keep_awake, KeepAwakeState::Held(pid));
+            }
+            assert!(exists(pid), "{pid} ended before the recording was final");
+            let finished = Event::Finished {
+                session: c.session,
+                result: Ok(stats(9)),
+                before: Box::new(stats(9)),
+            };
+            c.sender.send(finished).unwrap();
+            c.poll();
+            assert_eq!(c.state(), &OutputState::Finished);
+            assert_eq!(c.view().keep_awake, KeepAwakeState::Idle);
+            assert!(!exists(pid), "{pid} is left behind");
         }
 
         #[test]

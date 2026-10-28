@@ -128,8 +128,8 @@ impl std::fmt::Debug for OutputController {
 }
 
 impl OutputController {
-    /// An idle controller that does not hold the machine awake (see
-    /// [`OutputController::with_keep_awake`]).
+    /// An idle controller that leaves keeping the machine awake to its
+    /// caller (see [`OutputController::with_keep_awake`]).
     pub fn new(settings: OutputSettings) -> Self {
         let (sender, events) = channel();
         Self {
@@ -387,7 +387,7 @@ mod tests {
     }
 
     /// Final stats of a session that wrote `frames` frames.
-    fn stats(frames: u64) -> EncoderStats {
+    pub(super) fn stats(frames: u64) -> EncoderStats {
         EncoderStats {
             encoder: ac_output::EncoderChoice::Libx264,
             frames_in: frames,

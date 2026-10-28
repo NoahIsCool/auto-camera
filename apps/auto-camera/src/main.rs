@@ -18,8 +18,8 @@
 //! app; a second signal exits at once.
 //!
 //! On macOS the system is kept awake while output runs in the window, and
-//! for the whole of a headless run ([`awake`]); elsewhere a note says it is
-//! not.
+//! for the whole of a headless run ([`awake`]); elsewhere a note on stderr
+//! says it is not.
 //!
 //! Exit status: 0 on success, 1 when the engine or the output failed, 2 for
 //! usage and configuration errors, 130 after a termination signal.
@@ -28,12 +28,13 @@ mod awake;
 mod cli;
 mod headless;
 mod signals;
+#[cfg(test)]
+mod testing;
 mod ui;
 
 use std::process::ExitCode;
 
 use ac_engine::StudioConfig;
-use ac_output::Caffeinate;
 use clap::Parser;
 
 use cli::Cli;
@@ -75,11 +76,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     } else {
-        // The window's engine holds each output session awake with the
-        // system's caffeinate (`EngineOptions::default`), if there is one.
-        if let Some(note) = awake::window_note(&Caffeinate::system()) {
-            awake::log(&note);
-        }
         match ui::run(config, quit.clone()) {
             Ok(()) if quit.requested() => ExitCode::from(signals::INTERRUPTED),
             Ok(()) => ExitCode::SUCCESS,
