@@ -65,6 +65,9 @@ pub struct Summary {
     pub output: Option<OutputSummary>,
     /// The per-tick trace, with `--trace` and an engine that started.
     pub trace: Option<TraceSummary>,
+    /// The detection log, with `--record-detections` and an engine that
+    /// started.
+    pub detections: Option<DetectionsSummary>,
     /// Shots that should have been on program but were drawn black.
     pub render_issues: Vec<String>,
 }
@@ -271,5 +274,18 @@ pub struct TraceSummary {
     pub records: u64,
     /// Ticks without a line: dropped because the writer fell behind, or
     /// never written after a write error. `records + missing` is `ticks`.
+    pub missing: u64,
+}
+
+/// The detection log in the summary.
+#[derive(Debug, Clone, Serialize)]
+pub struct DetectionsSummary {
+    /// The log file.
+    pub path: PathBuf,
+    /// Lines written, one per applied detector pass.
+    pub records: u64,
+    /// Applied passes without a line: dropped because the writer fell
+    /// behind, or never written after a write error. `records + missing`
+    /// is the sum of the sources' applied passes.
     pub missing: u64,
 }

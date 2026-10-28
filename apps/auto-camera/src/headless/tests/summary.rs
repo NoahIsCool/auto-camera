@@ -16,6 +16,7 @@ fn summary_of(snap: &EngineSnapshot, error: Option<&str>) -> serde_json::Value {
             ticks: 0,
             threads_joined: 0,
             trace: None,
+            detections: None,
         },
         Some(snap),
         Some(snap),

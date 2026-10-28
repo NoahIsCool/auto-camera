@@ -419,6 +419,8 @@ mod tests {
             loop_playback: false,
             max_width: None,
             audio: false,
+            start_s: None,
+            duration_s: None,
         };
         assert!(
             build_detector(&DetectorSettings::None, &synthetic)

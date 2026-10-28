@@ -22,7 +22,9 @@
 //!    sequence number and PTS. Stale and failed results change no
 //!    feedback; they are recorded as the source's newest outcome
 //!    ([`crate::snapshot::PassOutcome`]), so the window can say the
-//!    feedback is no longer current.
+//!    feedback is no longer current. Every applied result is also handed
+//!    back as a [`PassRecord`] ([`TickOutput::applied`]), for the
+//!    detection log that a replay answers from (see `applied`).
 //! 3. **Frames.** Each source's newest frame, if new, advances its tracker
 //!    and store (media time = the frame's PTS).
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
@@ -75,6 +77,7 @@ use ac_director::{Director, DirectorDecision};
 use ac_framing::FramerConfig;
 use ac_media::{SourceInfo, SourceState, VideoFrame};
 use ac_switcher::Switcher;
+use ac_vision::PassRecord;
 
 use crate::catalog::Catalog;
 use crate::config::{DiscoverySettings, MonitorSettings, StudioConfig};
@@ -84,6 +87,7 @@ use crate::schedule::RateMeter;
 use crate::snapshot::{DiscoveryStats, MatchView};
 use crate::vision::SourceVision;
 
+mod applied;
 mod commands;
 mod directing;
 mod passes;
@@ -109,6 +113,19 @@ pub struct SourceFeed {
     pub detector_loading: bool,
 }
 
+impl SourceFeed {
+    /// A running source showing `frame`, whose detector (if it has one) has
+    /// loaded: what a driver that reads the frames itself, such as the eval
+    /// runner, feeds on every tick.
+    pub fn running(frame: Option<VideoFrame>) -> Self {
+        Self {
+            state: SourceState::Running,
+            frame,
+            detector_loading: false,
+        }
+    }
+}
+
 /// What a tick produced for the runtime.
 #[derive(Debug, Clone)]
 pub struct TickOutput {
@@ -116,6 +133,9 @@ pub struct TickOutput {
     pub program: VideoFrame,
     /// Discovery requests to hand to the workers, by source index.
     pub requests: Vec<(usize, DiscoveryRequest)>,
+    /// The discovery results the tick applied, in the order applied, for
+    /// the detection log ([`crate::detection_log`]).
+    pub applied: Vec<PassRecord>,
 }
 
 /// Discovery scheduling of one source.
@@ -411,9 +431,7 @@ impl EngineCore {
         self.now = now;
         self.ticks += 1;
         self.update_protection();
-        for r in results {
-            self.apply_result(r);
-        }
+        let applied = self.apply_results(results);
         // A shared detector is ready for every source or for none.
         let studio_loading = self.shared_detector
             && feeds
@@ -433,6 +451,7 @@ impl EngineCore {
         TickOutput {
             program,
             requests: self.schedule_discovery(),
+            applied,
         }
     }
 

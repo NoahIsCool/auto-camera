@@ -17,6 +17,9 @@ loop_playback = true
 # Decode at most 1280 pixels wide; the tracker and compositor work on this.
 max_width = 1280
 audio = true
+# Play only part of the file, as a clip of its own (PTS from 0):
+# start_s = 120.0
+# duration_s = 180.0
 
 # A prompt names who or what to frame, and may name shots too (ADR 0003):
 #

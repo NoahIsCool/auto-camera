@@ -5,11 +5,16 @@
 //! auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
 //! ```
 //!
+//! Either mode also takes `--record-detections PATH`.
+//!
 //! The headless options are only accepted together with `--headless`, so a
 //! typo cannot silently open a window that records nothing. `--trace`
 //! works in both modes: it writes the engine's per-tick trace as JSON Lines
-//! ([`crate::trace`]). The config path defaults to the demo studio relative
-//! to the working directory, which is the repository root under `cargo run`.
+//! ([`crate::trace`]). So does `--record-detections`: it writes every
+//! detector pass the engine applied, for the eval runner to replay
+//! ([`crate::detections`]). The config path defaults to the demo studio
+//! relative to the working directory, which is the repository root under
+//! `cargo run`.
 
 use std::path::PathBuf;
 
@@ -52,6 +57,10 @@ pub struct Cli {
     /// crops, program and preview) to this file; it must not exist.
     #[arg(long, value_name = "PATH")]
     pub trace: Option<PathBuf>,
+    /// Write every detector pass the engine applies (source, frame, boxes,
+    /// scores) to this file as JSON lines, for replay; it must not exist.
+    #[arg(long, value_name = "PATH")]
+    pub record_detections: Option<PathBuf>,
 }
 
 /// Parses a positive, finite number of seconds up to one day.
@@ -93,6 +102,23 @@ mod tests {
         let headless = parse(&["--headless", "--trace", "t.jsonl"]).unwrap();
         assert_eq!(headless.trace, Some(PathBuf::from("t.jsonl")));
         assert!(parse(&["--trace"]).is_err(), "a path is required");
+    }
+
+    #[test]
+    fn both_modes_take_a_detection_log() {
+        let window = parse(&["--record-detections", "/tmp/d.jsonl"]).unwrap();
+        assert!(!window.headless);
+        assert_eq!(
+            window.record_detections,
+            Some(PathBuf::from("/tmp/d.jsonl"))
+        );
+        let headless = parse(&["--headless", "--record-detections", "d.jsonl"]).unwrap();
+        assert_eq!(headless.record_detections, Some(PathBuf::from("d.jsonl")));
+        assert_eq!(parse(&[]).unwrap().record_detections, None);
+        assert!(
+            parse(&["--record-detections"]).is_err(),
+            "a path is required"
+        );
     }
 
     #[test]

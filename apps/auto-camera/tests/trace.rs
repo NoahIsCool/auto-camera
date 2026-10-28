@@ -2,6 +2,9 @@
 //! no camera, model or network) headless for 2 s and writes one JSON line
 //! per tick, as many as the summary's tick count; and a studio whose engine
 //! does not start, headless or in the window, leaves no trace behind.
+//! `--record-detections` likewise: the demo writes one line per applied
+//! pass, which a replay answers with the passes' boxes, and an engine that
+//! does not start leaves no log.
 
 use std::ffi::OsStr;
 use std::io::Read;
@@ -170,5 +173,88 @@ fn an_engine_that_does_not_start_leaves_no_trace_to_refuse_the_next_run() {
         assert!(error.contains("cannot open"), "{case}: {error}");
         assert!(!error.contains("the trace"), "{case}: {error}");
         assert!(!leftover, "{case} left its empty trace");
+    }
+}
+
+#[test]
+fn a_headless_demo_records_its_detections_for_replay() {
+    use ac_vision::{Detector, PromptQuery, ReplayDetector, parse_pass_log};
+    let (trace, log) = (
+        temp_path("demo-trace.jsonl"),
+        temp_path("demo-passes.jsonl"),
+    );
+    let (status, summary, stderr) = run_app(&[
+        OsStr::new("--config"),
+        OsStr::new(DEMO),
+        OsStr::new("--headless"),
+        OsStr::new("--seconds"),
+        OsStr::new("2"),
+        OsStr::new("--trace"),
+        trace.as_os_str(),
+        OsStr::new("--record-detections"),
+        log.as_os_str(),
+    ]);
+    let text = std::fs::read_to_string(&log);
+    let _ = std::fs::remove_file(&trace);
+    let _ = std::fs::remove_file(&log);
+    assert!(status.success(), "{status:?}: {stderr}");
+    let summary: serde_json::Value = serde_json::from_str(&summary).expect("a JSON summary");
+    let applied = summary["sources"][0]["discovery_applied"].as_u64().unwrap();
+    assert!(applied >= 10, "10 passes a second for 2 s: {applied}");
+    assert_eq!(summary["detections"]["records"], applied);
+    assert_eq!(summary["detections"]["missing"], 0);
+    let passes = parse_pass_log(&text.expect("the log was written")).expect("every line a pass");
+    assert_eq!(passes.len() as u64, applied);
+    // The demo's synthetic detector finds its three movers on every pass,
+    // and a replay at each pass's PTS gives back exactly those boxes.
+    let pattern = ac_sources::SyntheticPattern::new(1280, 720, 30.0, 3).unwrap();
+    let id = ac_core::SourceId("stage".into());
+    let mut replay = ReplayDetector::new(id.clone(), passes.clone(), Duration::ZERO);
+    let query = [PromptQuery::new("person", "person")];
+    for pass in &passes {
+        assert_eq!(pass.detections.len(), 3);
+        let frame = pattern.frame(&id, pass.seq);
+        assert_eq!(frame.pts, pass.pts);
+        let found = replay.detect(&frame, &query).expect("a recorded pass");
+        let boxes: Vec<_> = found.iter().map(|d| d.bbox).collect();
+        let recorded: Vec<_> = pass.detections.iter().map(|d| d.bbox).collect();
+        assert_eq!(boxes, recorded, "frame {}", pass.seq);
+    }
+}
+
+#[test]
+fn an_engine_that_does_not_start_leaves_no_detection_log() {
+    // As for the trace: a file source whose file does not exist.
+    let studio = temp_path("unstartable-log.toml");
+    let missing = temp_path("missing-log.mp4");
+    std::fs::write(
+        &studio,
+        format!(
+            "[[sources]]\nid = \"stage\"\nkind = \"file\"\npath = {:?}\n\n[detector]\nkind = \"none\"\n",
+            missing.display().to_string()
+        ),
+    )
+    .unwrap();
+    let log = temp_path("unstarted-log.jsonl");
+    let mut runs = Vec::new();
+    for headless in [true, false] {
+        let mut args = vec![OsStr::new("--config"), studio.as_os_str()];
+        if headless {
+            args.extend([
+                OsStr::new("--headless"),
+                OsStr::new("--seconds"),
+                OsStr::new("1"),
+            ]);
+        }
+        args.extend([OsStr::new("--record-detections"), log.as_os_str()]);
+        let (status, _, stderr) = run_app(&args);
+        let leftover = log.exists();
+        let _ = std::fs::remove_file(&log);
+        runs.push((headless, status, stderr, leftover));
+    }
+    std::fs::remove_file(&studio).unwrap();
+    for (headless, status, stderr, leftover) in runs {
+        assert_eq!(status.code(), Some(1), "headless {headless}: {stderr}");
+        assert!(!leftover, "headless {headless} left its empty log");
     }
 }

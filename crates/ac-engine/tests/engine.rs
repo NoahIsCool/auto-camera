@@ -256,6 +256,8 @@ fn start_reports_unusable_setups() {
             loop_playback: false,
             max_width: None,
             audio: false,
+            start_s: None,
+            duration_s: None,
         },
     );
     assert!(matches!(

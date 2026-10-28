@@ -18,9 +18,9 @@ use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::EngineSnapshot;
 
 use super::{
-    CropRange, DirectorSummary, HeadlessOptions, MatchSummary, OutputSummary, ProgramSummary,
-    QuerySummary, Sampler, ShotSummary, SourceSummary, SubjectSummary, Summary, TimingSummary,
-    TraceSummary,
+    CropRange, DetectionsSummary, DirectorSummary, HeadlessOptions, MatchSummary, OutputSummary,
+    ProgramSummary, QuerySummary, Sampler, ShotSummary, SourceSummary, SubjectSummary, Summary,
+    TimingSummary, TraceSummary,
 };
 
 /// Counters from the engine report and the trace writer.
@@ -31,6 +31,8 @@ pub(super) struct Totals {
     pub(super) threads_joined: usize,
     /// The trace, with `--trace`.
     pub(super) trace: Option<TraceSummary>,
+    /// The detection log, with `--record-detections`.
+    pub(super) detections: Option<DetectionsSummary>,
 }
 
 /// The summary of a run whose engine never started, which leaves no trace
@@ -50,6 +52,7 @@ pub(super) fn failed_to_start(
             ticks: 0,
             threads_joined: 0,
             trace: None,
+            detections: None,
         },
         None,
         None,
@@ -246,6 +249,7 @@ pub(super) fn summarize(
         },
         output,
         trace: totals.trace,
+        detections: totals.detections,
         render_issues: end.map(|s| s.render_issues.clone()).unwrap_or_default(),
     }
 }

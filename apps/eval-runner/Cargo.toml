@@ -1,0 +1,30 @@
+[package]
+name = "eval-runner"
+description = "Steps the engine core over a synthetic or decoded clip on simulated time, with live or replayed detections, and writes the per-tick trace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Lets a live run use the OWLv2 ONNX detector (see crates/ac-vision/README.md).
+onnx = ["ac-engine/onnx"]
+
+[dependencies]
+ac-core.workspace = true
+ac-director.workspace = true
+ac-engine.workspace = true
+ac-media.workspace = true
+ac-sources.workspace = true
+ac-vision.workspace = true
+serde.workspace = true
+clap = { version = "4.6", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+ac-eval.workspace = true
+
+[lints]
+workspace = true

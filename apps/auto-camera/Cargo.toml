@@ -33,6 +33,7 @@ serde_json = "1.0"
 [dev-dependencies]
 ac-eval.workspace = true
 ac-sources.workspace = true
+ac-vision.workspace = true
 
 [lints]
 workspace = true

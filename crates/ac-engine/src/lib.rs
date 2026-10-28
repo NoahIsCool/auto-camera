@@ -31,6 +31,10 @@
 //! * [`trace`] carries one record per tick (subjects, shot targets and
 //!   crops, program and preview) from the engine thread to a writer, such
 //!   as the app's `--trace` file, for scoring with `ac_eval`.
+//! * [`detection_log`] carries every discovery pass the engine applied to
+//!   a writer, such as the app's `--record-detections` file, so that a run's
+//!   detections can be replayed without its model
+//!   (`ac_vision::ReplayDetector`).
 //! * [`queries`] reads each query's prompt once, when it is created: the
 //!   detector is asked for the parsed phrase ("speaker upper body" asks for
 //!   "a person speaking"), and the prompt's shot words pick its framings
@@ -52,6 +56,7 @@ pub mod catalog;
 pub mod command;
 pub mod config;
 pub mod core;
+pub mod detection_log;
 pub mod detectors;
 pub mod discovery;
 pub mod mailbox;
@@ -70,6 +75,7 @@ pub use config::{
     QuerySettings, SidecarSettings, SourceEntry, StudioConfig, preset_for,
 };
 pub use core::{EngineCore, SourceFeed, TickOutput};
+pub use detection_log::{PassRecord, PassSender};
 pub use queries::{PromptReader, build_query, default_presets, read_prompt, shot_presets};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};
 pub use snapshot::{

@@ -22,12 +22,15 @@
 //! engine is given its channel, and the app waits for the last line once
 //! the engine has stopped. A run whose engine does not start removes the
 //! empty file, so that the same command works once the cause is fixed.
+//! `--record-detections PATH` writes every detector pass the engine
+//! applied the same way ([`detections`]), for the eval runner to replay.
 //!
-//! Exit status: 0 on success, 1 when the engine, the output or the trace
-//! failed, 2 for usage and configuration errors, 130 after a termination
-//! signal.
+//! Exit status: 0 on success, 1 when the engine, the output, the trace or
+//! the detection log failed, 2 for usage and configuration errors, 130
+//! after a termination signal.
 
 mod cli;
+mod detections;
 mod headless;
 mod signals;
 mod trace;
@@ -65,6 +68,7 @@ fn main() -> ExitCode {
             seconds: cli.seconds,
             record: cli.record,
             trace: cli.trace,
+            record_detections: cli.record_detections,
         };
         let summary = headless::run(config, &cli.config, &options, &quit);
         match serde_json::to_string_pretty(&summary) {
@@ -79,13 +83,20 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     } else {
-        run_window(config, cli.trace.as_deref(), &quit)
+        let log = cli.record_detections.as_deref();
+        run_window(config, cli.trace.as_deref(), log, &quit)
     }
 }
 
 /// Runs the operator window until it is closed, writing the per-tick trace
-/// to `trace` if given; see the module docs for the exit status.
-fn run_window(config: StudioConfig, trace: Option<&Path>, quit: &QuitSignal) -> ExitCode {
+/// to `trace` and the applied detector passes to `log` if given; see the
+/// module docs for the exit status.
+fn run_window(
+    config: StudioConfig,
+    trace: Option<&Path>,
+    log: Option<&Path>,
+    quit: &QuitSignal,
+) -> ExitCode {
     let (trace, options) = match trace::attach(trace, EngineOptions::default()) {
         Ok(t) => t,
         Err(e) => {
@@ -93,24 +104,38 @@ fn run_window(config: StudioConfig, trace: Option<&Path>, quit: &QuitSignal) -> 
             return ExitCode::FAILURE;
         }
     };
+    let (log, options) = match detections::attach(log, options) {
+        Ok(d) => d,
+        Err(e) => {
+            // The trace's sender went with the options: its file is empty.
+            let _ = trace.map(trace::TraceFile::discard_if_empty);
+            eprintln!("auto-camera: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let result = ui::run(config, options, quit.clone());
-    // The window's engine has stopped, and its trace sender with it. A
-    // window that failed, most often because its engine did not start,
-    // leaves no empty trace behind.
+    // The window's engine has stopped, and its senders with it. A window
+    // that failed, most often because its engine did not start, leaves no
+    // empty trace or log behind.
     let report = trace.map(|t| match result {
         Ok(()) => t.finish(),
         Err(_) => t.discard_if_empty(),
     });
+    let log_report = log.map(|l| match result {
+        Ok(()) => l.finish(),
+        Err(_) => l.discard_if_empty(),
+    });
     let trace_error = report.and_then(|r| r.error);
+    let log_error = log_report.and_then(|r| r.error);
     if let Err(e) = &result {
         eprintln!("auto-camera: {e}");
     }
-    if let Some(e) = &trace_error {
+    for e in trace_error.iter().chain(&log_error) {
         eprintln!("auto-camera: {e}");
     }
     match result {
         Ok(()) if quit.requested() => ExitCode::from(signals::INTERRUPTED),
-        Ok(()) if trace_error.is_none() => ExitCode::SUCCESS,
+        Ok(()) if trace_error.is_none() && log_error.is_none() => ExitCode::SUCCESS,
         _ => ExitCode::FAILURE,
     }
 }
