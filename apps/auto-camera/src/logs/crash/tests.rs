@@ -3,7 +3,10 @@
 //! after it. Every report goes into a temporary folder.
 //!
 //! The panic hook is one per process, so the tests that install one hold
-//! [`serial`] for as long as theirs is installed.
+//! [`serial`] for as long as theirs is installed. Other tests in this
+//! binary panic on purpose too (a headless run's engine thread), and such
+//! a panic can come while a hook here is installed; so these tests look
+//! only at what their own threads' panics did ([`own_reports`]).
 
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
@@ -51,6 +54,20 @@ fn reports(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// The names and texts of the crash reports in `dir` of panics on threads
+/// named `thread`, in name order.
+fn own_reports(dir: &Path, thread: &str) -> Vec<(String, String)> {
+    let line = format!("\nthread: {thread}\n");
+    reports(dir)
+        .iter()
+        .map(|p| {
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            (name, std::fs::read_to_string(p).unwrap())
+        })
+        .filter(|(_, text)| text.contains(&line))
+        .collect()
+}
+
 #[test]
 fn a_panic_on_a_thread_writes_a_crash_file_with_the_snapshot_summary() {
     let _serial = serial();
@@ -66,14 +83,15 @@ fn a_panic_on_a_thread_writes_a_crash_file_with_the_snapshot_summary() {
     let message = format!("deliberate test panic in {}", std::process::id());
     with_hook(&reporter, || panic_on_thread("ac-crash-test", &message));
 
-    let found = reports(dir.path());
+    let found = own_reports(dir.path(), "ac-crash-test");
     assert_eq!(found.len(), 1, "{found:?}");
-    let name = found[0].file_name().unwrap().to_string_lossy().into_owned();
-    assert!(
-        name.ends_with(&format!("-{}-0.txt", std::process::id())),
-        "{name}"
-    );
-    let text = std::fs::read_to_string(&found[0]).unwrap();
+    let (name, text) = &found[0];
+    // `crash-<time>-<pid>-<n>.txt`, `n` counting this reporter's reports.
+    let n = name
+        .strip_suffix(".txt")
+        .and_then(|s| s.rsplit_once(&format!("-{}-", std::process::id())))
+        .map(|(_, n)| n);
+    assert!(n.is_some_and(|n| n.parse::<usize>().is_ok()), "{name}");
     assert!(
         text.starts_with("Auto Camera crash report\napp: auto-camera 0.1.0 (git test)\ntime: 20"),
         "{text}"
@@ -110,7 +128,9 @@ fn a_thread_that_panics_holding_the_summary_does_not_hang_the_hook() {
             .join();
         assert!(joined.is_err());
     });
-    let text = std::fs::read_to_string(&reports(dir.path())[0]).unwrap();
+    let found = own_reports(dir.path(), "ac-holder");
+    assert_eq!(found.len(), 1, "{found:?}");
+    let text = &found[0].1;
     assert!(
         text.contains("last snapshot:\n(the summary was being updated and could not be read)\n"),
         "{text}"
@@ -139,7 +159,9 @@ fn reports_are_capped_per_process_and_the_previous_hook_always_runs() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
     std::panic::set_hook(Box::new(move |_| {
-        counter.fetch_add(1, Ordering::SeqCst);
+        if std::thread::current().name() == Some("ac-crash-gone") {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
     }));
     let gone = Arc::new(CrashReporter::new(&dir.path().join("gone"), "x"));
     let previous = install(gone);
