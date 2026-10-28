@@ -111,7 +111,10 @@ python3 -m unittest -v                                        # codec, loop, fak
 
 The tests need no third-party package; the MLX glue tests skip themselves
 without numpy and the smoke test without `AC_SAM3_MODEL`. Lint with
-`ruff check . && ruff format --check .` (settings in `ruff.toml`).
+`ruff check . && ruff format --check .` (settings in `ruff.toml`); CI runs
+both with Ruff 0.16.8. The licences of the packages in `requirements.txt`
+are in [`docs/licence-manifest.md`](../../docs/licence-manifest.md), and a
+new requirement needs an entry there.
 
 ## Command line
 
