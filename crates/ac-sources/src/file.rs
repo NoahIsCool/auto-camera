@@ -25,7 +25,8 @@
 //! Shutdown: [`VideoSource::stop`] raises the stop flag, kills every child (which
 //! unblocks any worker stuck reading a pipe), joins the workers and reaps the
 //! children. Dropping a source stops it, so no ffmpeg process outlives its
-//! source.
+//! source. A worker kills its decoder before it drops the decoder's stdout,
+//! so a stop leaves no "Broken pipe" complaints in the log.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -358,7 +359,6 @@ impl VideoWorker {
                 seq += 1;
                 shared.progress.frame_published(pass, self.rate.pts(seq));
             }
-            drop(stdout);
             let produced = seq > first;
             if self.looping && produced && failure.is_none() && !shared.stopping() {
                 // Announce the loop point before reaping the old decoder: the
@@ -366,14 +366,17 @@ impl VideoWorker {
                 shared.progress.pass_ended(self.rate.pts(seq));
                 pass += 1;
             }
-            // A decoder that produced frames is done, and killing it is
-            // immediate; one that produced none is waited for, for its status.
-            let exit = if produced {
+            // A decoder that closed its output without a frame is exiting, and
+            // is waited for, for its status; any other is done (or stopping)
+            // and killing it is immediate. Either way it is gone before its
+            // pipe closes (see `crate::process`).
+            let exit = if !produced && failure.is_none() && !shared.stopping() {
+                shared.children.finish(key)
+            } else {
                 shared.children.kill(key);
                 None
-            } else {
-                shared.children.finish(key)
             };
+            drop(stdout);
             if shared.stopping() {
                 break;
             }

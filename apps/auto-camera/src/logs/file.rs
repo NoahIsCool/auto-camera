@@ -12,18 +12,35 @@
 //! `<stem>.log`. A new session appends to the current file, so many short
 //! runs do not push a long one out.
 //!
+//! A rotated file must still say what wrote it, however long the session
+//! has run. So the session's header (the lines given to
+//! [`RotatingFile::write_header`]: build, process, config, models) is kept
+//! and written again, as first written, at the top of every file a
+//! rotation starts.
+//!
+//! Counting the bytes in memory, and renaming files, is only right while
+//! one process writes the files. So the files of a stem have a lock,
+//! `<stem>.lock`, held (as an advisory lock of the operating system) for
+//! as long as they are open; another process asking for the same stem is
+//! refused, and picks another (see the parent module). The system drops
+//! the lock when the process ends, crash or not.
+//!
 //! # Invariants
 //!
 //! * One owner: the writer thread is the only one that writes (see the
-//!   `writer` module); nothing here is shared.
-//! * A line is never split across files. A line longer than the cap goes
-//!   alone into a fresh file, so a file exceeds the cap only by holding
-//!   one such line, and the writer caps lines well below it.
+//!   `writer` module); nothing here is shared, and no other process
+//!   writes the same files while the lock is held.
+//! * A line is never split across files. A line that does not fit beside
+//!   the header goes alone (after the header) into a fresh file, so a file
+//!   exceeds the cap only by holding one such line, and the writer caps
+//!   lines well below it.
+//! * Every file a rotation starts begins with the header, which is at most
+//!   half the cap (header lines beyond that are written once only).
 //! * When a rename is refused (a file locked or made read-only by hand),
 //!   the current file is emptied instead: the log loses its older lines
 //!   but stays within its cap.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -42,17 +59,40 @@ pub struct RotatingFile {
     file: BufWriter<File>,
     /// Bytes in the current file, buffered ones included.
     len: u64,
+    /// The header lines kept, without their newlines.
+    header: Vec<String>,
+    /// Bytes of the kept header, newlines included.
+    header_len: u64,
+    /// `<stem>.lock`, locked while the files are open.
+    _lock: File,
 }
 
 impl RotatingFile {
-    /// Opens (or creates) `<dir>/<stem>.log` for appending. `dir` must
-    /// exist; `cap` must be positive.
+    /// Opens (or creates) `<dir>/<stem>.log` for appending, taking the
+    /// stem's lock. `dir` must exist; `cap` must be positive. An error of
+    /// kind [`io::ErrorKind::WouldBlock`] when another holds the lock.
     pub fn open(dir: &Path, stem: &str, cap: u64, keep: usize) -> io::Result<Self> {
         if cap == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the log's size cap must be positive",
             ));
+        }
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(format!("{stem}.lock")))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("another process writes {stem}.log"),
+                ));
+            }
+            // A file system without locks: better unlocked than no log.
+            Err(TryLockError::Error(_)) => {}
         }
         let path = dir.join(format!("{stem}.log"));
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -64,6 +104,9 @@ impl RotatingFile {
             keep,
             file: BufWriter::new(file),
             len,
+            header: Vec::new(),
+            header_len: 0,
+            _lock: lock,
         })
     }
 
@@ -88,9 +131,27 @@ impl RotatingFile {
         if self.len > 0 && self.len + size > self.cap {
             self.rotate()?;
         }
+        self.append(line)
+    }
+
+    /// Appends `line` like [`Self::write_line`] and keeps it in the header
+    /// that every file a rotation starts begins with, while the header
+    /// stays within half the cap.
+    pub fn write_header(&mut self, line: &str) -> io::Result<()> {
+        self.write_line(line)?;
+        let size = line.len() as u64 + 1;
+        if self.header_len + size <= self.cap / 2 {
+            self.header.push(line.to_owned());
+            self.header_len += size;
+        }
+        Ok(())
+    }
+
+    /// Writes `line` and a newline into the current file.
+    fn append(&mut self, line: &str) -> io::Result<()> {
         self.file.write_all(line.as_bytes())?;
         self.file.write_all(b"\n")?;
-        self.len += size;
+        self.len += line.len() as u64 + 1;
         Ok(())
     }
 
@@ -99,8 +160,8 @@ impl RotatingFile {
         self.file.flush()
     }
 
-    /// Moves every file up one number and starts an empty current file;
-    /// see the module docs.
+    /// Moves every file up one number and starts a current file that holds
+    /// the header; see the module docs.
     fn rotate(&mut self) -> io::Result<()> {
         self.file.flush()?;
         let shifted = self.shift();
@@ -114,7 +175,10 @@ impl RotatingFile {
         };
         self.file = BufWriter::new(file);
         self.len = 0;
-        Ok(())
+        let header = std::mem::take(&mut self.header);
+        let written = header.iter().try_for_each(|line| self.append(line));
+        self.header = header;
+        written
     }
 
     /// Drops the oldest kept file and renames the others up one number,
@@ -224,6 +288,72 @@ mod tests {
         log.flush().unwrap();
         assert_eq!(lines(&log.path()), ["three"]);
         assert!(!log.numbered(1).exists());
+    }
+
+    #[test]
+    fn every_file_a_rotation_starts_begins_with_the_header() {
+        let dir = TempDir::new("header");
+        let mut log = RotatingFile::open(dir.path(), "x", 100, 3).unwrap();
+        log.write_header("build 1").unwrap();
+        log.write_line("line 0000").unwrap();
+        // A header line that comes later (a model's hash) joins it.
+        log.write_header("model sha1").unwrap();
+        for i in 1..40 {
+            log.write_line(&format!("line {i:04}")).unwrap();
+        }
+        log.flush().unwrap();
+        // 19 bytes of header leave room for eight lines of ten bytes.
+        for n in 0..=3 {
+            let lines = lines(&log.numbered(n));
+            let first = 32 - 8 * n;
+            let body: Vec<String> = (first..first + 8).map(|i| format!("line {i:04}")).collect();
+            assert_eq!(lines[..2], ["build 1", "model sha1"], "file {n}");
+            assert_eq!(lines[2..], body, "file {n}");
+            assert!(std::fs::metadata(log.numbered(n)).unwrap().len() <= 100);
+        }
+        assert!(!log.numbered(4).exists());
+    }
+
+    #[test]
+    fn the_header_is_kept_within_half_the_cap() {
+        let dir = TempDir::new("bigheader");
+        let mut log = RotatingFile::open(dir.path(), "x", 40, 2).unwrap();
+        // Two lines of ten bytes fill half the cap; the third is not kept.
+        for h in ["header 01", "header 02", "header 03"] {
+            log.write_header(h).unwrap();
+        }
+        log.write_line("next line").unwrap();
+        // Too long to fit beside the header: alone after it.
+        log.write_line(&"x".repeat(30)).unwrap();
+        log.write_line("last").unwrap();
+        log.flush().unwrap();
+        assert_eq!(
+            lines(&log.numbered(2)),
+            ["header 01", "header 02", "header 03", "next line"]
+        );
+        assert_eq!(
+            lines(&log.numbered(1)),
+            ["header 01", "header 02", &"x".repeat(30)]
+        );
+        assert_eq!(lines(&log.path()), ["header 01", "header 02", "last"]);
+    }
+
+    #[test]
+    fn a_second_writer_of_the_same_files_is_refused() {
+        let dir = TempDir::new("lock");
+        let first = RotatingFile::open(dir.path(), "x", 100, 1).unwrap();
+        let err = RotatingFile::open(dir.path(), "x", 100, 1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert!(err.to_string().contains("x.log"), "{err}");
+        assert!(
+            RotatingFile::open(dir.path(), "y", 100, 1).is_ok(),
+            "another stem has its own lock"
+        );
+        drop(first);
+        assert!(
+            RotatingFile::open(dir.path(), "x", 100, 1).is_ok(),
+            "the lock goes with the files"
+        );
     }
 
     #[test]

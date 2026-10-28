@@ -2,7 +2,7 @@
 //! demo studio (synthetic, no camera, model or network) with `--log-dir`
 //! set to a temporary folder, must leave a log there that says which build
 //! ran which config, what the studio did and that the app exited, and no
-//! crash report.
+//! crash report. Two runs at once on one folder write a log each.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -130,4 +130,50 @@ fn a_headless_run_leaves_a_log_that_says_what_ran() {
     );
     assert!(!log.contains(" ERROR "), "{log}");
     assert!(named(&logs, "crash-").is_empty());
+}
+
+#[test]
+fn two_apps_at_once_write_a_log_each() {
+    let dir = TempDir::new("two");
+    let start = || {
+        Command::new(APP)
+            .args([
+                "--config",
+                DEMO,
+                "--headless",
+                "--seconds",
+                "1",
+                "--log-dir",
+            ])
+            .arg(&dir.0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the app runs")
+    };
+    // Each holds its log from its start to its exit, a second or more.
+    let apps = [start(), start()];
+    for app in apps {
+        let out = app.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let mut pids = Vec::new();
+    for name in ["auto-camera.log", "auto-camera-2.log"] {
+        let log = std::fs::read_to_string(dir.0.join(name)).expect(name);
+        let starts: Vec<&str> = log
+            .lines()
+            .filter_map(|l| l.split_once(" starting: pid ").map(|(_, rest)| rest))
+            .collect();
+        assert_eq!(starts.len(), 1, "one session in {name}: {log}");
+        pids.push(starts[0].split(',').next().unwrap().to_owned());
+        assert_eq!(log.matches("auto-camera exiting").count(), 1, "{log}");
+        assert!(log.ends_with("auto-camera exiting\n"), "{log}");
+    }
+    assert_ne!(pids[0], pids[1], "two processes");
+    assert!(named(&dir.0, "auto-camera-3").is_empty());
 }

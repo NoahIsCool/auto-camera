@@ -171,12 +171,14 @@ fn describe(path: &Path) -> (Level, String) {
     }
 }
 
-/// Logs `text` at `level` under the hasher's target.
+/// Logs `text` at `level` under the hasher's target, as a header line
+/// (see the `writer` module): what the model files were is part of what
+/// ran.
 pub fn log(level: Level, text: &str) {
     if level == Level::WARN {
-        tracing::warn!(target: TARGET, "{text}");
+        tracing::warn!(target: TARGET, log_header = true, "{text}");
     } else {
-        tracing::info!(target: TARGET, "{text}");
+        tracing::info!(target: TARGET, log_header = true, "{text}");
     }
 }
 

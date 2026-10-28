@@ -12,9 +12,15 @@
 //!   process can outlive the source.
 //! * Every child is waited on after it exits or is killed, so none is left as a
 //!   zombie.
-//! * The registry lock is held only to move `Child` handles in and out (and
-//!   for non-blocking `try_wait`); spawning, killing and blocking waits happen
-//!   outside it.
+//! * The registry lock is held only to move `Child` handles in and out, for
+//!   non-blocking `try_wait` and for the kill signals [`Children::close`]
+//!   sends; spawning, reaping and blocking waits happen outside it.
+//! * A child leaves the registry dead or dying: [`Children::kill`] reaps it,
+//!   and [`Children::close`] signals every child before any leaves. So a
+//!   worker that calls `kill` before it drops the child's stdout never closes
+//!   the pipe of a live decoder, even when `close` took the child first. A
+//!   decoder that finds its pipe closed says "Broken pipe" on stderr, which
+//!   the log would show as an error of the file's.
 //! * Every child's stderr goes to the app's log, through a drain thread
 //!   that ends with the child ([`crate::logs`]).
 
@@ -129,11 +135,16 @@ impl Children {
     }
 
     /// Refuses further spawns, then kills and reaps every registered child.
-    /// Idempotent.
+    /// Every child is signalled before the lock is released (see the module
+    /// docs). Idempotent.
     pub(crate) fn close(&self) {
         let live = {
             let mut reg = lock(&self.inner);
             reg.closed = true;
+            for (_, child) in &mut reg.live {
+                // Sending a signal does not block; the waits come below.
+                let _ = child.kill();
+            }
             std::mem::take(&mut reg.live)
         };
         for (_, child) in live {
@@ -203,10 +214,11 @@ impl Respawner {
         Ok(current)
     }
 
-    /// Kills the warm decoder, if any.
+    /// Kills the warm decoder, if any, before its stdout is dropped.
     pub(crate) fn discard(&mut self, children: &Children) {
         if let Some(s) = self.next.take() {
             children.kill(s.key);
+            drop(s.stdout);
         }
     }
 }

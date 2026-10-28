@@ -26,16 +26,23 @@
 //!   header: the app's version and commit, the process and the log's
 //!   path; once the config is loaded ([`LogSession::studio`]) the config's
 //!   path and SHA-256, and the model files, hashed in the background
-//!   (`hashes`).
+//!   (`hashes`). Header lines are marked (`log_header = true`), so every
+//!   file a rotation starts begins with them again.
+//!
+//! Two apps may run at once on one machine (the window beside a headless
+//! rehearsal), and the log's files have one writer each (see `file`). So
+//! a session writes the first log no other process holds: `auto-camera.log`,
+//! else `auto-camera-2.log`, and so on up to [`SLOTS`]. Within one file the
+//! sessions follow each other, each beginning with its header line.
 //!
 //! # Invariants
 //!
 //! * Logging never blocks or fails the caller; a log that cannot be
 //!   opened is reported on stderr and the app runs without one.
-//! * The folder holds at most [`KEEP`] old log files and the current one,
-//!   each at most [`CAP`] bytes, and at most `crash::KEEP_REPORTS` crash
-//!   reports from earlier runs (pruned at start) plus `crash::MAX_REPORTS`
-//!   from this one.
+//! * The folder holds, for each of at most [`SLOTS`] logs, at most [`KEEP`]
+//!   old files and the current one, each at most [`CAP`] bytes, and at
+//!   most `crash::KEEP_REPORTS` crash reports from earlier runs (pruned at
+//!   start) plus `crash::MAX_REPORTS` from this one.
 //! * Events at [`LEVEL`] and more severe are logged.
 //! * Dropping the [`LogSession`] stops the hasher, writes the last line
 //!   and flushes the file before the process exits.
@@ -74,6 +81,9 @@ pub const KEEP: usize = 4;
 
 /// Least severe level logged.
 pub const LEVEL: Level = Level::INFO;
+
+/// Logs that can be written at once, by as many apps.
+pub const SLOTS: usize = 4;
 
 /// Name stem of the log files: `auto-camera.log`, `auto-camera.1.log`, ...
 const STEM: &str = "auto-camera";
@@ -116,6 +126,25 @@ fn user_dir() -> Option<PathBuf> {
         var("HOME").as_deref(),
         var("XDG_STATE_HOME").as_deref(),
     )
+}
+
+/// Opens the first log in `dir` that no other process writes:
+/// `<STEM>.log`, else `<STEM>-2.log`, and so on up to [`SLOTS`].
+fn open_free(dir: &Path, cap: u64, keep: usize) -> io::Result<RotatingFile> {
+    for slot in 1..=SLOTS {
+        let stem = match slot {
+            1 => STEM.to_owned(),
+            n => format!("{STEM}-{n}"),
+        };
+        match RotatingFile::open(dir, &stem, cap, keep) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            opened => return opened,
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!("{SLOTS} other auto-camera processes write logs there"),
+    ))
 }
 
 /// The log of one run of the app; see the module docs.
@@ -161,7 +190,7 @@ impl LogSession {
     fn open(dir: &Path) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let pruned = crash::prune(dir, crash::KEEP_REPORTS);
-        let file = RotatingFile::open(dir, STEM, CAP, KEEP)?;
+        let file = open_free(dir, CAP, KEEP)?;
         let path = file.path();
         let writer = Writer::start(file)?;
         tracing::subscriber::set_global_default(writer.subscriber(LEVEL))
@@ -172,6 +201,7 @@ impl LogSession {
         drop(crash::install(reporter));
         tracing::info!(
             target: TARGET,
+            log_header = true,
             "{} starting: pid {}, {}/{}, log {}",
             app(),
             std::process::id(),
@@ -197,13 +227,19 @@ impl LogSession {
         match std::fs::read(path) {
             Ok(bytes) => tracing::info!(
                 target: TARGET,
+                log_header = true,
                 "config {}: sha256 {}, {} sources, {} queries",
                 path.display(),
                 hashes::sha256_hex(&bytes),
                 config.sources.len(),
                 config.queries.len()
             ),
-            Err(e) => tracing::warn!(target: TARGET, "config {}: cannot hash: {e}", path.display()),
+            Err(e) => tracing::warn!(
+                target: TARGET,
+                log_header = true,
+                "config {}: cannot hash: {e}",
+                path.display()
+            ),
         }
         let paths = hashes::model_paths(&config.detector);
         if !paths.is_empty() {
@@ -267,6 +303,35 @@ mod tests {
         let app = app();
         assert!(app.starts_with(&format!("auto-camera {} (git ", env!("CARGO_PKG_VERSION"))));
         assert!(app.ends_with(')') && !app.contains("(git )"), "{app}");
+    }
+
+    #[test]
+    fn a_second_app_writes_the_next_free_log() {
+        let dir = testdir::TempDir::new("slots");
+        let log = |name: &str| dir.path().join(name);
+        let first = open_free(dir.path(), 100, 1).unwrap();
+        assert_eq!(first.path(), log("auto-camera.log"));
+        let others: Vec<RotatingFile> = (2..=SLOTS)
+            .map(|n| {
+                let file = open_free(dir.path(), 100, 1).unwrap();
+                assert_eq!(file.path(), log(&format!("auto-camera-{n}.log")));
+                file
+            })
+            .collect();
+        let err = open_free(dir.path(), 100, 1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            err.to_string().starts_with(&format!("{SLOTS} other")),
+            "{err}"
+        );
+        drop(first);
+        let again = open_free(dir.path(), 100, 1).unwrap();
+        assert_eq!(
+            again.path(),
+            log("auto-camera.log"),
+            "a freed log is taken again"
+        );
+        drop(others);
     }
 
     #[test]

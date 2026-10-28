@@ -234,10 +234,11 @@ impl AudioWorker {
                 break;
             }
         }
-        drop(stdout);
         // Whether it finished, was trimmed or is stopping, this decoder is
-        // done; its exit status says nothing the video worker cannot.
+        // done; its exit status says nothing the video worker cannot. It dies
+        // before its pipe closes (see `crate::process`).
         shared.children.kill(key);
+        drop(stdout);
         !stopped
     }
 
