@@ -19,14 +19,22 @@ use thiserror::Error;
 /// A request to change engine state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineCommand {
-    /// Stage `shot` on preview.
+    /// Stage `shot` on preview; during a transition, when it ends.
     SetPreview {
         /// The shot.
         shot: ShotId,
     },
-    /// Swap preview and program at once.
+    /// Swap preview and program at once; during a transition, cut it short,
+    /// landing the shot it brings in.
     Cut,
-    /// Run the selected transition from program to preview.
+    /// Cut `shot` straight to program ("Cut now"), whatever is staged and
+    /// whether or not a transition runs, in one step.
+    CutTo {
+        /// The shot.
+        shot: ShotId,
+    },
+    /// Run the selected transition from program to preview; during a
+    /// transition, queue a take of the shot staged meanwhile for its end.
     Auto,
     /// Move the T-bar to `position` in `0.0..=1.0`.
     SetTBar {
@@ -96,7 +104,8 @@ pub enum EngineCommand {
         /// The profile.
         profile: ContentProfile,
     },
-    /// Stage the director's suggestion on preview and run Auto to it.
+    /// Stage the director's suggestion on preview and run Auto to it
+    /// (queued like [`EngineCommand::Auto`] during a transition).
     AcceptSuggestion,
     /// Start the program encoder. Destinations default to the config's.
     StartOutput {
@@ -117,6 +126,7 @@ impl EngineCommand {
         match self {
             EngineCommand::SetPreview { .. } => "set_preview",
             EngineCommand::Cut => "cut",
+            EngineCommand::CutTo { .. } => "cut_to",
             EngineCommand::Auto => "auto",
             EngineCommand::SetTBar { .. } => "set_tbar",
             EngineCommand::SetTransition { .. } => "set_transition",
@@ -203,6 +213,9 @@ mod tests {
                 shot: ShotId("a".into()),
             },
             EngineCommand::Cut,
+            EngineCommand::CutTo {
+                shot: ShotId("a".into()),
+            },
             EngineCommand::Auto,
             EngineCommand::SetTBar { position: 0.5 },
             EngineCommand::SetTransition {
