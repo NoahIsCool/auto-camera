@@ -3,8 +3,8 @@
 //! queries that have subjects, the director then suggests the
 //! higher-priority subject, a stray alias box does not lift the wrong
 //! person, a config without priorities is ranked by its list order, and a
-//! studio whose queries all share one priority directs exactly as one
-//! without any.
+//! studio whose queries all share one priority directs exactly as the
+//! director does with its priority weight at zero.
 
 use ac_core::Extent;
 use ac_director::{DirectorConfig, ScoreWeights, ShotCandidate};

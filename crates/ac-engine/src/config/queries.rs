@@ -41,8 +41,10 @@
 //! aliases) stands above the lowest priority among the queries that have
 //! subjects, and the director adds a bonus per level
 //! (`ac_director::candidate`), so a config that gives every query the same
-//! priority directs exactly as one without priorities, and so does a
-//! config with only one query. A priority outside the range is an error
+//! priority directs exactly as the director did before it weighed
+//! priorities (every level is 0), and so does a config with only one
+//! query. A config that gives no priority at all is not such a config: its
+//! list order ranks the queries. A priority outside the range is an error
 //! ([`QuerySettings::check_priority`]), not clamped: a typo such as
 //! `priority = 50` would otherwise quietly pin one prompt on air.
 

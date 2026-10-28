@@ -43,7 +43,8 @@
 //!
 //! Counting from the floor makes only differences matter: with every query
 //! at one priority, or only one query's subjects on screen, every level is
-//! 0 and the director scores exactly as without priorities.
+//! 0 and the director scores exactly as it did before it weighed
+//! priorities.
 
 use std::time::Duration;
 

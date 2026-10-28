@@ -166,10 +166,10 @@ while a shot tracked clearly better can still win: four levels are worth
 0.2 of quality. A subject is ranked by the query that first found it, not
 by other prompts that also box it (one stray box would otherwise rank the
 wrong person up). Only differences count: queries that all share one
-priority are directed exactly as without priorities, a query that finds
-no one changes nothing, and a wide counts as the lowest. A query added in
-the window joins the end of the list (or gets 3 when priorities are
-given), and a priority outside 1 to 5 is a configuration error.
+priority are directed exactly as before priorities existed, a query that
+finds no one changes nothing, and a wide counts as the lowest. A query
+added in the window joins the end of the list (or gets 3 when priorities
+are given), and a priority outside 1 to 5 is a configuration error.
 
 Further sections tune the `tracker`, `subjects` (limits and lost/retire
 times), `framing`, `switcher` (default transition), `monitors` (monitor
