@@ -56,6 +56,13 @@ skip_s = 30
 transition = "mix"
 duration = 0.8
 
+# Settle-before-take, off by default: an operator Cut or Auto waits up to
+# max_wait_s for the preview crop to settle; a second press takes at once.
+# [switcher.settle]
+# enabled = true
+# threshold = 0.6
+# max_wait_s = 0.5
+
 [output]
 width = 1280
 height = 720

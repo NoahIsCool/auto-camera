@@ -7,6 +7,7 @@
 //! them to a live core instead, to see what goes on air.
 
 mod operator;
+mod settle;
 mod switching;
 
 use super::*;

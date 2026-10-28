@@ -27,7 +27,10 @@
 //!    and store (media time = the frame's PTS).
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
 //! 5. **Framing.** Every shot's framer steps by `dt` and is rescored.
-//! 6. **Switching.** The switcher advances its transition; when one ends,
+//! 6. **Switching.** An operator's take waiting for preview to settle
+//!    fires once it has, or once its wait is over, and is dropped with the
+//!    reason when preview changed meanwhile ([`settle`]). The switcher
+//!    then advances its transition; when one ends,
 //!    a take the operator queued during it fires if the catalog still has
 //!    its shot available, and is dropped with the reason otherwise
 //!    ([`ac_switcher`]). The director then proposes (and in Auto mode
@@ -108,6 +111,7 @@ use crate::config::{DiscoverySettings, MonitorSettings, QuerySettings, Ranking, 
 use crate::discovery::{DiscoveryRequest, DiscoveryResult};
 use crate::queries::PromptReader;
 use crate::schedule::RateMeter;
+use crate::settle::SettleGate;
 use crate::snapshot::{DiscoveryStats, MatchView};
 use crate::vision::SourceVision;
 
@@ -115,6 +119,7 @@ mod commands;
 mod directing;
 mod passes;
 mod render;
+mod settle;
 mod shots;
 mod snapshot;
 #[cfg(test)]
@@ -320,6 +325,9 @@ pub struct EngineCore {
     last_held_back: Option<ShotId>,
     /// Takes requested by the director.
     director_takes: u64,
+    /// Settle-before-take: the operator's take waiting for preview to
+    /// settle, if one is ([`crate::settle`]).
+    settle: SettleGate,
     /// Program renderer.
     compositor: Compositor,
     /// Master-clock time of the newest tick.
@@ -426,6 +434,7 @@ impl EngineCore {
             held_back: 0,
             last_held_back: None,
             director_takes: 0,
+            settle: SettleGate::new(config.switcher.settle.rule()),
             compositor,
             now: Duration::ZERO,
             ticks: 0,
@@ -515,6 +524,7 @@ impl EngineCore {
         }
         self.sync_catalog();
         self.step_framing(dt);
+        self.settle_tick(dt);
         let catalog = &self.catalog;
         self.switcher.tick(dt, |id| catalog.is_available(id));
         self.note_program();

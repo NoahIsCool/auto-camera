@@ -101,6 +101,19 @@ holds its takes for `pause_s` seconds after each action, counted down on
 the badge; with `"director"` it carries on and stages its shot over yours.
 A notice says which happened.
 
+Settle-before-take is off by default. With `[switcher.settle]`
+`enabled = true`, a Cut or Auto pressed while the preview crop is still
+travelling to its subject (its settledness below `threshold`, 0.6 by
+default) waits for it to settle, at most `max_wait_s` (0.5 s by default and
+at most), and the preview caption says `waiting for preview to settle`.
+Press again (`Space`, `Enter`, CUT or AUTO) to take it at once; staging
+another shot takes it first. If preview changes while it waits, the take is
+dropped with the same notice as any fenced take. The double click's Cut
+now, the T-bar and Accept never wait and replace a waiting take; the
+director's own takes never wait. Whether or not it is on, the preview
+caption turns amber and says `subject N lost` when the preview shot's
+subject is lost; it only warns, and the take goes ahead.
+
 ## Headless mode
 
 ```sh

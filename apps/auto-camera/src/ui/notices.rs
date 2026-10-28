@@ -1,26 +1,31 @@
 //! The status bar's notice: one line telling the operator what just
 //! happened.
 //!
-//! Four things raise one: a command's reply ([`notice_for`]: routine
-//! switching replies are silent, every error is shown, a take refused
-//! because preview changed after the operator saw it included, and so is
-//! the director dropping to Suggest or pausing because the operator
-//! switched by hand), a take the switcher dropped when the transition
-//! before it ended ([`dropped_notice`]), a suggestion the director did not
-//! stage because the operator's shot holds preview ([`held_back_notice`]),
-//! the engine stopping ([`stopped_notice`]), and, as the window opens, the
+//! These raise one: a command's reply ([`notice_for`]: routine switching
+//! replies are silent, every error is shown, a take refused because preview
+//! changed after the operator saw it included, and so is the director
+//! dropping to Suggest or pausing because the operator switched by hand), a
+//! take the switcher dropped when the transition before it ended
+//! ([`dropped_notice`]), a take that waited for preview to settle and was
+//! dropped at the end of its wait, shown as the refused command it became
+//! ([`settle_dropped_notice`]), a suggestion the director did not stage
+//! because the operator's shot holds preview ([`held_back_notice`]), the
+//! engine stopping ([`stopped_notice`]), and, as the window opens, the
 //! config's load warnings ([`warnings_notice`]). The newest raised notice
 //! is shown for [`NOTICE_FOR`] and then cleared; while the engine is
 //! stopped, its notice replaces any other, since nothing else matters then.
 //!
 //! A take queued during a transition is answered when it is queued, so its
 //! drop can only be read from the snapshots: the switcher counts the takes
-//! it dropped and keeps the newest reason. A suggestion held back is no
-//! command's at all, so it too is read from the snapshots, where the engine
-//! counts them and keeps the newest. [`Notices`] remembers the counts it
-//! has seen, so each drop or hold raises one notice however many frames
-//! draw the same snapshot, and those counted before the window opened are
-//! not news. Several between two frames raise one notice, the newest.
+//! it dropped and keeps the newest reason. A take waiting for preview to
+//! settle is answered when it is pressed, and its drop is read the same
+//! way, from the engine's count ([`ac_engine::settle`]). A suggestion held
+//! back is no command's at all, so it too is read from the snapshots, where
+//! the engine counts them and keeps the newest. [`Notices`] remembers the
+//! counts it has seen, so each drop or hold raises one notice however many
+//! frames draw the same snapshot, and those counted before the window
+//! opened are not news. Several between two frames raise one notice, the
+//! newest.
 //!
 //! Time is egui's input time in seconds, which a real window reads from the
 //! clock and the test harness advances by a fixed step per frame, so the
@@ -66,6 +71,20 @@ pub fn dropped_notice(snap: &EngineSnapshot, seen: u64) -> Option<(String, bool)
     }
     let reason = switcher.last_dropped.clone()?;
     notice_for("queued take", &Err(CommandError::Switch(reason)))
+}
+
+/// The notice for an operator's take that waited for preview to settle
+/// and was dropped, since the window had seen `seen` such drops: preview
+/// changed during the wait, or the switcher refused it when it fired. It
+/// reads as the refused command it became ("cut: preview changed to …
+/// since you saw …: nothing was taken"); `None` when there is no new drop.
+pub fn settle_dropped_notice(snap: &EngineSnapshot, seen: u64) -> Option<(String, bool)> {
+    let settle = &snap.switcher.settle;
+    if settle.dropped() <= seen {
+        return None;
+    }
+    let (kind, reason) = settle.last_dropped()?;
+    notice_for(kind.name(), &Err(reason.clone()))
 }
 
 /// The notice for a suggestion the director did not stage, since the
@@ -127,17 +146,20 @@ pub struct Notices {
     dropped_seen: u64,
     /// Suggestions held back counted by the newest snapshot observed.
     held_back_seen: u64,
+    /// Waiting takes dropped counted by the newest snapshot observed.
+    settle_dropped_seen: u64,
 }
 
 impl Notices {
     /// Notices of a window whose first snapshot is `first`: the takes it
-    /// already counts as dropped, and the suggestions as held back, are not
-    /// news.
+    /// already counts as dropped (queued or waiting to settle), and the
+    /// suggestions as held back, are not news.
     pub fn new(first: &EngineSnapshot) -> Self {
         Self {
             latest: None,
             dropped_seen: first.switcher.dropped_takes,
             held_back_seen: first.director.held_back,
+            settle_dropped_seen: first.switcher.settle.dropped(),
         }
     }
 
@@ -153,8 +175,8 @@ impl Notices {
 
     /// Reads the frame's snapshot at `now`: clears a notice shown for
     /// [`NOTICE_FOR`], then raises the notice of a suggestion held back and
-    /// of a take dropped since the last snapshot (the drop last, as the
-    /// failure).
+    /// of a take dropped since the last snapshot, queued or waiting to
+    /// settle (the drops last, as the failures).
     pub fn observe(&mut self, snap: &EngineSnapshot, now: f64) {
         if self
             .latest
@@ -171,6 +193,10 @@ impl Notices {
             self.raise(text, error, now);
         }
         self.dropped_seen = snap.switcher.dropped_takes;
+        if let Some((text, error)) = settle_dropped_notice(snap, self.settle_dropped_seen) {
+            self.raise(text, error, now);
+        }
+        self.settle_dropped_seen = snap.switcher.settle.dropped();
     }
 
     /// The notice the status bar shows for `snap`, and whether it reports a
@@ -186,6 +212,7 @@ mod tests {
     use crate::ui::fixtures::snapshot;
     use ac_core::{QueryId, ShotId};
     use ac_director::Handover;
+    use ac_engine::settle::{SettleGate, TakeKind};
     use ac_switcher::SwitchError;
 
     #[test]
@@ -292,6 +319,51 @@ mod tests {
         assert_eq!(dropped_notice(&snap, 2), None, "already shown");
         snap.switcher.last_dropped = None;
         assert_eq!(dropped_notice(&snap, 1), None, "no reason, no notice");
+    }
+
+    /// `snap` with `n` waiting takes dropped, the newest a cut of "mine"
+    /// refused because preview changed to "theirs".
+    fn settle_dropped(mut snap: EngineSnapshot, n: u64) -> EngineSnapshot {
+        let mut gate = SettleGate::default();
+        for _ in 0..n {
+            gate.refused(
+                TakeKind::Cut,
+                CommandError::PreviewChanged {
+                    seen: Some(ShotId("mine".into())),
+                    preview: Some(ShotId("theirs".into())),
+                },
+            );
+        }
+        snap.switcher.settle = gate;
+        snap
+    }
+
+    #[test]
+    fn a_dropped_waiting_take_reads_as_the_refused_take_once() {
+        let fresh = snapshot();
+        assert_eq!(settle_dropped_notice(&fresh, 0), None);
+        let first = settle_dropped(fresh.clone(), 1);
+        let (text, error) = settle_dropped_notice(&first, 0).unwrap();
+        assert!(error, "{text}");
+        // The same words as a cut the fence refused when it was pressed.
+        let refused = notice_for(
+            "cut",
+            &Err(CommandError::PreviewChanged {
+                seen: Some(ShotId("mine".into())),
+                preview: Some(ShotId("theirs".into())),
+            }),
+        );
+        assert_eq!(Some((text, error)), refused);
+        // Raised once, and not for drops counted before the window opened.
+        let mut notices = Notices::new(&first);
+        notices.observe(&first, 0.0);
+        assert_eq!(notices.shown(&first), None, "not news");
+        let second = settle_dropped(fresh, 2);
+        notices.observe(&second, 1.0);
+        assert_eq!(notices.shown(&second), refused);
+        notices.raise("pin: done".into(), false, 2.0);
+        notices.observe(&second, 3.0);
+        assert_eq!(notices.shown(&second), Some(("pin: done".into(), false)));
     }
 
     #[test]

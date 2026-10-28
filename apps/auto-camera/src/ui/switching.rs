@@ -17,7 +17,9 @@
 //! end, Auto queues a take of it, and Cut cuts the transition short, landing
 //! the shot the preview monitor shows. The preview caption names the
 //! waiting shot and says whether a take of it is queued ([`queue_caption`]),
-//! so the operator sees what will happen when the transition ends. While
+//! so the operator sees what will happen when the transition ends; it also
+//! says when a take waits for preview to settle, and warns, in amber, when
+//! the preview subject is lost ([`super::caption`]). While
 //! the T-bar holds a transition the switcher refuses Cut, since the lever
 //! would be left mid-travel, so CUT is disabled and says why
 //! ([`cut_enabled`]); the lever finishes or abandons the transition.
@@ -41,6 +43,7 @@ use eframe::egui::{
     vec2,
 };
 
+use super::caption::{caption_color, preview_notes};
 use super::layout::{centred, fit};
 use super::multiview::{PREVIEW_GREEN, PROGRAM_RED};
 use super::text::{percent, shot_name};
@@ -187,7 +190,14 @@ fn monitor(
         {
             caption.push_str(&format!("  ·  {queued}"));
         }
-        ui.label(RichText::new(caption).strong().color(color));
+        let mut tone = color;
+        if which == Monitor::Preview {
+            for note in preview_notes(snap) {
+                caption.push_str(&format!("  ·  {note}"));
+            }
+            tone = caption_color(snap, color);
+        }
+        ui.label(RichText::new(caption).strong().color(tone));
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
         let painter = ui.painter_at(rect.expand(3.0));
         painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);

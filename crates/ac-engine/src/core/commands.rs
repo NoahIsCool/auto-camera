@@ -33,6 +33,14 @@
 //! as it changes nothing. Accepting or skipping a suggestion follows the
 //! director rather than overriding it, so neither is a manual action.
 //!
+//! With settle-before-take on ([`crate::settle`]), the operator's Cut and
+//! Auto may wait, after their fence has passed, for a preview crop that is
+//! still travelling ([`super::settle`]); the reply comes when it is
+//! pressed, so a take dropped at the end of its wait is counted in the
+//! snapshot with its reason, as a queued take is. A second Cut or Auto
+//! forces it, staging a shot forces it first, and Cut now, the T-bar and
+//! accepting a suggestion supersede it. Its manual action is the press.
+//!
 //! Protection (on-air subjects are never removed) is refreshed before and
 //! after every command, not only at the start of a tick: a cut followed at
 //! once by removing the query must keep the subject that was just cut to
@@ -46,6 +54,7 @@ use super::EngineCore;
 use crate::command::{CommandError, CommandReply, EngineCommand};
 use crate::config::slug;
 use crate::queries::build_query;
+use crate::settle::TakeKind;
 
 impl EngineCore {
     /// Applies `cmd`; see the module docs.
@@ -57,14 +66,14 @@ impl EngineCore {
                 if self.catalog.get(shot).is_none() {
                     return Err(CommandError::UnknownShot(shot.clone()));
                 }
+                self.force_waiting_take();
                 self.switcher.set_preview(shot.clone());
                 self.preview_hold = Some(shot.clone());
                 true
             }
             C::Cut { preview } => {
                 self.fence(preview)?;
-                let catalog = &self.catalog;
-                self.switcher.cut(|id| catalog.is_available(id))?;
+                self.press_take(TakeKind::Cut)?;
                 true
             }
             C::CutTo { shot } => {
@@ -74,12 +83,12 @@ impl EngineCore {
                 let catalog = &self.catalog;
                 self.switcher
                     .cut_to(shot.clone(), |id| catalog.is_available(id))?;
+                self.settle.cancel();
                 true
             }
             C::Auto { preview } => {
                 self.fence(preview)?;
-                let catalog = &self.catalog;
-                self.switcher.auto(|id| catalog.is_available(id))?;
+                self.press_take(TakeKind::Auto)?;
                 true
             }
             C::SetTBar { position } => {
@@ -91,6 +100,7 @@ impl EngineCore {
                 let catalog = &self.catalog;
                 self.switcher
                     .set_tbar(*position, |id| catalog.is_available(id))?;
+                self.settle.cancel();
                 true
             }
             C::SetTransition { transition } => {
@@ -175,7 +185,10 @@ impl EngineCore {
                             suggestion: now.clone(),
                         });
                     }
-                    Some(_) => self.accept(shot.clone())?,
+                    Some(_) => {
+                        self.accept(shot.clone())?;
+                        self.settle.cancel();
+                    }
                 }
                 false
             }

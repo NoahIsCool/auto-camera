@@ -24,6 +24,7 @@ mod framing;
 mod operator;
 mod priority;
 mod protection;
+mod settle;
 mod shared;
 mod switching;
 mod trace;
