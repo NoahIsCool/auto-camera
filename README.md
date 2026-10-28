@@ -351,3 +351,21 @@ No Rust module may be over 600 lines unless it is a test module (a
 python3 -B scripts/module_size.py            # lists any module over budget
 python3 -B -m unittest discover -s scripts   # -B: no __pycache__ in the tree
 ```
+
+CI also lints the sidecar with Ruff 0.16.8 (`ruff check` and `ruff format
+--check` in `sidecars/sam3-mlx`), builds the app with `--release` and
+records three seconds of the headless demo, and checks the supply chain.
+cargo-deny holds every crate to [`deny.toml`](deny.toml): RustSec
+advisories, and licences, where AGPL, GPL and LGPL crates are denied (a
+probe package that depends on an AGPL crate must fail). The parts that are
+not crates (ffmpeg, ONNX Runtime, model weights, the sidecar's Python
+packages) have their licences in
+[`docs/licence-manifest.md`](docs/licence-manifest.md), and a
+standard-library script fails when one the repository uses has no entry:
+
+```sh
+python3 -B scripts/licence_manifest.py       # lists any component without an entry
+```
+
+The workflow's actions are pinned to commit SHAs; its header says how to
+update one.
