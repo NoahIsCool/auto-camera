@@ -38,9 +38,9 @@
 //!   as the app's `--trace` file, for scoring with `ac_eval`.
 //! * [`alarms`] reads the snapshots a reader takes into a persistent list
 //!   of what is wrong on air (spec M14): program black, frozen or on a
-//!   lost subject, encoder drops, a failed output, a stream reconnecting
-//!   or down, a recording without audio. It is pure: each reader keeps its
-//!   own, and acknowledges alarms there.
+//!   lost subject, encoder drops, a failed output, a stream reconnecting,
+//!   stalled or down, a recording without audio. It is pure: each reader
+//!   keeps its own, and acknowledges alarms there.
 //! * [`queries`] reads each query's prompt once, when it is created: the
 //!   detector is asked for the parsed phrase ("speaker upper body" asks for
 //!   "a person speaking"), and the prompt's shot words pick its framings

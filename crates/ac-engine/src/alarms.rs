@@ -6,9 +6,8 @@
 //! out comes the list of active [`Alarm`]s, each with its cause, when it
 //! was raised (media time), a sentence for the operator and whether the
 //! operator has acknowledged it. It reads no clock and keeps no reference
-//! to the engine: its reader owns it (the operator window keeps one, a
-//! headless run another), so acknowledging is the reader's business and
-//! never reaches the engine.
+//! to the engine: its reader owns it (the operator window keeps one), so
+//! acknowledging is the reader's business and never reaches the engine.
 //!
 //! # Readings and hysteresis
 //!
@@ -23,22 +22,21 @@
 //! flicker back.
 //!
 //! "Without a break" is between observations. Readers sample snapshots
-//! (the window draws about one per frame and may draw one twice, a
-//! headless run takes one every 20 ms), so every rule is written over
-//! values that hold between samples, never over a single tick a reader
-//! could miss: when the program's run of black frames began, a source's
-//! frame age, the encoder's drop counters and the program audio pushed,
-//! the last two compared with the previous observation of the same output
-//! session.
+//! (the window draws about one per frame, which may skip ticks or draw
+//! one twice), so every rule is written over values that hold between
+//! samples, never over a single tick a reader could miss: when the
+//! program's run of black frames began, a source's frame age, the
+//! encoder's drop counters and the program audio pushed, the last two
+//! compared with the previous observation of the same output session.
 //!
 //! | Alarm | Raised when | Cleared when |
 //! |---|---|---|
 //! | program black | the output runs and the program has been black (nearly every pixel dark) for [`BLACK_AFTER`] | no black frame for [`CLEAR_AFTER`]; the output stops |
 //! | program on a lost subject | the program shot's subject has been lost for [`LOST_AFTER`] | it has tracked again for [`CLEAR_AFTER`]; another shot is on program |
-//! | program source stale | the program shot's source sent no new frame for over [`STALE_AFTER`] (or none yet) | its frames have been younger than that for [`CLEAR_AFTER`]; another source is on program |
+//! | program source stale | the program shot's source sent no new frame for over [`STALE_AFTER`] (or none in the first [`STALE_AFTER`] of media time, since the engine started) | its frames have been younger than that for [`CLEAR_AFTER`]; another source is on program |
 //! | encoder drops | the encoder dropped frames or audio since the last observation | no new drop for [`QUIET_AFTER`]; the session ends |
 //! | output failed | the output failed to start or ffmpeg exited with an error | the output starts again |
-//! | stream reconnecting | the stream lost its connection and ffmpeg reopens it | connected again for [`QUIET_AFTER`]; the stream is down or the session ends |
+//! | stream reconnecting | the stream lost its connection and ffmpeg reopens it, or the ingest stopped taking packets (stalled: connected, it cannot keep up or went silent; connecting, it does not answer) | connected and taking packets for [`QUIET_AFTER`]; the stream is down or the session ends |
 //! | stream down | ffmpeg gave the stream up for the session while still running (the recording goes on) | the session ends |
 //! | recording without audio | the session records with no audio track, or no source audio was pushed for [`SILENT_AFTER`] | source audio for [`CLEAR_AFTER`], each piece within [`AUDIO_RECENT`] of the last; the session ends |
 //!
@@ -107,7 +105,7 @@ pub const AUDIO_RECENT: Duration = Duration::from_millis(250);
 pub const CLEAR_AFTER: Duration = Duration::from_secs(1);
 
 /// How long the encoder must go without a new drop, or the stream stay
-/// connected, before their alarms clear.
+/// connected and taking packets, before their alarms clear.
 pub const QUIET_AFTER: Duration = Duration::from_secs(5);
 
 /// What an alarm is about; see the module docs for each one's rules.
@@ -123,7 +121,9 @@ pub enum AlarmCause {
     EncoderDrops,
     /// The output failed to start or ffmpeg exited with an error.
     OutputFailed,
-    /// The stream lost its connection and ffmpeg reopens it.
+    /// The stream is not getting through: it lost its connection and
+    /// ffmpeg reopens it, or the ingest stopped taking packets (a stall,
+    /// the only sign of a pulled cable until TCP reports it).
     StreamReconnecting,
     /// ffmpeg gave the stream up for the rest of the session.
     StreamDown,
@@ -132,9 +132,9 @@ pub enum AlarmCause {
 }
 
 impl AlarmCause {
-    /// A stable snake-case name of the kind of cause, without the shot or
-    /// source it is about, for the headless summary.
-    pub fn kind(&self) -> &'static str {
+    /// The kind of cause in snake case, without the shot or source it is
+    /// about: what [`Display`](fmt::Display) spells out in words.
+    fn kind(&self) -> &'static str {
         match self {
             AlarmCause::ProgramBlack => "program_black",
             AlarmCause::ProgramSubjectLost(_) => "program_subject_lost",

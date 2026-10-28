@@ -145,8 +145,11 @@ fn program(snap: &EngineSnapshot, live: bool, out: &mut Vec<Read>) {
     let Some(source) = snap.source(&shot.source) else {
         return;
     };
+    // A source that has sent nothing yet has had since the engine started
+    // (media time zero) to do so: held to the same threshold, but not good.
     let reading = match source.frame_age {
         Some(age) if age <= STALE_AFTER => Reading::Good,
+        None if snap.media_time <= STALE_AFTER => Reading::Unsure,
         _ => Reading::Bad,
     };
     let name = &source.name;
@@ -194,7 +197,12 @@ fn encoder(snap: &EngineSnapshot, s: &mut Session, out: &mut Vec<Read>) {
     push(out, AlarmCause::EncoderDrops, reading, message);
 }
 
-/// The stream's connection, for a session that streams.
+/// The stream's connection, for a session that streams. A stall (the
+/// ingest stopped taking packets, so ffmpeg drops them) reads bad like a
+/// reconnection: while connected it is the only sign of a pulled cable
+/// until TCP reports it, and a reconnected stream is not through until
+/// the ingest takes packets again. Only a connection that takes them reads
+/// good; a first connection still opening, with no stall, says nothing.
 fn stream(snap: &EngineSnapshot, out: &mut Vec<Read>) {
     let Some(stats) = &snap.output.stats else {
         return;
@@ -203,13 +211,22 @@ fn stream(snap: &EngineSnapshot, out: &mut Vec<Read>) {
         return;
     };
     let outages = match health.outages {
-        1 => "1 outage".to_owned(),
-        n => format!("{n} outages"),
+        0 => String::new(),
+        1 => " · 1 outage".to_owned(),
+        n => format!(" · {n} outages"),
     };
     let reconnecting = match health.state {
         StreamState::Reconnecting { attempt } => Some((
             Reading::Bad,
-            format!("stream reconnecting (attempt {attempt}) · {outages}"),
+            format!("stream reconnecting (attempt {attempt}){outages}"),
+        )),
+        StreamState::Connected if health.stalled => Some((
+            Reading::Bad,
+            format!("stream stalled, dropping packets{outages}"),
+        )),
+        StreamState::Connecting if health.stalled => Some((
+            Reading::Bad,
+            format!("stream connecting: the ingest does not answer{outages}"),
         )),
         StreamState::Connected => Some((Reading::Good, String::new())),
         StreamState::Connecting => Some((Reading::Unsure, String::new())),

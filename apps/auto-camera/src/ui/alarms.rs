@@ -7,8 +7,8 @@
 //! once what just happened and goes after a few seconds, an alarm stays
 //! listed for as long as its cause lasts: a black or frozen program, the
 //! program on a lost subject, encoder drops, a failed output, a stream
-//! reconnecting or down, a recording without audio. Those conditions raise
-//! no notice; everything else keeps the notice's path.
+//! reconnecting, stalled or down, a recording without audio. Those
+//! conditions raise no notice; everything else keeps the notice's path.
 //!
 //! Each alarm is a row above the status line, oldest first: the time it
 //! was raised (master-clock media time, as `m:ss`) and what is wrong, in
@@ -16,7 +16,7 @@
 //! once someone has. Acknowledging marks it as seen without hiding it: it
 //! stays listed until its cause clears, and a cause that comes back raises
 //! a new alarm. The alarms are the window's own: acknowledging tells the
-//! engine nothing, and a headless run keeps its own model.
+//! engine nothing.
 //!
 //! Every Acknowledge button carries the alarm's message in its accessible
 //! name ([`acknowledge_label`]), so a screen reader, and the window tests,

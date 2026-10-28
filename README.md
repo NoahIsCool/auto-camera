@@ -55,15 +55,16 @@ Above it, the status bar lists alarms (spec M14), one row each, for as long
 as their cause lasts: the program black for 2 s while the output runs, the
 program on a subject lost for half a second, the program's source sending
 no new frame for over half a second, encoder drops, a failed output, the
-stream reconnecting or down, and a recording without audio (no audio track,
-or no source audio for 2 s). Each clears only once its cause has been gone
-for a while (a second for the picture and audio, five for drops and a
-reconnected stream), so it does not flicker. Acknowledge dims an alarm and
-removes its button, but it stays listed until its cause clears; one that
-comes back is new. With `start_on_wide = true` in the `[switcher]` table the
-first source's wide is on program from the start (it shows black until
-the source delivers), so a studio restarted after a crash goes out on a
-clean wide instead of black.
+stream reconnecting, stalled (the ingest takes no packets) or down, and a
+recording without audio (no audio track, or no source audio for 2 s). Each
+clears only once its cause has been gone for a while (a second for the
+picture and audio, five for drops and for a stream taking packets again),
+so it does not flicker. Acknowledge dims an alarm and removes its button,
+but it stays listed until its cause clears; one that comes back is new.
+With `start_on_wide = true` in the `[switcher]` table the first source's
+wide is on program from the start (it shows black until the source
+delivers), so a studio restarted after a crash goes out on a clean wide
+instead of black.
 
 | Input | Action |
 |---|---|
@@ -161,12 +162,9 @@ it was lost and opened again (`outages`, `reconnects`):
 
 (abridged). Each query's `matches` is the prompt feedback of the window:
 what the newest applied detector pass of each source found for it, and on
-which frame. `alarms` lists every alarm the run raised, by the window's
-rules, with its `kind`, `message`, `raised_s` and `cleared_s` (`null` when
-it was still raised at the end). The exit status is 0 on success, 1 when
-the engine, the output or the trace failed or a source never delivered a
-picture during the run (`ok` is false and `error` says why), 2 for usage
-and configuration errors.
+which frame. The exit status is 0 on success, 1 when the engine, the output
+or the trace failed or a source never delivered a picture during the run
+(`ok` is false and `error` says why), 2 for usage and configuration errors.
 Recordings are never overwritten: an existing `--record` path is an error.
 
 ### Per-tick trace

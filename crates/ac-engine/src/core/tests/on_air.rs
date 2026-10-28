@@ -116,6 +116,70 @@ fn start_on_wide_before_the_source_delivers_shows_black_then_the_picture() {
 }
 
 #[test]
+fn a_studio_that_starts_on_the_wide_raises_no_alarm_if_its_source_delivers_in_time() {
+    use crate::alarms::{AlarmCause, AlarmChange, Alarms, STALE_AFTER};
+    let config = starting_on_wide(1);
+    let info = SourceInfo {
+        id: cam(),
+        width: W,
+        height: H,
+        fps: FPS,
+        audio: None,
+    };
+    let waiting = SourceFeed {
+        state: SourceState::Starting,
+        frame: None,
+        detector_loading: false,
+        error: None,
+        info: None,
+    };
+    let pattern = SyntheticPattern::new(W, H, FPS, 1).unwrap();
+    // The source's first frame comes on tick `first` (`None`: never); the
+    // alarms observe the snapshot before the first tick, then every tick's
+    // for three seconds.
+    let run = |first: Option<u64>| {
+        let mut core = EngineCore::new(&config, vec![info.clone()], &[false]).unwrap();
+        let mut alarms = Alarms::new();
+        let snap =
+            |core: &EngineCore| core.snapshot(OutputView::default(), TimingView::default(), true);
+        let mut changes: Vec<(Duration, AlarmChange)> = alarms
+            .observe(&snap(&core))
+            .into_iter()
+            .map(|c| (Duration::ZERO, c))
+            .collect();
+        for n in 0..90 {
+            let feed = match first {
+                Some(first) if n >= first => SourceFeed {
+                    state: SourceState::Running,
+                    frame: Some(pattern.frame(&cam(), n - first)),
+                    ..waiting.clone()
+                },
+                _ => waiting.clone(),
+            };
+            core.tick(at(n), &[feed], Vec::new());
+            let snap = snap(&core);
+            assert_eq!(snap.switcher.program, Some(shot("cam/wide")));
+            changes.extend(alarms.observe(&snap).into_iter().map(|c| (at(n), c)));
+        }
+        changes
+    };
+    // The first frame just inside half a second: nothing, from the very
+    // first snapshot on.
+    assert!(at(15) <= STALE_AFTER);
+    assert_eq!(run(Some(0)), []);
+    assert_eq!(run(Some(15)), []);
+    // A source that has sent nothing for over half a second since the
+    // engine started is stale, as one whose newest frame is that old.
+    let changes = run(None);
+    let [(when, AlarmChange::Raised(alarm))] = &changes[..] else {
+        panic!("{changes:?}");
+    };
+    assert_eq!(*when, at(16), "the first tick past half a second");
+    assert_eq!(alarm.cause, AlarmCause::ProgramSourceStale(cam()));
+    assert_eq!(alarm.message, "program source cam has sent no picture yet");
+}
+
+#[test]
 fn the_director_starts_from_the_wide_in_auto_mode() {
     let mut c = starting_on_wide(2);
     c.director.mode = DirectorMode::Auto;

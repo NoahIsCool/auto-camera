@@ -68,8 +68,7 @@
 //!
 //! This module runs the phases; the run's flags ([`HeadlessOptions`]) are
 //! in `flags`, and the summary's types in [`summary`] and its building
-//! from the run's snapshots in `report`, with the alarms the samples
-//! raised (spec M14) kept by `alarms`.
+//! from the run's snapshots in `report`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -87,7 +86,6 @@ use ac_engine::{
 };
 use ac_output::AwakeMode;
 
-mod alarms;
 mod flags;
 mod report;
 mod summary;
@@ -406,8 +404,6 @@ struct Sampler {
     /// The stream's health in the newest snapshot whose output was running
     /// (once ffmpeg has exited the stream is down by definition).
     stream: Option<ac_output::StreamHealth>,
-    /// Every alarm the samples raised.
-    alarms: alarms::AlarmLog,
 }
 
 impl Sampler {
@@ -433,7 +429,6 @@ impl Sampler {
         {
             self.stream = Some(stream);
         }
-        self.alarms.observe(snap);
         self.last = Some(snap.clone());
     }
 }

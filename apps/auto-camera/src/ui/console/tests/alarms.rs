@@ -27,6 +27,10 @@ fn at(h: &mut Harness<'_, Window>, secs: u64) {
     snap.media_time = Duration::from_secs(secs);
     snap.tick = secs * 30 + 1;
     h.run();
+    // A new alarm row grows the status panel only on the next frame, which
+    // egui does not ask for (the app repaints on its own timer): one more
+    // lays the rows out where a click will find them.
+    h.step();
 }
 
 #[test]
@@ -63,20 +67,23 @@ fn an_acknowledged_alarm_stays_listed_dimmed_until_its_cause_clears() {
 
 #[test]
 fn each_alarm_has_its_own_acknowledge_button() {
-    // The output failed, and the program's source never delivered.
+    // The output failed (raised on the first frame), and the program's
+    // source has sent nothing in the first second (raised a second on).
     let mut snap = snapshot();
     let wide = snap.shots[0].id.clone();
     snap.switcher.program = Some(wide);
     snap.output.state = OutputState::Failed("killed".into());
     let mut h = window(snap);
-    h.run();
+    at(&mut h, 1);
     let stale = alarm(
         AlarmCause::ProgramSourceStale(ac_core::SourceId("stage".into())),
-        0,
+        1,
         "program source stage has sent no picture yet",
         false,
     );
     let failed = alarm(AlarmCause::OutputFailed, 0, "output failed: killed", false);
+    h.get_by_label(&alarm_line(&failed));
+    h.get_by_label(&alarm_line(&stale));
     assert_eq!(h.get_all_by_label_contains("ALARM").count(), 2);
     let label = acknowledge_label(&stale);
     h.get_by_label(&label).click();

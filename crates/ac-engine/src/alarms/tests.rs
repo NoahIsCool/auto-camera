@@ -3,7 +3,8 @@
 //! set by hand and the media time moved on observation by observation.
 //! Every alarm is raised and cleared by its rule, with its hysteresis; an
 //! acknowledged alarm stays listed until its cause clears; stale and
-//! repeated snapshots change nothing.
+//! repeated snapshots change nothing. The program's rules are tested here,
+//! the output's in `output`.
 
 use std::path::PathBuf;
 
@@ -18,6 +19,8 @@ use crate::catalog::ShotStatus;
 use crate::config::{SourceEntry, StudioConfig};
 use crate::core::EngineCore;
 use crate::snapshot::{OutputState, OutputView, ShotView, Tally, TimingView};
+
+mod output;
 
 /// Program audio sample frames per second of the fixtures.
 const RATE: f64 = 48_000.0;
@@ -121,6 +124,14 @@ fn stream(state: StreamState) -> StreamHealth {
     }
 }
 
+/// A stream's health in `state` with the ingest taking no packets.
+fn stalled(state: StreamState) -> StreamHealth {
+    StreamHealth {
+        stalled: true,
+        ..stream(state)
+    }
+}
+
 /// The fixture studio observed over time: [`Show::at`] moves the media
 /// time on, and while `audio_flows` the program audio pushed with it.
 struct Show {
@@ -221,7 +232,7 @@ fn a_healthy_show_raises_nothing() {
 fn fixture_snapshots_raise_and_clear_each_alarm() {
     /// A way to bring a cause about on the show, and one to end it.
     type Edit = fn(&mut Show);
-    let cases: [(AlarmCause, Edit, Edit); 8] = [
+    let cases: [(AlarmCause, Edit, Edit); 10] = [
         (
             AlarmCause::ProgramBlack,
             |show| show.snap.program_black_since = Some(show.snap.media_time),
@@ -250,6 +261,16 @@ fn fixture_snapshots_raise_and_clear_each_alarm() {
         (
             AlarmCause::StreamReconnecting,
             |show| show.encoder().stream = Some(stream(StreamState::Reconnecting { attempt: 1 })),
+            |show| show.encoder().stream = Some(stream(StreamState::Connected)),
+        ),
+        (
+            AlarmCause::StreamReconnecting,
+            |show| show.encoder().stream = Some(stalled(StreamState::Connected)),
+            |show| show.encoder().stream = Some(stream(StreamState::Connected)),
+        ),
+        (
+            AlarmCause::StreamReconnecting,
+            |show| show.encoder().stream = Some(stalled(StreamState::Connecting)),
             |show| show.encoder().stream = Some(stream(StreamState::Connected)),
         ),
         (
@@ -413,125 +434,21 @@ fn a_program_source_older_than_half_a_second_raises_at_once() {
 }
 
 #[test]
-fn encoder_drops_raise_when_they_grow_and_clear_after_five_quiet_seconds() {
-    let mut show = Show::new().program(wide("stage")).on_air();
-    // Drops counted before the model watched are not news.
-    show.encoder().frames_dropped = 7;
-    assert_eq!(show.at(0.0), []);
-    assert_eq!(show.at(1.0), []);
-    show.encoder().audio_samples_dropped = 960;
-    let raised = show.at(1.1);
+fn a_program_source_with_no_picture_yet_has_half_a_second_from_the_start() {
+    let stage = AlarmCause::ProgramSourceStale(SourceId("stage".into()));
+    let mut show = Show::new().program(wide("stage"));
+    show.snap.sources[0].frame_age = None;
+    assert_eq!(show.over(0.0, 0.5, 0.05), [], "no older than half a second");
+    // Past it, the source is stale.
+    let raised = show.at(0.55);
     assert!(matches!(&raised[..], [AlarmChange::Raised(a)]
-        if a.message == "encoder dropped 7 frames this session and 960 audio samples"));
-    // A new drop restarts the quiet time.
-    show.over(1.2, 4.0, 0.1);
-    show.encoder().frames_dropped = 9;
-    show.at(4.1);
-    assert_eq!(
-        show.alarms.get(&AlarmCause::EncoderDrops).unwrap().message,
-        "encoder dropped 9 frames this session and 960 audio samples"
-    );
-    assert_eq!(show.over(4.2, 9.0, 0.1), []);
-    assert_eq!(show.at(9.2).len(), 1, "cleared five seconds after the drop");
-    // A restarted encoder counts from zero again: lower counts are not drops.
-    show.encoder().frames_dropped = 0;
-    show.encoder().audio_samples_dropped = 0;
-    assert_eq!(show.over(9.3, 12.0, 0.1), []);
-    // The session ending clears a raised alarm at once.
-    show.encoder().frames_dropped = 1;
-    assert_eq!(show.at(12.1).len(), 1);
-    show.snap.output.state = OutputState::Finished;
-    assert_eq!(show.at(12.2).len(), 1);
-    assert!(show.alarms.active().is_empty());
-}
-
-#[test]
-fn a_failed_output_stays_until_the_output_starts_again() {
-    let mut show = Show::new().on_air();
-    show.at(0.0);
-    show.snap.output.state = OutputState::Failed("ffmpeg exited with status 1".into());
-    let raised = show.at(0.5);
-    assert!(matches!(&raised[..], [AlarmChange::Raised(a)]
-        if a.message == "output failed: ffmpeg exited with status 1"));
-    assert_eq!(show.over(1.0, 120.0, 1.0), []);
-    show.snap.output.state = OutputState::Starting;
-    assert_eq!(show.at(121.0).len(), 1);
-    assert!(show.alarms.active().is_empty());
-}
-
-#[test]
-fn a_stream_that_reconnects_then_goes_down() {
-    let mut show = Show::new().program(wide("stage")).on_air();
-    show.at(0.0);
-    show.encoder().stream = Some(stream(StreamState::Reconnecting { attempt: 1 }));
-    assert_eq!(show.at(0.1).len(), 1);
-    show.encoder().stream = Some(stream(StreamState::Reconnecting { attempt: 2 }));
-    show.at(2.0);
-    assert_eq!(
-        show.alarms
-            .get(&AlarmCause::StreamReconnecting)
-            .unwrap()
-            .message,
-        "stream reconnecting (attempt 2) · 1 outage"
-    );
-    // Connected for less than five seconds, then lost again: still raised.
-    show.encoder().stream = Some(stream(StreamState::Connected));
-    assert_eq!(show.over(2.1, 6.9, 0.1), []);
-    show.encoder().stream = Some(stream(StreamState::Reconnecting { attempt: 1 }));
-    assert_eq!(show.at(7.0), []);
-    // Given up while ffmpeg runs on: reconnecting clears, down raises.
-    show.encoder().stream = Some(stream(StreamState::Down));
-    let changes = show.at(8.0);
-    assert!(matches!(&changes[..], [
-        AlarmChange::Raised(down),
-        AlarmChange::Cleared { alarm, .. },
-    ] if down.cause == AlarmCause::StreamDown
-        && down.message == "stream down for this session; the recording goes on"
-        && alarm.cause == AlarmCause::StreamReconnecting));
-    assert_eq!(show.over(8.1, 30.0, 0.5), [], "down for the session");
-    // Once ffmpeg has exited the output's state tells, not the stream.
-    show.encoder().ffmpeg_alive = false;
-    assert_eq!(show.at(30.1).len(), 1);
-    // A stream that is only connecting is neither.
-    let mut fresh = Show::new().on_air();
-    fresh.encoder().stream = Some(stream(StreamState::Connecting));
-    assert_eq!(fresh.over(0.0, 10.0, 0.1), []);
-}
-
-#[test]
-fn a_recording_without_an_audio_track_or_without_source_audio() {
-    // No audio track: raised at once, for the whole session.
-    let mut show = Show::new().on_air();
-    show.snap.output.audio = None;
-    let raised = show.at(0.0);
-    assert!(matches!(&raised[..], [AlarmChange::Raised(a)]
-        if a.cause == AlarmCause::RecordingWithoutAudio && a.message.starts_with("recording has no audio track")));
-    assert_eq!(show.over(0.1, 30.0, 0.5), []);
-    // Streaming only is not a recording.
-    let mut stream_only = Show::new().on_air();
-    stream_only.snap.output.record_path = None;
-    stream_only.snap.output.audio = None;
-    assert_eq!(stream_only.over(0.0, 10.0, 0.1), []);
-    // A track whose source stops: raised after two seconds of silence.
-    let mut show = Show::new().on_air();
-    show.over(0.0, 1.0, 0.05);
-    show.audio_flows = false;
-    assert_eq!(show.over(1.05, 2.95, 0.05), []);
-    assert_eq!(show.at(3.0).len(), 1);
-    // One block every second and a half never clears it...
-    let mut pushed = show.snap.output.audio.unwrap().pushed;
-    for i in 0..10 {
-        let t = 3.0 + f64::from(i) * 0.25;
-        if i % 6 == 0 {
-            pushed += 480;
-            show.snap.output.audio.as_mut().unwrap().pushed = pushed;
-        }
-        assert_eq!(show.at(t), [], "at {t}");
-    }
-    // ...audio that flows for a second does.
-    show.audio_flows = true;
-    assert_eq!(show.over(6.0, 6.95, 0.05), []);
-    assert_eq!(show.at(7.0).len(), 1);
+        if a.cause == stage && a.raised_at == s(0.55)));
+    // A first frame within the half second raises nothing.
+    let mut prompt = Show::new().program(wide("stage"));
+    prompt.snap.sources[0].frame_age = None;
+    prompt.over(0.0, 0.45, 0.05);
+    prompt.snap.sources[0].frame_age = Some(Duration::ZERO);
+    assert_eq!(prompt.over(0.5, 5.0, 0.05), []);
 }
 
 #[test]
