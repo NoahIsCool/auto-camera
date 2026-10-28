@@ -9,7 +9,8 @@
 //! matched one to one, CLEAR MOT style ([`match_frame`]): a target keeps
 //! the subject it last matched while their boxes still overlap at
 //! `match_iou`, and the rest are assigned for the most matches and then
-//! the most overlap ([`super::assign`]).
+//! the most overlap (an optimal assignment by the Hungarian method, in the
+//! scorers' private `assign` module).
 //!
 //! # Metrics
 //!

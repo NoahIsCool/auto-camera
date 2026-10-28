@@ -7,8 +7,8 @@
 //! module docs); a shot framing nobody labelled there is counted in the
 //! details as `unlabelled` and scored by nothing here. The labels give a
 //! person's box and, where labelled, the heights of the crown, chin, tops
-//! of the shoulders and waist ([`BodyLines`]); all heights below are
-//! normalized source `y`, growing downward.
+//! of the shoulders and waist ([`BodyLines`](crate::labels::BodyLines));
+//! all heights below are normalized source `y`, growing downward.
 //!
 //! # Metrics
 //!
