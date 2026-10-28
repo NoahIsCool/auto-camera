@@ -8,7 +8,11 @@
 //!    tiles off (nobody is watching).
 //! 2. **Signal**: wait for a wide shot to become available. A headless run
 //!    has no operator, so unless the director is in Auto mode (which
-//!    establishes a shot by itself) the first wide is cut to program.
+//!    establishes a shot by itself) the first wide is cut to program. A
+//!    source that cannot be opened (a file that is not there) does not stop
+//!    the engine, which keeps retrying it, so this phase waits for it like
+//!    for any source and, when none delivers, says what keeps each offline
+//!    ([`no_picture`]).
 //! 3. **Detector**: when a source has discovery, wait until no source's
 //!    detector is preparing, for at most [`DETECTOR_TIMEOUT`] (a cold
 //!    CoreML compile of OWLv2 takes two to three minutes, and every new
@@ -145,6 +149,18 @@ fn failure_in(snap: &EngineSnapshot, why: &str) -> String {
     }
 }
 
+/// Why phase 2 failed in `snap`: no source delivered a picture in time,
+/// with the error of each source that has one (what keeps it offline).
+fn no_picture(snap: &EngineSnapshot) -> String {
+    let mut why = String::from("no source delivered a picture in time");
+    for s in &snap.sources {
+        if let Some(error) = &s.error {
+            why.push_str(&format!("; source {}: {error}", s.id.0));
+        }
+    }
+    why
+}
+
 /// Why a run that a termination signal cut short failed.
 pub const INTERRUPTED: &str = "interrupted by a termination signal";
 
@@ -178,7 +194,7 @@ fn drive(
         .wait_until(SIGNAL_TIMEOUT, |s| {
             quit.requested() || first_wide(s).is_some()
         })
-        .ok_or_else(|| failure(&h, "no source delivered a picture in time"))?;
+        .ok_or_else(|| failure(&h, &no_picture(&h.snapshot())))?;
     if quit.requested() {
         return Err(INTERRUPTED.into());
     }

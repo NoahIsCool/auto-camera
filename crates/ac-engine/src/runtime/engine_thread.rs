@@ -142,6 +142,7 @@ impl Runtime {
                 state: s.state(),
                 frame: s.latest(),
                 detector_loading: w.as_mut().is_some_and(DiscoveryWorker::is_loading),
+                error: s.error(),
             })
             .collect();
         let reference = feeds

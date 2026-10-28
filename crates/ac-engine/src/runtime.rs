@@ -4,6 +4,10 @@
 //! ([`Detectors::build`]; a sidecar detector starts its one shared process
 //! here), and spawns:
 //!
+//! * one **supervisor** per source (`ac-supervise-<source>`, see
+//!   `ac_sources::supervisor`), which owns the source's current connection
+//!   and opens it again, with a backoff of 0.5 s doubling to 8 s, whenever
+//!   it fails;
 //! * the **engine thread** (`ac-engine`), which owns the [`EngineCore`],
 //!   the sources, the discovery workers' inboxes, the sidecar service (if
 //!   any) and the [`OutputController`], and runs the master clock: one tick
@@ -14,6 +18,17 @@
 //! * whatever the sources, the sidecar service and the encoder spawn
 //!   internally (decoders, the sidecar process and its `ac-sam-*` threads,
 //!   ffmpeg pipes), owned by those objects.
+//!
+//! A source that cannot be opened at start (a file that is not there yet)
+//! does not stop the engine: it starts offline, described by its
+//! placeholder ([`crate::config::SourceEntry::placeholder_info`]), its
+//! snapshot says why ([`crate::SourceView::error`]), and its supervisor
+//! keeps trying, so it goes on air once the input appears. The other
+//! sources run meanwhile. Program audio follows the audio source's
+//! description at start, so a source that was missing then gives the
+//! program no audio until the engine is restarted. Only a configuration
+//! mistake that no retry can mend fails the start
+//! ([`StudioConfig::validate`]).
 //!
 //! Communication is by message passing only:
 //!
@@ -60,7 +75,7 @@ use std::time::Duration;
 use ac_media::{SourceInfo, VideoSource};
 use ac_output::AudioFormat;
 use ac_sidecar::SidecarService;
-use ac_sources::{Clock, WallClock, open_source_with_clock};
+use ac_sources::{Backoff, Clock, WallClock, open_supervised};
 use thiserror::Error;
 
 use crate::command::{CommandError, CommandReply, EngineCommand};
@@ -89,7 +104,8 @@ pub enum EngineError {
     /// The configuration is invalid.
     #[error(transparent)]
     Config(#[from] ConfigError),
-    /// A source could not be opened.
+    /// A source's supervisor could not be started (a source that cannot be
+    /// opened yet starts offline instead).
     #[error("source {id}: {message}")]
     Source {
         /// The source id.
@@ -180,7 +196,7 @@ impl std::fmt::Debug for Engine {
 struct Runtime {
     /// The deterministic core.
     core: EngineCore,
-    /// Sources, in config order.
+    /// Sources, in config order, each under its supervisor.
     sources: Vec<Box<dyn VideoSource>>,
     /// The detector sidecar the workers share, if any. Declared before the
     /// workers so that, when a panic unwinds the thread, it is dropped
@@ -224,14 +240,18 @@ impl Engine {
     pub fn start_with(config: StudioConfig, options: EngineOptions) -> Result<Self, EngineError> {
         config.validate()?;
         let mut sources: Vec<Box<dyn VideoSource>> = Vec::new();
+        let program_size = (config.output.width, config.output.height);
         for entry in &config.sources {
+            let offline = entry.placeholder_info(program_size);
+            let clock = options.clock.clone();
             let src =
-                open_source_with_clock(&entry.input, entry.source_id(), options.clock.clone())
-                    .map_err(|e| EngineError::Source {
+                open_supervised(&entry.input, offline, clock, Backoff::default()).map_err(|e| {
+                    EngineError::Source {
                         id: entry.id.clone(),
                         message: e.to_string(),
-                    })?;
-            sources.push(src);
+                    }
+                })?;
+            sources.push(Box::new(src));
         }
         let Detectors {
             loaders: detectors,

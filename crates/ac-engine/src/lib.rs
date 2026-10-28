@@ -20,8 +20,9 @@
 //!   results and commands it computes subjects, shots, framing, switching,
 //!   the director's choices and the program picture. It has no threads and
 //!   reads no clock, so it is tested tick by tick.
-//! * [`Engine`] is the runtime around it: it opens the sources
-//!   ([`ac_sources::open_source_with_clock`]), runs the discovery workers,
+//! * [`Engine`] is the runtime around it: it opens the sources, each under
+//!   a supervisor that reopens it when its input is lost
+//!   ([`ac_sources::open_supervised`]), runs the discovery workers,
 //!   drives the core from a master clock on its own thread, owns the program
 //!   encoder, accepts [`EngineCommand`]s over a channel and publishes an
 //!   immutable [`EngineSnapshot`] every tick. See [`runtime`] for the

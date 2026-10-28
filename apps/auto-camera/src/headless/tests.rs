@@ -161,23 +161,27 @@ fn a_run_with_the_auto_director_switches_by_itself() {
 
 #[test]
 fn unusable_setups_fail_with_a_summary() {
-    let missing = StudioConfig::with_source(
+    // A missing file only keeps its source offline (see `no_picture`); a
+    // pattern that cannot be made stops the start.
+    let unusable = StudioConfig::with_source(
         "f",
-        SourceConfig::File {
-            path: "/nonexistent/auto-camera/clip.mp4".into(),
-            loop_playback: false,
-            max_width: None,
-            audio: false,
+        SourceConfig::Synthetic {
+            width: 320,
+            height: 180,
+            fps: 0.0,
+            subjects: 1,
         },
     );
     let s = run(
-        missing,
+        unusable,
         Path::new("x.toml"),
         &options(1.0, None),
         &QuitSignal::new(),
     );
     assert!(!s.ok);
-    assert!(s.error.unwrap().contains("did not start"));
+    let error = s.error.unwrap();
+    assert!(error.contains("did not start"), "{error}");
+    assert!(error.contains("frame rate"), "{error}");
     assert!(s.sources.is_empty());
 
     let existing = temp_path("existing.mp4");
@@ -599,4 +603,16 @@ fn a_termination_signal_ends_the_run_early_and_still_shuts_down() {
         started.elapsed()
     );
     assert!(s.threads_joined > 0, "the engine was shut down: {s:?}");
+}
+
+#[test]
+fn no_picture_says_what_keeps_each_source_offline() {
+    let mut snap = (*first_snapshot(&studio())).clone();
+    assert_eq!(no_picture(&snap), "no source delivered a picture in time");
+    snap.sources[0].error = Some("cannot open source: cannot open later.mkv".into());
+    assert_eq!(
+        no_picture(&snap),
+        "no source delivered a picture in time; \
+         source stage: cannot open source: cannot open later.mkv"
+    );
 }

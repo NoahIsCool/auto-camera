@@ -249,18 +249,20 @@ fn start_reports_unusable_setups() {
         Engine::start_with(bad, fast_time()),
         Err(EngineError::Config(_))
     ));
-    let missing = StudioConfig::with_source(
-        "f",
-        SourceConfig::File {
-            path: "/nonexistent/auto-camera/clip.mp4".into(),
-            loop_playback: false,
-            max_width: None,
-            audio: false,
+    // A missing file starts offline (tests/reconnect.rs), but a pattern
+    // that cannot be made is a mistake no retry mends.
+    let unusable = StudioConfig::with_source(
+        "s",
+        SourceConfig::Synthetic {
+            width: 320,
+            height: 180,
+            fps: 0.0,
+            subjects: 1,
         },
     );
     assert!(matches!(
-        Engine::start_with(missing, fast_time()),
-        Err(EngineError::Source { .. })
+        Engine::start_with(unusable, fast_time()),
+        Err(EngineError::Config(_))
     ));
     let mut owl = studio(1);
     owl.detector = DetectorSettings::Owl {

@@ -241,8 +241,12 @@ pub struct SourceView {
     pub id: SourceId,
     /// Operator-facing name.
     pub name: String,
-    /// Health reported by the source.
+    /// Health reported by the source: `Offline` or `Reconnecting` while a
+    /// source that lost its input (or was missing at start) is retried.
     pub state: SourceState,
+    /// Why the source is not delivering, when an error is the reason (what
+    /// keeps it offline, or what stopped it); `None` while it delivers.
+    pub error: Option<String>,
     /// Picture width.
     pub width: u32,
     /// Picture height.

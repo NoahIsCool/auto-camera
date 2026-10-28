@@ -147,6 +147,7 @@ impl Rig {
             state: SourceState::Running,
             frame: Some(frame),
             detector_loading: self.loading,
+            error: None,
         };
         let results = std::mem::take(&mut self.pending);
         let out = self.core.tick(now, &[feed], results);
