@@ -85,7 +85,7 @@ the shot it then looks the same as), `subjects` lists the subjects at
 the end with the queries they answer, and for a stream `output.stream`
 says how its connection stood while the output last ran (`state`,
 `attempt`, `stalled`, `bitrate_kbps`, which is `null` on an ffmpeg older
-than 6.1) and how often it was lost and opened again (`outages`,
+than 6.0) and how often it was lost and opened again (`outages`,
 `reconnects`):
 
 ```json

@@ -28,7 +28,7 @@
 //!
 //! # Mux statistics
 //!
-//! When the encode streams and ffmpeg can (6.1 and newer), it also writes
+//! When the encode streams and ffmpeg can (6.0 and newer), it also writes
 //! one line per packet it hands the muxer to the same pipe, in
 //! [`MUX_STATS_FORMAT`]: `mux 0 1.033333 1968` is a packet of stream 0 at
 //! 1.033 s of 1968 bytes. Each is one `write`, as is each progress block,

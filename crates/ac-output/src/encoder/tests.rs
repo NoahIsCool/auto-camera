@@ -101,3 +101,25 @@ fn help_listings_are_searched_for_whole_options() {
     assert!(!lists_option("", "-stats_mux_pre"));
     assert!(!mux_stats_supported(&config().ffmpeg));
 }
+
+#[test]
+fn help_listings_with_stream_specifiers_name_the_option() {
+    // ffmpeg 7.0 and newer print what an option can be specified for.
+    let help = "Advanced per-stream options:\n\
+                -c[:<stream_spec>] <codec>  select encoder/decoder\n\
+                -stats_mux_pre[:<stream_spec>]  write packets stats before muxing\n\
+                -stats_mux_pre_fmt[:<stream_spec>]  format of the stats written with -stats_mux_pre\n\
+                -metadata[:<spec>] <key=value>  add metadata\n";
+    assert!(lists_option(help, "-stats_mux_pre"));
+    assert!(lists_option(help, "-stats_mux_pre_fmt"));
+    assert!(lists_option(help, "-c"));
+    assert!(lists_option(help, "-metadata"));
+    assert!(!lists_option(
+        "-stats_mux_pre_fmt[:<stream_spec>]  x\n",
+        "-stats_mux_pre"
+    ));
+    assert!(!lists_option(
+        "-other[:<stream_spec>]  see -stats_mux_pre\n",
+        "-stats_mux_pre"
+    ));
+}

@@ -136,7 +136,7 @@ pub struct StreamHealth {
     /// [`STREAM_BITRATE_WINDOW`](crate::progress::STREAM_BITRATE_WINDOW)
     /// of media: the program's bitrate while connected and not stalled,
     /// zero otherwise. `None` before the first measurement and when this
-    /// ffmpeg cannot report the packets it muxes (older than 6.1).
+    /// ffmpeg cannot report the packets it muxes (older than 6.0).
     pub bitrate_kbps: Option<f64>,
 }
 

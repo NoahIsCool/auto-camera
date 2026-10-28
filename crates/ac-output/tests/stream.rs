@@ -8,8 +8,11 @@
 //! reaps it when dropped, so a failed assertion leaves no process behind
 //! (the encoder's own `Drop` does the same for the sender). Frames go in at
 //! the real 30 fps, because ffmpeg times its reconnection attempts by the
-//! wall clock. Every test returns early (passing) with a note when ffmpeg
-//! is missing, unless `AC_REQUIRE_FFMPEG` is set.
+//! wall clock. Every test that runs ffmpeg returns early (passing) with a
+//! note when it is missing, unless `AC_REQUIRE_FFMPEG` is set. Whether the
+//! stream's bitrate must be reported is read from `ffmpeg -version` (6.0
+//! and newer write mux statistics), not from the encoder's own probe, so
+//! that a probe which misses the option fails the tests.
 
 mod common;
 
@@ -94,6 +97,40 @@ fn config(path: PathBuf, url: String) -> OutputConfig {
 /// The stream's health in `stats`.
 fn stream(stats: &EncoderStats) -> StreamHealth {
     stats.stream.expect("the encode streams")
+}
+
+/// The major number of the release an `ffmpeg -version` listing names
+/// (`ffmpeg version 6.1.1-3ubuntu5` gives 6, `ffmpeg version n7.1` 7), or
+/// `None` when it names none, as a git snapshot's `N-117000-g…` does.
+fn release_major(version: &str) -> Option<u32> {
+    let number = version.strip_prefix("ffmpeg version ")?;
+    let number = number.strip_prefix('n').unwrap_or(number);
+    number
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// True when the ffmpeg on the `PATH` must report the stream's bitrate,
+/// because every release from 6.0 on writes mux statistics (a snapshot
+/// counts as recent). It is decided from `ffmpeg -version`, not from
+/// [`mux_stats_supported`], so a probe that misses the option fails these
+/// tests instead of skipping their bitrate checks.
+fn bitrate_expected() -> bool {
+    let out = Command::new("ffmpeg").arg("-version").output().unwrap();
+    let version = String::from_utf8_lossy(&out.stdout);
+    let expected = release_major(&version).is_none_or(|major| major >= 6);
+    if expected {
+        assert!(
+            mux_stats_supported(Path::new("ffmpeg")),
+            "the probe misses the mux statistics of {:?}",
+            version.lines().next()
+        );
+    } else {
+        eprintln!("note: ffmpeg older than 6.0 has no mux statistics; the bitrate is not checked");
+    }
+    expected
 }
 
 /// Pushes program frames to an encoder on time.
@@ -207,7 +244,7 @@ fn a_killed_receiver_leaves_the_recording_whole_and_the_stream_reconnecting() {
     let health = stream(&down);
     assert_eq!(health.outages, stream(&up).outages + 1, "{down:?}");
     assert!(!health.stalled);
-    if health.bitrate_kbps.is_some() {
+    if bitrate_expected() {
         assert_eq!(
             health.bitrate_kbps,
             Some(0.0),
@@ -275,11 +312,9 @@ fn a_restarted_receiver_is_connected_again_within_five_seconds() {
         again.last_error, None,
         "the recovery clears the stream's error"
     );
-    if mux_stats_supported(Path::new("ffmpeg")) {
+    if bitrate_expected() {
         let kbps = health.bitrate_kbps.expect("ffmpeg reports muxed packets");
         assert!(kbps > 0.0, "{again:?}");
-    } else {
-        eprintln!("note: this ffmpeg has no mux statistics; the bitrate is not checked");
     }
 
     feed.run(Duration::from_millis(500));
@@ -289,4 +324,22 @@ fn a_restarted_receiver_is_connected_again_within_five_seconds() {
     assert_eq!(recorded_frames(&path), pushed);
     drop(receiver);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn version_listings_name_their_release() {
+    assert_eq!(
+        release_major("ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023"),
+        Some(6)
+    );
+    assert_eq!(
+        release_major("ffmpeg version 8.0 Copyright (c) 2000-2025"),
+        Some(8)
+    );
+    assert_eq!(release_major("ffmpeg version n7.1-12-g0123abc"), Some(7));
+    assert_eq!(release_major("ffmpeg version 5.1.6-0+deb12u1"), Some(5));
+    // A git snapshot, another program and nothing name no release.
+    assert_eq!(release_major("ffmpeg version N-117000-g0123abc"), None);
+    assert_eq!(release_major("ffprobe version 6.1.1"), None);
+    assert_eq!(release_major(""), None);
 }

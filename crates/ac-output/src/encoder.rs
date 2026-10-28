@@ -169,7 +169,7 @@ pub fn detect_encoder(ffmpeg: &Path, requested: Encoder) -> Result<EncoderChoice
 }
 
 /// True when `ffmpeg` can write per-packet mux statistics
-/// (`-stats_mux_pre`, ffmpeg 6.1 and newer), from which the stream's
+/// (`-stats_mux_pre`, ffmpeg 6.0 and newer), from which the stream's
 /// bitrate is measured: its `-h long` listing names the option.
 pub fn mux_stats_supported(ffmpeg: &Path) -> bool {
     Command::new(ffmpeg)
@@ -181,10 +181,13 @@ pub fn mux_stats_supported(ffmpeg: &Path) -> bool {
 }
 
 /// True when an ffmpeg help listing has a line for `option`, such as
-/// `-stats_mux_pre      write packets stats before muxing`.
+/// `-stats_mux_pre      write packets stats before muxing` (ffmpeg 6) or
+/// `-stats_mux_pre[:<stream_spec>]  write packets stats before muxing`
+/// (7.0 and newer, which append what the option can be specified for).
 fn lists_option(help: &str, option: &str) -> bool {
     help.lines()
-        .any(|line| line.split_whitespace().next() == Some(option))
+        .filter_map(|line| line.split_whitespace().next())
+        .any(|name| name.split('[').next() == Some(option))
 }
 
 /// Longest a test encode may take before it counts as failed.

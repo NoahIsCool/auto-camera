@@ -51,7 +51,7 @@
 //! * ffmpeg cannot report a bitrate for tee output; the progress report's
 //!   bitrate is the recording's average, and there is none when only
 //!   streaming. The stream's own bitrate comes from mux statistics, which
-//!   need ffmpeg 6.1 or newer.
+//!   need ffmpeg 6.0 or newer.
 //! * Nothing is logged when the stream's first connection succeeds, so
 //!   "connected" is inferred from a few seconds of media without a
 //!   complaint (see [`stream`]).
