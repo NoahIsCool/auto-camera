@@ -17,6 +17,13 @@
 //!   with the config and the files, tools and folders it names, so a show
 //!   does not find them at its start.
 //!
+//! `--config` opens a studio file or a show saved from one ([`show`]): the
+//! window's Save show, or `--save-show PATH` at the end of a headless run,
+//! writes the sources, queries, director, transition and destinations to a
+//! show file, which opens again as its studio file with the show laid over
+//! it. A `--save-show` path the app cannot save to (the studio file
+//! itself) is a usage error before anything starts.
+//!
 //! Ctrl-C, `SIGTERM` and `SIGHUP` shut the engine down as closing the
 //! window does ([`signals`]), so the detector sidecar never outlives the
 //! app; a second signal exits at once. Warnings about the config (a missing
@@ -44,6 +51,7 @@ mod awake;
 mod check;
 mod cli;
 mod headless;
+mod show;
 mod signals;
 #[cfg(test)]
 mod testing;
@@ -72,8 +80,8 @@ fn main() -> ExitCode {
     if let Err(e) = quit.install() {
         eprintln!("auto-camera: {e}");
     }
-    let (config, warnings) = match StudioConfig::load_with_warnings(&cli.config) {
-        Ok(loaded) => (loaded.config, loaded.warnings),
+    let loaded = match StudioConfig::load_with_warnings(&cli.config) {
+        Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("auto-camera: {e}");
             if default_config {
@@ -82,14 +90,26 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    for warning in &warnings {
+    for warning in &loaded.warnings {
         eprintln!("auto-camera: warning: {warning}");
     }
+    let target = show::ShowTarget::for_run(
+        &loaded,
+        &cli.config,
+        cli.save_show.as_deref(),
+        show::shows_dir(),
+    );
+    if let (Some(_), Err(e)) = (&cli.save_show, &target) {
+        eprintln!("auto-camera: --save-show: {e}");
+        return ExitCode::from(2);
+    }
+    let (config, warnings) = (loaded.config, loaded.warnings);
     if cli.headless {
         let options = headless::HeadlessOptions {
             seconds: cli.seconds,
             record: cli.record,
             trace: cli.trace,
+            save_show: target.ok().filter(|_| cli.save_show.is_some()),
         };
         let summary = headless::run(config, &cli.config, &options, &quit);
         match serde_json::to_string_pretty(&summary) {
@@ -104,17 +124,19 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     } else {
-        run_window(config, &warnings, cli.trace.as_deref(), &quit)
+        run_window(config, &warnings, cli.trace.as_deref(), target, &quit)
     }
 }
 
 /// Runs the operator window until it is closed, opening with the config's
-/// `warnings` in its status bar and writing the per-tick trace to `trace`
-/// if given; see the module docs for the exit status.
+/// `warnings` in its status bar, writing the per-tick trace to `trace` if
+/// given and saving the show to `target` when the operator asks; see the
+/// module docs for the exit status.
 fn run_window(
     config: StudioConfig,
     warnings: &[String],
     trace: Option<&Path>,
+    target: Result<show::ShowTarget, String>,
     quit: &QuitSignal,
 ) -> ExitCode {
     let (trace, options) = match trace::attach(trace, EngineOptions::default()) {
@@ -124,7 +146,7 @@ fn run_window(
             return ExitCode::FAILURE;
         }
     };
-    let result = ui::run(config, options, warnings, quit.clone());
+    let result = ui::run(config, options, warnings, target, quit.clone());
     // The window's engine has stopped, and its trace sender with it. A
     // window that failed, most often because its engine did not start,
     // leaves no empty trace behind.

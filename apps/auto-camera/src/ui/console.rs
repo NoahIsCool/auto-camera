@@ -83,6 +83,7 @@ use super::multiview;
 use super::notices::Notices;
 use super::panels::{self, OutputForm};
 use super::query_form::QueryForm;
+use super::save;
 use super::switching::{self, SwitchState};
 use super::textures::Textures;
 
@@ -241,6 +242,8 @@ impl Console {
                         &mut self.output_form,
                         &mut self.guard,
                     ));
+                    ui.separator();
+                    commands.extend(save::button(ui));
                 });
             });
         egui::CentralPanel::default().show(ui, |ui| {

@@ -1,8 +1,9 @@
 //! Command-line interface.
 //!
 //! ```text
-//! auto-camera [--config PATH] [--trace PATH]                    # operator window
+//! auto-camera [--config PATH] [--trace PATH] [--save-show PATH]  # operator window
 //! auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
+//!             [--save-show PATH]
 //! auto-camera [--config PATH] --check                           # readiness check
 //! ```
 //!
@@ -10,8 +11,11 @@
 //! typo cannot silently open a window that records nothing, and `--check`
 //! is accepted only on its own, since it starts nothing. `--trace` works in
 //! both other modes: it writes the engine's per-tick trace as JSON Lines
-//! ([`crate::trace`]). The config path defaults to the demo studio relative
-//! to the working directory, which is the repository root under `cargo run`.
+//! ([`crate::trace`]). So does `--save-show`: the show file the window's
+//! Save show writes, or that a headless run writes when it ends
+//! ([`crate::show`]). `--config` opens a studio file or a saved show. The
+//! config path defaults to the demo studio relative to the working
+//! directory, which is the repository root under `cargo run`.
 
 use std::path::PathBuf;
 
@@ -31,7 +35,8 @@ const MAX_SECONDS: f64 = 86_400.0;
     about = "AI camera crew: framed virtual shots, preview/program switching, RTMP and MP4 output"
 )]
 pub struct Cli {
-    /// Studio configuration: TOML, or JSON when the file ends in `.json`.
+    /// Studio configuration, or a saved show: TOML, or JSON when the file
+    /// ends in `.json`.
     #[arg(long, value_name = "PATH", default_value = DEFAULT_CONFIG)]
     pub config: PathBuf,
     /// Run without a window for `--seconds` and print a JSON summary.
@@ -54,10 +59,16 @@ pub struct Cli {
     /// crops, program and preview) to this file; it must not exist.
     #[arg(long, value_name = "PATH")]
     pub trace: Option<PathBuf>,
+    /// Save the show (sources, queries, director, transition, output
+    /// destinations) to this file: when Save show is pressed in the window,
+    /// at the end of a headless run. Without it the window saves to the
+    /// show file it opened, or to the data dir's `shows` folder.
+    #[arg(long, value_name = "PATH")]
+    pub save_show: Option<PathBuf>,
     /// Check the studio without starting it: list the problems with the
     /// config and the files, tools and folders it names, then exit 0 when
     /// there is none and 2 otherwise.
-    #[arg(long, conflicts_with_all = ["headless", "seconds", "record", "trace"])]
+    #[arg(long, conflicts_with_all = ["headless", "seconds", "record", "trace", "save_show"])]
     pub check: bool,
 }
 
@@ -118,6 +129,18 @@ mod tests {
     fn check_takes_no_trace() {
         // A check starts no engine, so there is no trace to write.
         assert!(parse(&["--check", "--trace", "t.jsonl"]).is_err());
+    }
+
+    #[test]
+    fn both_modes_take_a_show_file_to_save_to() {
+        assert_eq!(parse(&[]).unwrap().save_show, None);
+        let window = parse(&["--save-show", "sunday.show.toml"]).unwrap();
+        assert_eq!(window.save_show, Some(PathBuf::from("sunday.show.toml")));
+        let headless = parse(&["--headless", "--save-show", "s.toml"]).unwrap();
+        assert_eq!(headless.save_show, Some(PathBuf::from("s.toml")));
+        assert!(parse(&["--save-show"]).is_err(), "a path is required");
+        // A check starts no engine, so there is no show to save.
+        assert!(parse(&["--check", "--save-show", "s.toml"]).is_err());
     }
 
     #[test]

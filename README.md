@@ -336,6 +336,57 @@ ffmpeg killed or crashed) is reopened the same way. If it is the
 Only a source setting no retry can fix (a synthetic pattern that cannot be
 made, a `max_width` below 2) stops the start.
 
+## Shows
+
+```sh
+auto-camera [--config PATH] [--save-show PATH]                # Save show in the window
+auto-camera [--config PATH] --headless --save-show PATH       # saved when the run ends
+auto-camera --config sunday.show.toml [--check]               # open or check a show
+```
+
+A show is what the operator built on a studio: its sources, the queries
+(with their presets, literal flags and priorities, those added while it
+ran included), the director's mode and profile, the transition and the
+output's default destinations. The window's **Save show** button writes
+it to a show file, and so does a headless run given `--save-show PATH`,
+when it ends without an error. Nothing is saved on a change: saving is
+always asked for. A show file is TOML (or JSON, by extension) that starts
+with `show = 1`, its own layout number, and names the studio file it lies
+over:
+
+```toml
+show = 1
+studio = "/Users/me/studios/sunday.toml"
+
+[[queries]]
+name = "Pastor"
+prompt = "speaker upper body"
+presets = ["medium", "medium_close"]
+
+[director]
+mode = "auto"
+```
+
+`--config` and `--check` take a show file as they take a studio file: the
+studio file is read, the lists the show gives (`sources`, `queries`)
+replace its lists, the keys it gives in `[director]`, `[switcher]` and
+`[output]` replace those values, and the result is checked like any
+studio config. As with a studio file's `schema`, a show of an older
+layout is upgraded as it is read, with a warning (1 is the first), and a
+newer one is an error.
+
+Save show writes to `--save-show PATH` when given, back to the show file
+the window opened, and otherwise to `<studio>.show.toml` in the `shows`
+folder of the data dir: `AC_DATA_DIR` when set, else
+`~/Library/Application Support/auto-camera` on macOS and
+`$XDG_DATA_HOME/auto-camera` or `~/.local/share/auto-camera` elsewhere.
+A show that would not open is not written, a file that is not a show is
+never replaced, and neither is the studio file. The write goes to a temp
+file beside the target, readable by its owner only (`0600`, since the
+default RTMP URL carries the studio file's stream key), synced, then
+renamed over the target, so a failed save leaves the previous show as it
+was. The status bar says where the show went, or why it did not.
+
 ## Prompts
 
 A prompt says who or what to frame, and may also say what shots to make

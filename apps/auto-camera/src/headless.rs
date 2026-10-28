@@ -42,6 +42,12 @@
 //!    that never appeared) fails it, with what kept it offline
 //!    ([`never_delivered`]), instead of passing unseen.
 //!
+//! 7. **Save**: with `--save-show`, a run that ended well (phases 2 to 6
+//!    all passed) exports the show and writes it to the file before the
+//!    engine shuts down ([`crate::show::save_now`]), noting the path on
+//!    stderr; a save that fails fails the run. A run that failed saves
+//!    nothing, so it never replaces a good show.
+//!
 //! A termination signal (Ctrl-C, `SIGTERM`, `SIGHUP`) ends whichever phase
 //! is running; the engine is then shut down as after a normal run (which
 //! also finishes a running recording and ends the detector sidecar), and
@@ -162,6 +168,14 @@ pub fn run_with(
     };
     let mut sampler = Sampler::default();
     let error = drive(&engine, options, limit, &mut sampler, quit).err();
+    let error = error.or_else(|| {
+        let target = options.save_show.as_ref()?;
+        match crate::show::save_now(&engine.handle(), target) {
+            Ok(path) => log(&format!("saved the show to {}", path.display())),
+            Err(e) => return Some(format!("cannot save the show: {e}")),
+        }
+        None
+    });
     let (ticks, threads_joined, final_snapshot, error) = match engine.shutdown() {
         Ok(r) => (r.ticks, r.threads_joined, Some(r.final_snapshot), error),
         Err(e) => (0, 0, None, error.or(Some(e.to_string()))),

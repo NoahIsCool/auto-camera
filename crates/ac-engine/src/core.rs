@@ -116,6 +116,7 @@ mod directing;
 mod passes;
 mod render;
 mod shots;
+mod show;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -346,6 +347,9 @@ pub struct EngineCore {
     next_thumbs_at: Duration,
     /// Shots drawn black on the newest program frame.
     render_issues: Vec<String>,
+    /// The sources and default destinations, as configured, for the show
+    /// export ([`show`]).
+    show_base: show::ShowBase,
 }
 
 impl EngineCore {
@@ -439,6 +443,7 @@ impl EngineCore {
             next_monitor_at: Duration::ZERO,
             next_thumbs_at: Duration::ZERO,
             render_issues: Vec::new(),
+            show_base: show::ShowBase::of(config),
         };
         // Wide shots exist from the start, so they can be staged before the
         // first tick.

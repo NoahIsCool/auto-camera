@@ -15,7 +15,9 @@
 //! monitor rate while the engine runs.
 //!
 //! The config's load warnings (a missing `schema` key) open the window as
-//! a notice in the status bar ([`OperatorApp::with_warnings`]).
+//! a notice in the status bar ([`OperatorApp::with_warnings`]). The show
+//! in the reply to Save show goes to the [`ShowSaver`], which writes it off
+//! this thread and raises its notice once written ([`super::save`]).
 //!
 //! An output session the engine cannot hold awake (no `caffeinate` on this
 //! platform, or one that cannot start or ends early) is noted on stderr
@@ -29,12 +31,14 @@
 
 use std::time::Duration;
 
-use ac_engine::{Engine, EngineCommand, EngineHandle, PendingReply, StudioConfig};
+use ac_engine::{CommandReply, Engine, EngineCommand, EngineHandle, PendingReply, StudioConfig};
 use eframe::egui;
 
 use super::console::Console;
 use super::notices::{notice_for, warnings_notice};
+use super::save::ShowSaver;
 use crate::awake::{self, SessionNotes};
+use crate::show::ShowTarget;
 use crate::signals::QuitSignal;
 
 /// Repaint interval while running (about 30 Hz, the monitor rate).
@@ -56,6 +60,8 @@ pub struct OperatorApp {
     awake: SessionNotes,
     /// Where notes go: stderr ([`awake::log`]); tests collect them.
     log: Box<dyn FnMut(&str)>,
+    /// Writes the shows Save show exports.
+    saver: ShowSaver,
 }
 
 impl std::fmt::Debug for OperatorApp {
@@ -79,7 +85,14 @@ impl OperatorApp {
             quit: QuitSignal::new(),
             awake: SessionNotes::default(),
             log: Box::new(awake::log),
+            saver: ShowSaver::default(),
         }
+    }
+
+    /// The same app, saving shows to `target` (or saying why it cannot).
+    pub fn with_show_target(mut self, target: Result<ShowTarget, String>) -> Self {
+        self.saver = ShowSaver::new(target);
+        self
     }
 
     /// The same app, closing its window once `quit` is requested.
@@ -108,12 +121,17 @@ impl OperatorApp {
     fn poll(&mut self) -> Vec<(String, bool)> {
         let mut raised = Vec::new();
         self.pending.retain(|(name, reply)| match reply.try_get() {
+            Some(Ok(CommandReply::Show(show))) => {
+                raised.extend(self.saver.save(*show));
+                false
+            }
             Some(r) => {
                 raised.extend(notice_for(name, &r));
                 false
             }
             None => true,
         });
+        raised.extend(self.saver.poll());
         raised
     }
 
