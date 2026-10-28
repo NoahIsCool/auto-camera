@@ -1,0 +1,68 @@
+# cargo-deny policy for the crates Auto Camera builds: their licences and
+# the RustSec advisories against them. CI runs
+# `cargo deny --all-features --locked check advisories licenses` with
+# EmbarkStudios/cargo-deny-action (.github/workflows/ci.yml); parts that are
+# not crates (ffmpeg, ONNX Runtime, model weights, the sidecar's Python
+# packages) are in docs/licence-manifest.md instead.
+#
+# Schema: cargo-deny 0.20 (the version the pinned action runs). Every
+# licence not allowed below is denied, so changing this file is the one way
+# a new licence gets in.
+
+[graph]
+# The platforms CI builds and the app is for: Linux on x86-64 (CI) and
+# macOS on Apple Silicon. Crates only other targets pull in are not checked.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+# The `onnx` feature brings in ort and tokenizers; check them too.
+all-features = true
+
+[advisories]
+# Vulnerabilities are always errors. Unsound and unmaintained crates are
+# errors anywhere in the tree, not only among direct dependencies.
+unsound = "all"
+unmaintained = "all"
+# A yanked version is reported but does not fail the check: yanks are not
+# always about safety, and `cargo update -p <crate>` is the fix either way.
+yanked = "warn"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained, not vulnerable: a proc-macro that only tokenizers (feature onnx) uses at build time, and no stable tokenizers release drops it yet (the 1.0 release candidates do)" },
+]
+
+[licenses]
+# The app is MIT OR Apache-2.0 and links every crate statically into one
+# binary, so a crate under the AGPL, GPL or LGPL would bind it. None of them
+# is allowed, so each is denied (the rebuild specification, section e,
+# flags AGPL models such as YOLOE for the same reason). Weak copyleft such
+# as MPL-2.0 would not bind the app, but no crate uses it today; allowing it
+# is a decision to make when one does.
+#
+# This is every licence the dependency tree uses today, alternatives
+# included (`cargo metadata --all-features`, both targets above). One crate,
+# self_cell, also offers GPL-2.0-only, which is not allowed; its Apache-2.0
+# side is what it is used under.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# Only read when a crate states no licence and its LICENSE file is guessed
+# at; ask for a close match.
+confidence-threshold = 0.93
+# Licences for content rather than code, allowed only where that content is.
+exceptions = [
+    # The fonts egui embeds with `default_fonts` (Ubuntu Light, Hack, Noto
+    # Emoji, emoji-icon-font): SIL Open Font License and Ubuntu Font Licence.
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+    # Mozilla's root certificates as data, for the TLS of ort's build-time
+    # download of ONNX Runtime.
+    { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+]

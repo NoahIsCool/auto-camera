@@ -1,0 +1,19 @@
+# A test of deny.toml, not part of the Auto Camera workspace: CI runs
+# cargo-deny's licence check on this package, which depends on a crate
+# licensed AGPL-3.0-only, and the check must fail. CI then relicenses the
+# dependency as MIT, and the same check must pass, so the failure is the
+# licence's and not a broken fixture's (see the supply-chain job in
+# .github/workflows/ci.yml).
+[package]
+name = "deny-probe"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+probe-dep = { path = "probe-dep" }
+
+# Its own workspace, so that cargo does not take it for a stray member of
+# the repository's.
+[workspace]
