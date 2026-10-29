@@ -14,19 +14,9 @@ use ac_media::SourceInfo;
 use ac_output::{EncoderChoice, EncoderStats, Progress};
 use ac_sources::SourceConfig;
 
-/// A snapshot of a fresh one-source studio with one query ("speaker upper
-/// body", framed by its shot words): the wide shot, nothing on air.
-pub fn snapshot() -> EngineSnapshot {
-    fresh(false)
-}
-
-/// [`snapshot`] of a studio whose source has a detector, still preparing.
-pub fn preparing_snapshot() -> EngineSnapshot {
-    fresh(true)
-}
-
-/// A fresh one-source studio's snapshot, with a detector when `detector`.
-fn fresh(detector: bool) -> EngineSnapshot {
+/// A one-source studio ("stage", synthetic) with one query ("speaker upper
+/// body", framed by its shot words).
+pub fn config() -> StudioConfig {
     let mut config = StudioConfig::with_source(
         "stage",
         SourceConfig::Synthetic {
@@ -39,6 +29,36 @@ fn fresh(detector: bool) -> EngineSnapshot {
     config
         .queries
         .push(QuerySettings::new("Speaker", "speaker upper body"));
+    config
+}
+
+/// A snapshot of a fresh [`config`] studio: the wide shot, nothing on air.
+pub fn snapshot() -> EngineSnapshot {
+    fresh(false)
+}
+
+/// [`snapshot`] with eight subject shots after the wide: nine tiles, one
+/// for each number key.
+pub fn nine_tiles() -> EngineSnapshot {
+    let mut snap = snapshot();
+    for i in 1..=8 {
+        snap.shots.push(subject_shot(
+            &format!("stage/{i}/medium"),
+            ShotStatus::Tracking,
+            0.9,
+        ));
+    }
+    snap
+}
+
+/// [`snapshot`] of a studio whose source has a detector, still preparing.
+pub fn preparing_snapshot() -> EngineSnapshot {
+    fresh(true)
+}
+
+/// A fresh one-source studio's snapshot, with a detector when `detector`.
+fn fresh(detector: bool) -> EngineSnapshot {
+    let config = config();
     let info = SourceInfo {
         id: SourceId("stage".into()),
         width: 320,
@@ -98,6 +118,7 @@ pub fn encoder_stats() -> EncoderStats {
             speed: Some(1.0),
             ended: false,
         },
+        stream: None,
     }
 }
 

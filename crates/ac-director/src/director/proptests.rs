@@ -5,7 +5,9 @@
 //! including NaN and out-of-range values, availability, recency), a random
 //! program and preview (a listed shot, nothing, or an id that is not listed),
 //! a random dwell, a random transition flag and a random clock step, which
-//! may go backwards.
+//! may go backwards. Candidates are at priority 0, as with one priority
+//! everywhere, except in the case that draws a random priority level for
+//! each: priority only moves scores, so the same invariants must hold.
 
 use std::time::Duration;
 
@@ -67,6 +69,7 @@ prop_compose! {
             quality,
             available,
             recently_used_at: used_ms.map(Duration::from_millis),
+            priority: 0,
         }
     }
 }
@@ -85,6 +88,20 @@ prop_compose! {
             c.id = ShotId(format!("s{i}"));
         }
         Step { candidates, program, preview, dt_ms, on_air_ms, in_transition }
+    }
+}
+
+prop_compose! {
+    /// [`arb_step`] with a random priority level on every candidate, mostly
+    /// in the range a studio config gives (0 to 4 levels).
+    fn arb_prioritised_step()(
+        mut step in arb_step(),
+        levels in prop::collection::vec(prop_oneof![8 => 0u8..=4, 1 => any::<u8>()], 8),
+    ) -> Step {
+        for (c, level) in step.candidates.iter_mut().zip(levels) {
+            c.priority = level;
+        }
+        step
     }
 }
 
@@ -150,6 +167,37 @@ fn check(
     Ok(())
 }
 
+/// Runs a director with the defaults of `mode` and `profile` over `steps`,
+/// checking every decision.
+fn run_checked(
+    mode: DirectorMode,
+    profile: ContentProfile,
+    steps: &[Step],
+) -> Result<(), TestCaseError> {
+    let config = DirectorConfig::new(mode, profile);
+    let mut director = Director::new(config.clone()).unwrap();
+    let mut now = Duration::from_secs(100);
+    for step in steps {
+        now = if step.dt_ms >= 0 {
+            now + Duration::from_millis(step.dt_ms.unsigned_abs())
+        } else {
+            now.saturating_sub(Duration::from_millis(step.dt_ms.unsigned_abs()))
+        };
+        let program = pick(&step.candidates, step.program);
+        let preview = pick(&step.candidates, step.preview);
+        let decision = director.tick(&DirectorInput {
+            now,
+            program: program.as_ref(),
+            preview: preview.as_ref(),
+            program_on_air: Duration::from_millis(step.on_air_ms),
+            in_transition: step.in_transition,
+            candidates: &step.candidates,
+        });
+        check(&config, step, program.as_ref(), &decision)?;
+    }
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
@@ -159,27 +207,16 @@ proptest! {
         profile in arb_profile(),
         steps in prop::collection::vec(arb_step(), 1..40),
     ) {
-        let config = DirectorConfig::new(mode, profile);
-        let mut director = Director::new(config.clone()).unwrap();
-        let mut now = Duration::from_secs(100);
-        for step in &steps {
-            now = if step.dt_ms >= 0 {
-                now + Duration::from_millis(step.dt_ms.unsigned_abs())
-            } else {
-                now.saturating_sub(Duration::from_millis(step.dt_ms.unsigned_abs()))
-            };
-            let program = pick(&step.candidates, step.program);
-            let preview = pick(&step.candidates, step.preview);
-            let decision = director.tick(&DirectorInput {
-                now,
-                program: program.as_ref(),
-                preview: preview.as_ref(),
-                program_on_air: Duration::from_millis(step.on_air_ms),
-                in_transition: step.in_transition,
-                candidates: &step.candidates,
-            });
-            check(&config, step, program.as_ref(), &decision)?;
-        }
+        run_checked(mode, profile, &steps)?;
+    }
+
+    #[test]
+    fn priorities_never_break_the_safety_rules(
+        mode in arb_mode(),
+        profile in arb_profile(),
+        steps in prop::collection::vec(arb_prioritised_step(), 1..40),
+    ) {
+        run_checked(mode, profile, &steps)?;
     }
 
     #[test]

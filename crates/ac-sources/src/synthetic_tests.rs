@@ -196,7 +196,17 @@ fn invalid_parameters_are_rejected() {
             ),
             "{w}x{h}@{fps} n={n}"
         );
+        assert!(
+            SyntheticPattern::check(w, h, fps, n).is_err(),
+            "checked alike"
+        );
     }
+    let rate = SyntheticPattern::check(SyntheticPattern::MAX_SIDE, 1, 30.0, 0).unwrap();
+    assert_eq!(
+        rate,
+        FrameRate::from_f64(30.0).unwrap(),
+        "the largest accepted"
+    );
 }
 
 #[test]

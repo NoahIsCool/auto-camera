@@ -48,6 +48,12 @@ impl MonitorSettings {
         }
     }
 
+    /// True when program is rendered for a display (the operator window's
+    /// program monitor), which must then not sleep while output runs.
+    pub fn feeds_display(&self) -> bool {
+        self.rate_hz > 0.0
+    }
+
     /// Checks sizes and rates.
     pub fn validate(&self) -> Result<(), String> {
         self.problems().into_iter().next().map_or(Ok(()), Err)
@@ -76,5 +82,22 @@ impl MonitorSettings {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn program_feeds_a_display_while_the_monitors_refresh() {
+        assert!(MonitorSettings::default().feeds_display());
+        assert!(!MonitorSettings::disabled().feeds_display());
+        // The multiview alone does not show program.
+        let tiles_only = MonitorSettings {
+            rate_hz: 0.0,
+            ..MonitorSettings::default()
+        };
+        assert!(!tiles_only.feeds_display());
     }
 }
