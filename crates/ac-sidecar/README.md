@@ -24,7 +24,7 @@ Python side (`sidecars/sam3-mlx/server.py`) is written against this section.
 
 **Transport.** The host spawns the sidecar with stdin and stdout as pipes.
 Stdout carries only protocol frames. All logs go to stderr, which the host
-keeps as recent lines. The sidecar exits cleanly when stdin reaches end of
+keeps as recent lines and forwards to the app's log. The sidecar exits cleanly when stdin reaches end of
 input. The host never sends a second `detect` before the first is answered
 or abandoned (one request in flight).
 
@@ -213,20 +213,28 @@ every job:
 * the state: `Idle`, `Starting`, `Ready`, `Unavailable` (with the reason and
   the retry time) or `Stopped`;
 * the child's pid and `hello`;
-* counters: spawns, failures, requests, results, rejected, timeouts, stale,
-  refused, expired, protocol errors, detached threads;
+* counters: spawns (and restarts, the spawns after the first), failures,
+  requests, results, rejected, timeouts, stale, refused, expired, protocol
+  errors, detached threads;
 * the last pass latency and round trip.
 
 `logs()` returns the recent stderr lines, with the host's own `[host]` notes
-on starts, `hello`s and exits. Phase 2's exit criterion of "0 sidecar
-restarts" in a 30-minute run reads as `failures == 0` (equivalently
-`spawns == 1`). The engine does not publish this status yet. Only the
-first start shows, as every source's preparing state until it ends with a
-`hello` or a failure (the window's "preparing the detector", the headless
+on starts, `hello`s and exits. Each stderr line also goes out as a
+`tracing` event (target `ac_sidecar::stderr`, at the level Python's logging
+printed), and so does each start, `hello`, loss (with the retry wait) and
+shutdown (target `ac_sidecar::host`); the app writes them to its log, and
+the crate installs no subscriber. `HostStats::restarts()` counts the
+processes started after the first, so Phase 2's exit criterion of "0
+sidecar restarts" in a 30-minute run reads as `restarts() == 0`
+(equivalently `spawns == 1`; `failures == 0` also rules out a failed first
+start). The engine publishes the status in every snapshot
+(`EngineSnapshot::sidecar`, final after shutdown) and the headless summary
+reports it (`sidecar`); the window does not show it yet. The first start
+also shows as every source's preparing state until it ends with a `hello`
+or a failure (the window's "preparing the detector", the headless
 summary's `discovery_preparing` and `detector_ready_s`, which is when that
 start ended, not proof that it succeeded: after a failure,
-`discovery_errors` and `discovery_last_error` say why); a restart shows
-only as a discovery error or timeout on the source whose request failed.
+`discovery_errors` and `discovery_last_error` say why).
 
 ## Tests
 

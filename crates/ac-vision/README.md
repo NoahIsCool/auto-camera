@@ -13,6 +13,7 @@ depend on a model runtime.
 | `owl::*` | Pure OWL pre/post-processing: letterbox, CLIP normalization, sigmoid, box decoding, token packing |
 | `matching::*` | People-first prompt matching: parse a prompt's object, pick the people holding it |
 | `boxes::*` | `clamp_box`, `cxcywh_to_rect`, `nms_indices`, class-aware `nms` |
+| `ReplayDetector` | Answers from a detection log (`PassRecord`, `parse_pass_log`) by PTS, for offline evaluation |
 
 All boxes are normalized source coordinates (`ac_core::Rect`), clipped to the
 frame; scores and confidences are in `0..=1`.

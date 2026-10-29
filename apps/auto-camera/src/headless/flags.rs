@@ -1,5 +1,5 @@
-//! The flags of a headless run: what `--seconds`, `--record` and `--trace`
-//! ask for, once [`crate::cli`] has parsed them.
+//! The flags of a headless run: what `--seconds`, `--record`, `--trace` and
+//! `--record-detections` ask for, once [`crate::cli`] has parsed them.
 //!
 //! The run length is counted from when the run is ready, not from when the
 //! process started: a first shot, loaded detectors and, with `--record`, a
@@ -22,4 +22,7 @@ pub struct HeadlessOptions {
     /// Per-tick trace path (JSON Lines, [`crate::trace`]); must not exist.
     /// The trace covers the whole run, from the engine's first tick.
     pub trace: Option<PathBuf>,
+    /// Detection log path (JSON Lines, [`crate::detections`]); must not
+    /// exist. Like the trace, it covers the whole run.
+    pub record_detections: Option<PathBuf>,
 }

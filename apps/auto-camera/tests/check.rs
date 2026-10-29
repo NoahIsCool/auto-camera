@@ -348,18 +348,26 @@ fn a_run_without_a_schema_key_starts_and_says_to_add_it() {
     let demo = fs::read_to_string(Path::new(EXAMPLES).join("demo.toml")).unwrap();
     let old = studio.path("config/old.toml");
     fs::write(&old, demo.replace("\nschema = 1\n", "\n")).unwrap();
+    let logs = studio.path("logs");
     let out = studio.run(&[
         "--config",
         old.to_str().unwrap(),
         "--headless",
         "--seconds",
         "0.2",
+        "--log-dir",
+        logs.to_str().unwrap(),
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     assert!(
         stderr.contains("auto-camera: warning: ") && stderr.contains("Add `schema = 1`"),
         "{stderr}"
+    );
+    let log = fs::read_to_string(logs.join("auto-camera.log")).unwrap_or_default();
+    assert!(
+        log.contains("Add `schema = 1`"),
+        "the log keeps it too: {log}"
     );
     let summary = String::from_utf8_lossy(&out.stdout);
     assert!(summary.contains("\"ok\": true"), "{summary}");

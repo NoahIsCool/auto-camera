@@ -89,6 +89,9 @@ struct Rig {
     still: Option<VideoFrame>,
     /// Reports the detector as still loading.
     loading: bool,
+    /// The source is still starting: it has delivered no frame yet, so
+    /// feeds carry none and the sequence number waits.
+    starting: bool,
 }
 
 impl Rig {
@@ -122,6 +125,7 @@ impl Rig {
             picture: None,
             still: None,
             loading: false,
+            starting: false,
         }
     }
 
@@ -144,13 +148,18 @@ impl Rig {
         }
     }
 
-    /// One tick: feed the frame, apply last tick's results, answer requests.
+    /// One tick: feed the frame (none while the source is starting), apply
+    /// last tick's results, answer requests.
     fn step(&mut self) -> TickOutput {
         let now = Duration::from_secs_f64(self.core.ticks() as f64 / FPS);
-        let frame = self.frame();
+        let (state, frame) = if self.starting {
+            (SourceState::Starting, None)
+        } else {
+            (SourceState::Running, Some(self.frame()))
+        };
         let feed = SourceFeed {
-            state: SourceState::Running,
-            frame: Some(frame),
+            state,
+            frame,
             detector_loading: self.loading,
             error: None,
             info: None,
@@ -170,7 +179,7 @@ impl Rig {
                 latency: Duration::ZERO,
             });
         }
-        if self.advancing {
+        if self.advancing && !self.starting {
             self.seq += 1;
         }
         out
