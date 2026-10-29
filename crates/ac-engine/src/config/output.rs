@@ -93,7 +93,9 @@ pub struct OutputSettings {
     /// config's other paths, a relative one is taken from the working
     /// folder, as a path typed at Start Output is.
     pub record_path: Option<PathBuf>,
-    /// Source whose embedded audio becomes program audio; silent when unset.
+    /// Source (its embedded audio, mixed to stereo as it is decoded) or
+    /// audio input (picked to stereo) whose audio becomes program audio
+    /// (see [`crate::program_audio`]); silent when unset.
     pub audio_source: Option<String>,
     /// AAC bitrate in kbit/s, `32..=512`.
     pub audio_bitrate_kbps: u32,

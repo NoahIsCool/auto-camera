@@ -2,7 +2,9 @@
 //!
 //! Opening a file probes it with ffprobe, then starts one ffmpeg child for
 //! video (raw RGBA frames) and, when wanted and present, one for audio (raw
-//! `f32` samples). Each child is read by its own worker thread:
+//! `f32` samples, mixed to stereo whatever the stream's layout, so
+//! [`SourceInfo::audio`] gives two channels; see [`crate::ffmpeg`]). Each
+//! child is read by its own worker thread:
 //!
 //! * The **video worker** reads whole frames, stamps them with `seq` (counting
 //!   every frame delivered, across loops) and `pts = seq / fps`, waits until
@@ -52,7 +54,8 @@ use std::time::Duration;
 
 use ac_core::SourceId;
 use ac_media::{
-    AudioBlock, LatestFrame, MediaError, SourceInfo, SourceState, VideoFrame, VideoSource,
+    AudioBlock, LatestFrame, MediaError, PROGRAM_CHANNELS, SourceInfo, SourceState, VideoFrame,
+    VideoSource,
 };
 
 use crate::audio::{AudioQueue, AudioWorker, SampleClock};
@@ -184,7 +187,7 @@ impl FileSource {
             width,
             height,
             fps: rate.as_f64(),
-            audio: audio.map(|a| (a.sample_rate, a.channels)),
+            audio: audio.map(|a| (a.sample_rate, PROGRAM_CHANNELS)),
         };
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
@@ -220,7 +223,7 @@ impl FileSource {
             let decoder = source.respawner(&options.tools, args, looping, "audio")?;
             let worker = AudioWorker {
                 source: id.clone(),
-                clock: SampleClock::new(stream.sample_rate, stream.channels),
+                clock: SampleClock::new(stream.sample_rate, PROGRAM_CHANNELS),
                 looping,
                 decoder,
             };

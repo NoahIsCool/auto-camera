@@ -413,6 +413,9 @@ pub struct EngineSnapshot {
     pub director: DirectorView,
     /// Sources.
     pub sources: Vec<SourceView>,
+    /// Audio inputs, in config order. The runtime fills it in each tick
+    /// (the core, which has no audio inputs, leaves it empty).
+    pub audio_inputs: Vec<crate::program_audio::AudioInputView>,
     /// Program output.
     pub output: OutputView,
     /// Master-clock timing.

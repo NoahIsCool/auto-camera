@@ -14,8 +14,10 @@
 //!   problems in its values ([`StudioConfig::problems`]: every bad key of
 //!   the engine's own tables and of each source, the first of each table
 //!   another crate checks);
-//! * **sources**: each file source's video is a readable file;
-//! * **ffmpeg**: `output.ffmpeg -version` runs, and with file sources so do
+//! * **sources**: each file source's video, and each audio input's file,
+//!   is a readable file;
+//! * **ffmpeg**: `output.ffmpeg -version` runs, and with file sources (or
+//!   audio inputs) so do
 //!   the ffmpeg and ffprobe they decode with (`AC_FFMPEG`, `AC_FFPROBE`).
 //!   Like the program itself, the check runs a tool as named: a bare name
 //!   from `PATH`, a relative path from the working folder;
@@ -210,6 +212,12 @@ fn check_build(config: &StudioConfig, inspector: &dyn Inspect, onnx: bool) -> Re
         if let SourceConfig::File { path, .. } = &s.input {
             file_sources = true;
             c.file(&format!("source {:?}", s.id), path);
+        }
+    }
+    for a in &config.audio_inputs {
+        if let Some(path) = a.input.path() {
+            file_sources = true;
+            c.file(&format!("audio input {:?}", a.id), path);
         }
     }
     c.tools(config, file_sources);

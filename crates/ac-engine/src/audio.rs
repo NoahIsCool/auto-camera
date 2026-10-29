@@ -3,9 +3,11 @@
 //! The encoder timestamps audio by sample count and video by frame count, so
 //! the program stays in sync exactly when, after `n` video frames at `fps`,
 //! about `n · rate / fps` audio sample frames (the *target*) have been
-//! pushed. Program audio follows one configured source (its embedded audio),
-//! which is paced by the same clock as its video but arrives in 10 ms blocks
-//! with some jitter, may stall, and catches up in a burst after a stall.
+//! pushed. Program audio follows one configured origin (a source's embedded
+//! audio, or an audio input; [`crate::program_audio`]), which is paced by
+//! the same clock as the video but arrives in 10 ms blocks with some
+//! jitter, may stall, catches up in a burst after a stall, and (a device's
+//! own sample clock) may drift.
 //!
 //! # What decides lip sync
 //!

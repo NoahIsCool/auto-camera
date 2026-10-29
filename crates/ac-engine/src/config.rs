@@ -29,12 +29,12 @@
 //! opens either kind of file (`load`).
 //!
 //! Sections mirror the pipeline: `sources` (any [`SourceConfig`] plus an id
-//! and a name), `queries` (prompts with their framing presets), `lexicon`
-//! (additions to the prompt parser's shot, role and person words),
-//! `detector` and `discovery` (the slow open-vocabulary tier), `tracker`
-//! (the fast tier), `subjects` (identity management), `framing`,
-//! `director`, `switcher`, `output` (program size, rate and destinations)
-//! and `monitors` (what the operator UI is sent).
+//! and a name), `audio_inputs` (audio-only feeds), `queries` (prompts and
+//! their framing presets), `lexicon` (additions to the prompt parser's
+//! shot, role and person words), `detector` and `discovery` (the slow
+//! open-vocabulary tier), `tracker` (the fast tier), `subjects` (identity
+//! management), `framing`, `director`, `switcher`, `output` (program size,
+//! rate and destinations) and `monitors` (what the operator UI is sent).
 //!
 //! A query's prompt is read once, at load, with the built-in lexicon plus
 //! the config's `lexicon` additions ([`StudioConfig::prompt_lexicon`]):
@@ -54,10 +54,11 @@
 //!
 //! The `tracker` and `framing` tables are partial: keys given override the
 //! crate defaults and unknown keys are rejected. Relative file paths
-//! (`sources[].path`, detector model paths and the path-like elements of a
-//! sidecar's `command`) are resolved against the directory of the config
-//! file; the output's two, `output.ffmpeg` and `output.record_path`, are
-//! taken as given, from the working folder (see [`OutputSettings`]).
+//! (`sources[].path`, `audio_inputs[].path`, detector models and a sidecar
+//! `command`'s path-like elements) are resolved against the directory of
+//! the config file; the output's two, `output.ffmpeg` and
+//! `output.record_path`, are taken as given, from the working folder (see
+//! [`OutputSettings`]).
 //!
 //! # Layout
 //!
@@ -70,6 +71,7 @@
 //! |---|---|---|
 //! | `schema` (a key) | `u32`, [`SCHEMA_VERSION`], and its migrations | `schema` |
 //! | `sources` | [`SourceEntry`] | `sources` |
+//! | `audio_inputs` | [`AudioInputEntry`] | `audio_inputs` |
 //! | `queries` | [`QuerySettings`], [`PresetSpec`] | `queries` |
 //! | `lexicon` | [`Lexicon`], applied by [`StudioConfig::prompt_lexicon`] | here |
 //! | `detector` | [`DetectorSettings`], [`SidecarSettings`] | `detector`, `sidecar` |
@@ -85,8 +87,8 @@
 //! resolution and [`StudioConfig::problems`], which runs every table's check
 //! and the checks that span tables (a synthetic detector needs synthetic
 //! sources, the sidecar's request deadline must be below
-//! `discovery.timeout_s`, `output.audio_source` must name a source) and
-//! lists every problem found, for the readiness check
+//! `discovery.timeout_s`, `output.audio_source` must name a source or an
+//! audio input) and lists every problem found, for the readiness check
 //! ([`crate::readiness`]); [`StudioConfig::validate`] fails on the first. It
 //! also keeps the helpers used beyond one table: [`valid_id`] for every id
 //! and [`preset_for`] for bare shot sizes and the engine's default presets.
@@ -115,6 +117,7 @@ use thiserror::Error;
 
 use crate::queries::PromptReader;
 
+mod audio_inputs;
 mod detector;
 mod director;
 mod discovery;
@@ -129,6 +132,7 @@ mod sources;
 mod subjects;
 mod switcher;
 
+pub use audio_inputs::AudioInputEntry;
 pub use detector::DetectorSettings;
 pub use director::DirectorSettings;
 pub use discovery::DiscoverySettings;
@@ -216,6 +220,9 @@ pub struct StudioConfig {
     pub schema: u32,
     /// Video inputs, at least one.
     pub sources: Vec<SourceEntry>,
+    /// Audio-only inputs, such as a soundboard's feed (`audio_inputs`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_inputs: Vec<AudioInputEntry>,
     /// Text prompts and their presets.
     #[serde(default)]
     pub queries: Vec<QuerySettings>,
@@ -263,6 +270,7 @@ impl StudioConfig {
                 name: None,
                 input,
             }],
+            audio_inputs: Vec::new(),
             queries: Vec::new(),
             lexicon: Lexicon::default(),
             detector: DetectorSettings::default(),
@@ -327,6 +335,7 @@ impl StudioConfig {
                 fix(path);
             }
         }
+        audio_inputs::resolve_paths(&mut self.audio_inputs, dir);
         match &mut self.detector {
             DetectorSettings::Owl {
                 model,
@@ -428,11 +437,7 @@ impl StudioConfig {
         out.extend(validate_framing(&self.framing).err());
         out.extend(self.switcher.problems());
         out.extend(self.output.problems());
-        if let Some(audio) = &self.output.audio_source
-            && !ids.contains(audio.as_str())
-        {
-            out.push(format!("output.audio_source {audio:?} is not a source id"));
-        }
+        out.extend(audio_inputs::problems(self, &ids));
         out.extend(self.monitors.problems());
         out
     }

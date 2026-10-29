@@ -56,6 +56,7 @@ fn frame(seq: u64, pts: Duration) -> VideoFrame {
 fn block(pts: Duration) -> AudioBlock {
     AudioBlock {
         source: cam(),
+        seq: 0,
         pts,
         sample_rate: 1000,
         channels: 1,
@@ -178,6 +179,7 @@ fn the_first_connection_is_stamped_as_is_and_later_ones_continue() {
         Stamp {
             epoch: 0,
             seq: 0,
+            audio_seq: 0,
             pts: Duration::ZERO
         }
     );
@@ -191,19 +193,25 @@ fn the_first_connection_is_stamped_as_is_and_later_ones_continue() {
         Stamp {
             epoch: 1,
             seq: 300,
+            audio_seq: 0,
             pts: ms(13_500)
         }
     );
     let g = second.frame(frame(2, ms(100)));
     assert_eq!((g.epoch, g.seq, g.pts), (1, 302, ms(13_600)));
     l.frame_delivered(&g);
-    let a = second.audio(block(ms(200)));
-    assert_eq!(a.pts, ms(13_700));
+    let a = second.audio(AudioBlock {
+        seq: 4,
+        ..block(ms(200))
+    });
+    assert_eq!((a.seq, a.pts), (4, ms(13_700)));
     l.audio_delivered(&a);
     // A clock that did not move past what was delivered (the end of that
-    // audio): just after it, never at or before.
+    // audio): just after it, never at or before. Blocks are numbered on
+    // after the newest delivered, as frames are.
     let third = l.connect(secs(101.0));
-    assert_eq!((third.epoch, third.seq), (2, 303));
+    assert_eq!((third.epoch, third.seq, third.audio_seq), (2, 303, 5));
+    assert_eq!(third.audio(block(ms(0))).seq, 5);
     assert_eq!(third.pts, a.pts + a.duration() + Duration::from_nanos(1));
     // A clock reading before the origin counts as the origin.
     let mut early = Ledger::new(Backoff::default(), secs(5.0));

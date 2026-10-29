@@ -30,6 +30,10 @@
 //!   encoder, accepts [`EngineCommand`]s over a channel and publishes an
 //!   immutable [`EngineSnapshot`] every tick. See [`runtime`] for the
 //!   threads, channels and mailboxes.
+//! * [`program_audio`] is where program audio comes from: a video source's
+//!   embedded audio, which its decoder mixes to stereo, or an audio input
+//!   (an audio-only feed such as a soundboard's, [`AudioInputEntry`]), cut
+//!   to the stereo pair the config picks before it reaches the encoder.
 //! * [`StudioConfig`] describes a studio (sources, queries, detector,
 //!   output, director, framing) as TOML or JSON, in a layout named by its
 //!   `schema` key ([`SCHEMA_VERSION`]).
@@ -84,6 +88,7 @@ pub mod discovery;
 pub mod mailbox;
 pub mod output;
 pub mod presentation;
+pub mod program_audio;
 pub mod queries;
 pub mod readiness;
 pub mod runtime;
@@ -98,12 +103,13 @@ pub use alarms::{Alarm, AlarmCause, AlarmChange, Alarms};
 pub use catalog::{ShotStatus, subject_shot_id, wide_shot_id};
 pub use command::{CommandError, CommandReply, EngineCommand};
 pub use config::{
-    ConfigError, DetectorSettings, EncoderSetting, LoadedConfig, MonitorSettings, OutputSettings,
-    PresetSpec, QuerySettings, SCHEMA_VERSION, SidecarSettings, SourceEntry, StudioConfig,
-    preset_for,
+    AudioInputEntry, ConfigError, DetectorSettings, EncoderSetting, LoadedConfig, MonitorSettings,
+    OutputSettings, PresetSpec, QuerySettings, SCHEMA_VERSION, SidecarSettings, SourceEntry,
+    StudioConfig, preset_for,
 };
 pub use core::{EngineCore, SourceFeed, TickOutput};
 pub use detection_log::{PassRecord, PassSender};
+pub use program_audio::{AudioInputView, ProgramAudio};
 pub use queries::{PromptReader, build_query, default_presets, read_prompt, shot_presets};
 pub use readiness::{Readiness, SystemInspector};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};

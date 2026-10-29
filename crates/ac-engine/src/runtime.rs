@@ -7,7 +7,8 @@
 //! * one **supervisor** per source (`ac-supervise-<source>`, see
 //!   `ac_sources::supervisor`), which owns the source's current connection
 //!   and opens it again, with a backoff of 0.5 s doubling to 8 s, whenever
-//!   it fails;
+//!   it fails, and one per audio input (`ac-audio-supervise-<input>`, see
+//!   [`crate::program_audio`]), the same for an audio-only feed;
 //! * the **engine thread** (`ac-engine`), which owns the [`EngineCore`],
 //!   the sources, the discovery workers' inboxes, the sidecar service (if
 //!   any) and the [`OutputController`], and runs the master clock: one tick
@@ -37,6 +38,7 @@
 //! | From → to | Channel | Policy |
 //! |---|---|---|
 //! | source → engine | [`ac_media::LatestFrame`] inside the source | newest frame only, read at every wake; a source other than the phase reference keeps up to 4 in its [`PresentationBuffer`] |
+//! | audio input → engine | bounded [`ac_media::AudioRing`] inside the input | drained every tick; oldest block dropped when full |
 //! | engine → worker | [`Slot`](crate::mailbox::Slot) per worker | newest request only |
 //! | worker → engine | `mpsc` channel | drained every tick; stale results dropped |
 //! | worker → engine | `mpsc` channel per worker | one "loaded" message, read every tick |
@@ -52,7 +54,8 @@
 //! sidecar (interrupting a pass or a load in progress, so the workers end
 //! at once; see [`crate::detectors`]; its final status stays readable for
 //! the final snapshot), stops and joins the workers,
-//! finishes the encoder (the recording is finalized), stops every source,
+//! finishes the encoder (the recording is finalized), stops every source
+//! and audio input,
 //! publishes a final snapshot with `running == false` and exits, and
 //! `shutdown` joins it. No thread or child process outlives the engine.
 //!
@@ -92,6 +95,7 @@ use crate::discovery::{DiscoveryResult, DiscoveryWorker};
 use crate::mailbox::Latest;
 use crate::output::OutputController;
 use crate::presentation::{PresentationBuffer, buffers_for, stats_by_source};
+use crate::program_audio::ProgramAudio;
 use crate::schedule::TickTimer;
 use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 use crate::trace::{TraceSender, Tracer};
@@ -246,9 +250,9 @@ struct Runtime {
     snapshots: Arc<Latest<Arc<EngineSnapshot>>>,
     /// Program output.
     output: OutputController,
-    /// Source whose audio is program audio; its format is read when an
-    /// output starts (`Runtime::program_audio_format`).
-    audio_source: Option<usize>,
+    /// Program audio's origin and the audio inputs; its format is read
+    /// when an output starts ([`ProgramAudio::format`]).
+    audio: ProgramAudio,
     /// Master clock.
     clock: Arc<dyn Clock>,
     /// Tick interval.
@@ -290,6 +294,7 @@ impl Engine {
                 })?;
             sources.push(Box::new(src));
         }
+        let audio = ProgramAudio::open(&config, &options.clock)?;
         let Detectors {
             loaders: detectors,
             sidecar,
@@ -305,14 +310,9 @@ impl Engine {
                 None => None,
             });
         }
-        let audio_source = config
-            .output
-            .audio_source
-            .as_ref()
-            .and_then(|id| config.sources.iter().position(|s| &s.id == id));
         let presenters = buffers_for(
             config.sources.iter().map(|e| e.source_id()),
-            audio_source.unwrap_or(0),
+            audio.phase_reference(),
         );
         core.note_presentation(stats_by_source(&presenters));
         let snapshots = Arc::new(Latest::new());
@@ -325,6 +325,7 @@ impl Engine {
             true,
         );
         first.sidecar = sidecar.as_ref().map(|s| s.status());
+        first.audio_inputs = audio.views();
         let initial = Arc::new(first);
         snapshots.publish(initial.clone());
         let (tx, commands) = channel();
@@ -341,7 +342,7 @@ impl Engine {
                 options.keep_awake,
                 AwakeMode::for_display(config.monitors.feeds_display()),
             ),
-            audio_source,
+            audio,
             clock: options.clock,
             period: config.frame_period(),
             max_lag: options.max_lag,

@@ -454,6 +454,45 @@ ffmpeg killed or crashed) is reopened the same way. If it is the
 Only a source setting no retry can fix (a synthetic pattern that cannot be
 made, a `max_width` below 2) stops the start.
 
+Program audio is one stereo pair. `output.audio_source` names a source,
+for its embedded audio, or an audio input: an audio-only feed such as the
+soundboard's. For now that is a WAV or RF64 recording of the board, played
+as a live feed (a USB audio interface comes later, behind the same input):
+
+```toml
+[[audio_inputs]]
+id = "board"                 # not a source's id
+name = "Soundboard"
+kind = "file"
+path = "../media/board-rehearsal.wav"
+loop_playback = true
+channels = [3, 4]            # left and right, counted from 1; [5] puts 5 on both sides
+channel_count = 16           # optional: what the input has, checked before use
+
+[output]
+audio_source = "board"
+```
+
+The picked channels are copied as they are; nothing is mixed. Without
+`channels` the program takes channels 1 and 2, or a mono input's one on
+both sides at full level. A pick beyond `channel_count` fails the load; an
+input that opens without the picked channels, or with another count than
+`channel_count`, stays offline with the reason and is retried, like a
+source. The engine does not resample: program audio reaches the encoder at
+the input's own rate (48 kHz while the input has not connected), and the
+encoder converts it to 48 kHz AAC. The engine never waits on an input: a
+stall is filled with silence and the late audio after it cut, and a sample
+clock that drifts from the engine's is kept in step the same way, so the
+program stays in sync.
+
+A source's embedded audio is mixed to stereo by ffmpeg as it is decoded,
+with the matrix the encoder used on it before: a stereo track as it is, a
+mono one on both sides at −3 dB, a 5.1 one with its centre and surrounds
+folded into left and right at −3 dB and its LFE left out. A config
+without `[[audio_inputs]]` therefore sounds as before. One reading
+changes: for a track of more than two channels the loudness meter now
+reads the stereo mix the encoder is given, not the track's own channels.
+
 ## Shows
 
 ```sh
@@ -681,9 +720,9 @@ the program is silent. A headless run reports the session's values in
 | Crate | Role |
 |---|---|
 | `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
-| `ac-media` | Frames, audio blocks and the source trait, with latest-frame mailboxes |
+| `ac-media` | Frames, audio blocks, the source and audio input traits, latest-frame mailboxes and audio rings, and the stereo channel pick |
 | `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak |
-| `ac-sources` | File (ffmpeg) and synthetic sources, file segments, a frame-by-frame clip reader for offline tools; injectable clocks |
+| `ac-sources` | File (ffmpeg) and synthetic sources, file segments, audio-only file inputs (WAV, RF64) and a fake input that drifts and stalls, a frame-by-frame clip reader for offline tools; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector, replay of recorded detections |
 | `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
