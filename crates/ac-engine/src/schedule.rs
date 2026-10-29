@@ -31,7 +31,11 @@
 //! `n · period`); only the clock readings at which ticks are due move. A
 //! cooldown stops jitter from shifting it back and forth, and a source at a
 //! slightly different rate (29.97 against 30) drifts back into collision only
-//! every few tens of seconds, costing one skipped frame each time.
+//! every few tens of seconds, costing one skipped frame each time. The ticks
+//! can sit midway between one source's frames only: every other source is
+//! aligned by its presentation buffer instead ([`crate::presentation`]),
+//! which picks frames by PTS for the clock reading at which the tick was due
+//! ([`TickSchedule::due`]).
 //!
 //! [`RateMeter`] measures event rates (source frame rates) over a sliding
 //! window of media time, and [`TickTimer`] keeps tick-duration statistics.
@@ -86,8 +90,11 @@ impl TickSchedule {
         self.period
     }
 
-    /// Clock reading at which tick `index` is due.
-    fn due(&self, index: u64) -> Duration {
+    /// Clock reading at which tick `index` is due: the origin, moved by
+    /// every [`TickSchedule::delay`] so far, plus `index · period`. Asked
+    /// right after [`TickSchedule::poll`] returned tick `index`, before any
+    /// delay, it is when that tick was due.
+    pub fn due(&self, index: u64) -> Duration {
         self.origin
             + self
                 .period
@@ -285,9 +292,14 @@ mod tests {
                 media_time,
                 late,
                 ..
-            } => assert!(index == 1 && media_time == P && !late),
+            } => assert!(index == 1 && media_time == P && !late && s.due(index) == ms(60)),
             other => panic!("expected a tick, got {other:?}"),
         }
+        assert_eq!(
+            s.due(0),
+            ms(20),
+            "the delay moves past ticks' due times too"
+        );
     }
 
     #[test]
@@ -356,6 +368,7 @@ mod tests {
                 } => {
                     assert_eq!(index, i);
                     assert_eq!(media_time, ms(40 * i));
+                    assert_eq!(s.due(index), now, "due on the clock, after the origin");
                     assert!(!late && skipped == 0);
                 }
                 other => panic!("expected a tick, got {other:?}"),
@@ -397,6 +410,7 @@ mod tests {
                 assert_eq!(skipped, 24);
                 assert_eq!(index, 25);
                 assert_eq!(media_time, ms(1000));
+                assert_eq!(s.due(index), ms(1000));
             }
             other => panic!("expected a tick, got {other:?}"),
         }

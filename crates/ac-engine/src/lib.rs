@@ -4,7 +4,7 @@
 //! # Pipeline
 //!
 //! ```text
-//!  sources ──newest frame──► engine thread (master clock, one tick per output frame)
+//!  sources ──frame by PTS──► engine thread (master clock, one tick per output frame)
 //!     │                        │  tracker step per new frame ─► subject store (per source)
 //!     │                        │  catalog: wide + subject × preset shots ─► framers
 //!     │                        │  switcher ◄── commands      director ─► suggestion / take
@@ -23,7 +23,10 @@
 //! * [`Engine`] is the runtime around it: it opens the sources, each under
 //!   a supervisor that reopens it when its input is lost
 //!   ([`ac_sources::open_supervised`]), runs the discovery workers,
-//!   drives the core from a master clock on its own thread, owns the program
+//!   drives the core from a master clock on its own thread (feeding it the
+//!   newest frame of the phase reference, whose frames the ticks are moved
+//!   to fall between, and of every other source the frame its
+//!   [`presentation`] buffer picks by PTS for the tick), owns the program
 //!   encoder, accepts [`EngineCommand`]s over a channel and publishes an
 //!   immutable [`EngineSnapshot`] every tick. See [`runtime`] for the
 //!   threads, channels and mailboxes.
@@ -66,6 +69,7 @@ pub mod detectors;
 pub mod discovery;
 pub mod mailbox;
 pub mod output;
+pub mod presentation;
 pub mod queries;
 pub mod readiness;
 pub mod runtime;
