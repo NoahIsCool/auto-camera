@@ -363,14 +363,20 @@ fn a_silent_device_fails_after_its_timeouts() {
         ..DeviceOptions::default()
     };
     let backend = FakeDevices::new(table(), Duration::ZERO);
-    let mut mute = open(&backend, quick.clone(), Arc::new(WallClock::new())).unwrap();
+    let mut mute = open(&backend, quick, Arc::new(WallClock::new())).unwrap();
     assert!(eventually(|| mute.state() == SourceState::Stopped));
     assert_eq!(
         mute.error().as_deref(),
         Some("audio device \"SQ\" delivered no audio within 0.1 s")
     );
     mute.stop();
-    let mut stalled = open(&backend, quick, Arc::new(WallClock::new())).unwrap();
+    // Only the stall is quick here, so a slow test thread between the open
+    // and the first block cannot meet the open timeout instead.
+    let stall_only = DeviceOptions {
+        stall_timeout: ms(100),
+        ..DeviceOptions::default()
+    };
+    let mut stalled = open(&backend, stall_only, Arc::new(WallClock::new())).unwrap();
     let _first = backend.callbacks();
     let mut cb = backend.callbacks();
     play(&mut cb.sink, Duration::ZERO, 0);
