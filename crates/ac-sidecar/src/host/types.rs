@@ -259,6 +259,17 @@ pub struct HostStats {
     pub detached_threads: u64,
 }
 
+impl HostStats {
+    /// Processes started after the first. A host starts a process only
+    /// when it has none, so each restart replaced one that was lost or a
+    /// start that failed, or one ended by [`SamHost::shutdown`](crate::SamHost::shutdown)
+    /// (which the service calls only as it stops). Zero for a sidecar that
+    /// ran without trouble.
+    pub fn restarts(&self) -> u64 {
+        self.spawns.saturating_sub(1)
+    }
+}
+
 /// A snapshot of the host for display.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostStatus {

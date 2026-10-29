@@ -34,7 +34,11 @@
 //!
 //! On macOS the system is kept awake while output runs in the window, and
 //! for the whole of a headless run ([`awake`]); elsewhere a note on stderr
-//! says it is not.
+//! and in the log says it is not.
+//!
+//! Every window and headless run keeps a log and writes a crash report on
+//! a panic ([`logs`]); a check writes none. The warnings and errors the app
+//! prints on stderr go to the log too.
 //!
 //! Exit status: 0 on success, 1 when the engine, the output or the trace
 //! failed, 2 for usage and configuration errors and when `--check` found a
@@ -44,6 +48,7 @@ mod awake;
 mod check;
 mod cli;
 mod headless;
+mod logs;
 mod signals;
 #[cfg(test)]
 mod testing;
@@ -68,14 +73,17 @@ fn main() -> ExitCode {
     if cli.check {
         return check::run(&cli.config, default_config);
     }
+    let mut log = logs::LogSession::start(cli.log_dir.as_deref());
     let quit = QuitSignal::new();
     if let Err(e) = quit.install() {
         eprintln!("auto-camera: {e}");
+        tracing::error!("{e}");
     }
     let (config, warnings) = match StudioConfig::load_with_warnings(&cli.config) {
         Ok(loaded) => (loaded.config, loaded.warnings),
         Err(e) => {
             eprintln!("auto-camera: {e}");
+            tracing::error!("{e}");
             if default_config {
                 eprintln!("{}", check::DEFAULT_CONFIG_HINT);
             }
@@ -84,7 +92,9 @@ fn main() -> ExitCode {
     };
     for warning in &warnings {
         eprintln!("auto-camera: warning: {warning}");
+        tracing::warn!("{warning}");
     }
+    log.studio(&cli.config, &config);
     if cli.headless {
         let options = headless::HeadlessOptions {
             seconds: cli.seconds,
@@ -92,9 +102,16 @@ fn main() -> ExitCode {
             trace: cli.trace,
         };
         let summary = headless::run(config, &cli.config, &options, &quit);
+        match &summary.error {
+            Some(e) => tracing::error!("headless run failed: {e}"),
+            None => tracing::info!("headless run done"),
+        }
         match serde_json::to_string_pretty(&summary) {
             Ok(json) => println!("{json}"),
-            Err(e) => eprintln!("auto-camera: cannot print the summary: {e}"),
+            Err(e) => {
+                eprintln!("auto-camera: cannot print the summary: {e}");
+                tracing::error!("cannot print the summary: {e}");
+            }
         }
         if quit.requested() {
             ExitCode::from(signals::INTERRUPTED)
@@ -121,6 +138,7 @@ fn run_window(
         Ok(t) => t,
         Err(e) => {
             eprintln!("auto-camera: {e}");
+            tracing::error!("{e}");
             return ExitCode::FAILURE;
         }
     };
@@ -135,9 +153,11 @@ fn run_window(
     let trace_error = report.and_then(|r| r.error);
     if let Err(e) = &result {
         eprintln!("auto-camera: {e}");
+        tracing::error!("{e}");
     }
     if let Some(e) = &trace_error {
         eprintln!("auto-camera: {e}");
+        tracing::error!("{e}");
     }
     match result {
         Ok(()) if quit.requested() => ExitCode::from(signals::INTERRUPTED),

@@ -410,6 +410,13 @@ pub struct EngineSnapshot {
     /// sidecar), so a source's request can wait behind another source's
     /// pass or a restart of that process.
     pub shared_detector: bool,
+    /// The detector sidecar's host, when the detector is one: what it is
+    /// doing (with the reason it is down), its process, what its hello
+    /// named, and its counters since the engine started, restarts among
+    /// them (`stats.restarts()`). The runtime fills it in each tick (the
+    /// core leaves it `None`); in the final snapshot the host is stopped
+    /// and the counters are final.
+    pub sidecar: Option<ac_sidecar::HostStatus>,
 }
 
 impl EngineSnapshot {

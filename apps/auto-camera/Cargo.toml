@@ -18,8 +18,10 @@ ac-director.workspace = true
 ac-engine.workspace = true
 ac-media.workspace = true
 ac-output.workspace = true
+ac-sidecar.workspace = true
 ac-switcher.workspace = true
 serde.workspace = true
+tracing.workspace = true
 clap = { version = "4.6", features = ["derive"] }
 # Ctrl-C, SIGTERM and SIGHUP ("termination") run the normal shutdown, so the
 # detector sidecar (in its own process group) never outlives the app.
@@ -29,6 +31,9 @@ ctrlc = { version = "3.5", features = ["termination"] }
 # packages. eframe 0.35 is the newest release supporting Rust 1.92.
 eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "x11"] }
 serde_json = "1.0"
+# SHA-256 of the config and the model files in the log's header: pure Rust,
+# no dependencies, ISC, and already in the tree (ort's downloader uses it).
+hmac-sha256 = "1.1"
 
 [dev-dependencies]
 ac-eval.workspace = true

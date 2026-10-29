@@ -28,6 +28,8 @@ use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::ShotStatus;
 use serde::Serialize;
 
+use super::sidecar::SidecarSummary;
+
 /// The JSON summary of a run.
 #[derive(Debug, Clone, Serialize)]
 pub struct Summary {
@@ -69,6 +71,9 @@ pub struct Summary {
     pub trace: Option<TraceSummary>,
     /// Shots that should have been on program but were drawn black.
     pub render_issues: Vec<String>,
+    /// The detector sidecar, when the studio has one: its state, process,
+    /// model and restarts (`sidecar` module).
+    pub sidecar: Option<SidecarSummary>,
 }
 
 /// One source in the summary.

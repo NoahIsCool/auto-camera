@@ -209,21 +209,24 @@ impl Runtime {
             late_ticks: self.late,
             skipped_ticks: self.skipped,
         };
-        let snapshot = Arc::new(self.core.snapshot(self.output.view(), timing, running));
+        let mut snapshot = self.core.snapshot(self.output.view(), timing, running);
+        snapshot.sidecar = self.sidecar.as_ref().map(|s| s.status());
+        let snapshot = Arc::new(snapshot);
         self.snapshots.publish(snapshot.clone());
         snapshot
     }
 
     /// Stops the sidecar, the workers, the output and the sources, and
-    /// publishes the final snapshot. The sidecar goes first: dropping its
+    /// publishes the final snapshot. The sidecar goes first: stopping its
     /// service interrupts a pass or a load in progress, so the workers can
-    /// be joined at once instead of after a request deadline.
+    /// be joined at once instead of after a request deadline. The stopped
+    /// service is kept, so the final snapshot carries its final status.
     fn shutdown(mut self) -> EngineReport {
         let mut joined = 0;
-        if let Some(service) = self.sidecar.take() {
+        if let Some(service) = &mut self.sidecar {
             // Ends the process (stdin closed, 2 s grace, kill, reap) and
             // joins the service thread.
-            drop(service);
+            service.stop();
             joined += 1;
         }
         for w in self.workers.iter_mut().flatten() {

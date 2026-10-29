@@ -48,11 +48,22 @@ fn run_demo(seconds: &str, trace: &Path) -> (ExitStatus, String, String) {
 }
 
 /// Runs the app with `args`, and returns its exit status, stdout and
-/// stderr. A run that takes longer than [`LIMIT`] is killed, so a hang
-/// fails the test instead of outliving it.
+/// stderr. Its log goes to a temporary folder, removed afterwards. A run
+/// that takes longer than [`LIMIT`] is killed, so a hang fails the test
+/// instead of outliving it.
 fn run_app(args: &[&OsStr]) -> (ExitStatus, String, String) {
+    let logs = temp_path("logs");
+    let result = run_logged(args, &logs);
+    let _ = std::fs::remove_dir_all(&logs);
+    result
+}
+
+/// [`run_app`] with its log in `logs`.
+fn run_logged(args: &[&OsStr], logs: &Path) -> (ExitStatus, String, String) {
     let mut child = Command::new(APP)
         .args(args)
+        .arg("--log-dir")
+        .arg(logs)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

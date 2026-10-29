@@ -4,7 +4,8 @@
 //! The progress reader owns the progress parser and the bitrate window and
 //! publishes a report (with the muxed bitrate beside it) at every block
 //! terminator, twice a second. The stderr reader owns the stream monitor:
-//! it parses every line ([`LogLine`]), records the errors (redacted, and
+//! it parses every line ([`LogLine`]), sends it to the app's log
+//! (`forward` module), records the errors (redacted, and
 //! marked as the stream's when an object of the stream logged them), feeds
 //! the monitor with the media time of the newest progress report and
 //! publishes a copy after each event. A reconnection clears the stream's
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use super::forward::forward;
 use super::{Shared, lock};
 use crate::config::redact;
 use crate::logline::LogLine;
@@ -61,9 +63,9 @@ pub fn progress_reader(stdout: impl Read, shared: Arc<Shared>, record_path: Opti
     shared.stdout_closed.store(true, Ordering::SeqCst);
 }
 
-/// An error line as the operator reads it: `context: message`, without
-/// the object's address and the level tag, stream key redacted.
-fn error_text(line: &LogLine, rtmp_url: Option<&str>) -> String {
+/// A line as the operator and the log read it: `context: message`,
+/// without the object's address and the level tag, stream key redacted.
+fn line_text(line: &LogLine, rtmp_url: Option<&str>) -> String {
     let text = match line.context {
         Some(context) => format!("{context}: {}", line.message),
         None => line.message.to_owned(),
@@ -71,8 +73,9 @@ fn error_text(line: &LogLine, rtmp_url: Option<&str>) -> String {
     redact(&text, rtmp_url)
 }
 
-/// Keeps the newest error line of stderr, and runs `monitor` (the encode
-/// streams) over every line; see the module docs.
+/// Sends every line of stderr to the log, keeps the newest error line, and
+/// runs `monitor` (the encode streams) over every line; see the module
+/// docs.
 pub fn stderr_reader(
     stderr: impl Read,
     shared: Arc<Shared>,
@@ -82,8 +85,9 @@ pub fn stderr_reader(
     for_each_line(stderr, |line| {
         for piece in line.split('\r').map(str::trim).filter(|p| !p.is_empty()) {
             let parsed = LogLine::parse(piece);
+            let text = line_text(&parsed, rtmp_url.as_deref());
+            forward(&parsed, &text);
             if parsed.is_error() {
-                let text = error_text(&parsed, rtmp_url.as_deref());
                 if is_stream_line(&parsed) {
                     shared.record_stream_error(&text);
                 } else {
