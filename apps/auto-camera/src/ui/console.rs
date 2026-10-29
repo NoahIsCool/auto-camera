@@ -16,7 +16,8 @@
 //! The status bar shows one notice ([`super::notices`]). The console raises
 //! the reply notices it is handed, then reads the snapshot, which raises
 //! one for a take the switcher dropped since the last frame (a queued take
-//! is answered when it is queued, so its drop is only in the snapshots) and
+//! is answered when it is queued, so its drop is only in the snapshots),
+//! one for a take that waited for preview to settle and was dropped, and
 //! one for a suggestion the director held back for the operator's shot,
 //! and clears a notice that has been shown long enough, by egui's clock.
 //! The app can raise one as the window opens, before any frame

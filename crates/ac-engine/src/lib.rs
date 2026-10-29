@@ -57,6 +57,9 @@
 //!   detector is asked for the parsed phrase ("speaker upper body" asks for
 //!   "a person speaking"), and the prompt's shot words pick its framings
 //!   unless presets are given (ADR 0003).
+//! * [`settle`] lets an operator's take wait, at most half a second, for a
+//!   preview crop that is still travelling to its subject
+//!   (settle-before-take, off by default; a second press forces it).
 //!
 //! # Time
 //!
@@ -85,6 +88,7 @@ pub mod queries;
 pub mod readiness;
 pub mod runtime;
 pub mod schedule;
+pub mod settle;
 pub mod show;
 pub mod snapshot;
 pub mod trace;

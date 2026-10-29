@@ -8,6 +8,7 @@
 
 mod alarms;
 mod operator;
+mod settle;
 mod switching;
 
 use super::*;

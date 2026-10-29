@@ -77,7 +77,7 @@
 //! | `tracker`, `framing` | partial tables over `ac_vision` and `ac_framing` | `partial` |
 //! | `subjects` | [`SubjectSettings`] | `subjects` |
 //! | `director` | [`DirectorSettings`] | `director` |
-//! | `switcher` | [`SwitcherSettings`] | `switcher` |
+//! | `switcher` | [`SwitcherSettings`], [`SettleSettings`] | `switcher`, `settle` |
 //! | `output` | [`OutputSettings`], [`EncoderSetting`] | `output` |
 //! | `monitors` | [`MonitorSettings`] | `monitors` |
 //!
@@ -91,8 +91,8 @@
 //! also keeps the helpers used beyond one table: [`valid_id`] for every id
 //! and [`preset_for`] for bare shot sizes and the engine's default presets.
 //!
-//! The flat tables (`discovery`, `subjects`, `director`, `switcher`,
-//! `output` and `monitors`) have a default for every key
+//! The tables `discovery`, `subjects`, `director`, `switcher` (with its
+//! `settle` subtable), `output` and `monitors` have a default for every key
 //! (`#[serde(default)]`), and every table rejects unknown keys, so a typo in
 //! a config file is an error rather than a silently ignored setting.
 //! Durations are written as seconds (`*_s` keys) and converted, with range
@@ -139,7 +139,7 @@ pub use schema::SCHEMA_VERSION;
 pub use sidecar::SidecarSettings;
 pub use sources::SourceEntry;
 pub use subjects::SubjectSettings;
-pub use switcher::SwitcherSettings;
+pub use switcher::{SettleSettings, SwitcherSettings};
 
 pub(crate) use load::open_show;
 use partial::{partial, validate_framing};
@@ -426,7 +426,7 @@ impl StudioConfig {
         out.extend(self.store_config().err().map(invalid_message));
         out.extend(self.director_config().err().map(invalid_message));
         out.extend(validate_framing(&self.framing).err());
-        out.extend(self.switcher.validate().err());
+        out.extend(self.switcher.problems());
         out.extend(self.output.problems());
         if let Some(audio) = &self.output.audio_source
             && !ids.contains(audio.as_str())
