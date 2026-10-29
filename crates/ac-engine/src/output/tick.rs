@@ -67,6 +67,7 @@ impl OutputController {
                 .map(ProgramEncoder::stats)
                 .or_else(|| self.last_stats.clone()),
             audio: self.pacer.as_ref().map(AudioPacer::stats),
+            audio_format: self.audio.filter(|_| self.live()),
             loudness: self.meter.as_ref().map(LoudnessMeter::reading),
             frames_pushed: self.frames_pushed,
             keep_awake: self.awake.state(),

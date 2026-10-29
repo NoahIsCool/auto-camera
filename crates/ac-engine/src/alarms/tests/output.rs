@@ -1,8 +1,10 @@
 //! The output's alarms on the fixture show of the parent module: encoder
 //! drops counted per session, a failed output, the stream reconnecting,
-//! stalled or down, and a recording without audio.
+//! stalled or down, a recording without audio, and program audio dropped
+//! for its format.
 
 use super::*;
+use crate::program_audio::{AudioInputView, unheard};
 
 #[test]
 fn encoder_drops_raise_when_they_grow_and_clear_after_five_quiet_seconds() {
@@ -183,4 +185,62 @@ fn a_recording_without_an_audio_track_or_without_source_audio() {
     show.audio_flows = true;
     assert_eq!(show.over(6.0, 6.95, 0.05), []);
     assert_eq!(show.at(7.0).len(), 1);
+}
+
+#[test]
+fn program_audio_dropped_for_its_format_raises_for_a_stream_too() {
+    // A session that only streams, its program audio at 48 kHz.
+    let mut show = Show::new().program(wide("stage")).on_air();
+    show.snap.output.record_path = None;
+    show.snap.output.audio_format = Some(ac_output::AudioFormat {
+        sample_rate: 48_000,
+        channels: 2,
+    });
+    // Blocks dropped before the model watched are not news.
+    show.snap.output.audio.as_mut().unwrap().mismatched_blocks = 4;
+    assert_eq!(show.over(0.0, 1.0, 0.1), []);
+    // The program's board, back at 96 kHz, says why it is not heard.
+    let text = unheard("Soundboard", 96_000, 48_000);
+    show.snap.audio_inputs = vec![AudioInputView {
+        id: SourceId("board".into()),
+        name: "Soundboard".into(),
+        state: SourceState::Running,
+        error: Some(text.clone()),
+        format: Some((96_000, 2)),
+        pick: None,
+        program: true,
+        blocks: 0,
+        dropped: 0,
+        unusable: 0,
+        unheard: true,
+    }];
+    show.audio_mismatched = true;
+    let raised = show.at(1.1);
+    assert!(matches!(&raised[..], [AlarmChange::Raised(a)]
+        if a.cause == AlarmCause::ProgramAudioUnheard && a.message == text));
+    assert_eq!(
+        text,
+        "Soundboard runs at 96000 Hz; the output was started at 48000 Hz: not heard until \
+         the output is restarted"
+    );
+    assert_eq!(show.over(1.2, 5.0, 0.1), [], "stays raised while it drops");
+    // Any other origin (a source's audio at another rate): the session's
+    // format is named.
+    show.snap.audio_inputs.clear();
+    show.at(5.1);
+    assert_eq!(
+        show.alarms
+            .get(&AlarmCause::ProgramAudioUnheard)
+            .unwrap()
+            .message,
+        "program audio is not in the format the output was started with (48000 Hz, 2 \
+         channels): not heard until the output is restarted"
+    );
+    // Nothing dropped for a second clears it; a new session's pacer
+    // counting from zero again is no drop.
+    show.audio_mismatched = false;
+    assert_eq!(show.over(5.2, 6.0, 0.1), []);
+    assert_eq!(show.at(6.2).len(), 1);
+    show.snap.output.audio.as_mut().unwrap().mismatched_blocks = 0;
+    assert_eq!(show.over(6.3, 8.0, 0.1), []);
 }

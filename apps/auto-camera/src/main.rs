@@ -16,6 +16,9 @@
 //! - **Check** (`--check`, [`check`]): starts nothing; lists the problems
 //!   with the config and the files, tools and folders it names, so a show
 //!   does not find them at its start.
+//! - **Audio devices** (`--list-audio-devices`, [`audio_devices`]): starts
+//!   nothing and reads no config; lists the Mac's audio input devices with
+//!   the UIDs a `kind = "device"` audio input names.
 //!
 //! `--config` opens a studio file or a show saved from one ([`show`]): the
 //! window's Save show writes the queries, director and transition to a
@@ -50,9 +53,11 @@
 //! prints on stderr go to the log too.
 //!
 //! Exit status: 0 on success, 1 when the engine, the output, the trace or
-//! the detection log failed, 2 for usage and configuration errors and when
-//! `--check` found a problem, 130 after a termination signal.
+//! the detection log failed (or the audio devices could not be listed), 2
+//! for usage and configuration errors and when `--check` found a problem,
+//! 130 after a termination signal.
 
+mod audio_devices;
 mod awake;
 mod check;
 mod cli;
@@ -83,6 +88,9 @@ fn main() -> ExitCode {
     let default_config = cli.config.as_os_str() == cli::DEFAULT_CONFIG;
     if cli.check {
         return check::run(&cli.config, default_config);
+    }
+    if cli.list_audio_devices {
+        return audio_devices::run();
     }
     let mut log = logs::LogSession::start(cli.log_dir.as_deref());
     let quit = QuitSignal::new();

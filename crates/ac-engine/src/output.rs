@@ -98,6 +98,8 @@ pub struct OutputController {
     encoder: Option<ProgramEncoder>,
     /// Program audio pacing for the running session.
     pacer: Option<AudioPacer>,
+    /// The format of the session's program audio, if it has any.
+    audio: Option<AudioFormat>,
     /// Program loudness and peaks of the session, fed what the pacer
     /// pushes (kept after the session ends, so its readings stay final).
     meter: Option<ac_audio::LoudnessMeter>,
@@ -141,6 +143,7 @@ impl OutputController {
             session: 0,
             encoder: None,
             pacer: None,
+            audio: None,
             meter: None,
             frames_pushed: 0,
             rtmp_url: None,
@@ -198,6 +201,7 @@ impl OutputController {
         config
             .validate()
             .map_err(|e| CommandError::Output(e.to_string()))?;
+        self.audio = audio;
         self.pacer = audio.map(|a| {
             AudioPacer::new(
                 a.sample_rate,

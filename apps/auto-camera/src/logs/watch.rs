@@ -9,9 +9,10 @@
 //! one a few times a second ([`POLL`]), compares it with what it saw last
 //! ([`Watcher::observe`]) and logs each change worth a line: the engine
 //! starting and stopping (with the reason when it died), a source changing
-//! state (with the reason it went offline, is reconnecting or stopped), a
-//! detector becoming ready or failing, program changing, the director's
-//! mode, the output's lifecycle and the stream's connection.
+//! state (with the reason it went offline, is reconnecting or stopped), an
+//! audio input doing the same (`audio`), a detector becoming ready or
+//! failing, program changing, the director's mode, the output's lifecycle
+//! and the stream's connection.
 //! It also renders the snapshot's summary (`summary` module) for the crash
 //! reporter, so a crash report says what the studio was doing.
 //!
@@ -51,6 +52,8 @@ use ac_output::StreamState;
 use tracing::Level;
 
 use super::{crash, summary};
+
+mod audio;
 
 /// How often the thread reads the newest snapshot.
 pub const POLL: Duration = Duration::from_millis(250);
@@ -240,6 +243,8 @@ pub struct Watcher {
     mode: Option<DirectorMode>,
     /// The sources.
     sources: HashMap<SourceId, SourceSeen>,
+    /// The audio inputs.
+    audio_inputs: HashMap<SourceId, audio::InputSeen>,
     /// The output's state.
     output: OutputState,
     /// The stream's state.
@@ -270,6 +275,9 @@ impl Watcher {
         }
         for source in &snap.sources {
             self.source(source, snap.media_time, &mut notes);
+        }
+        for input in &snap.audio_inputs {
+            audio::observe(&mut self.audio_inputs, input, snap.running, &mut notes);
         }
         if self.mode != Some(snap.director.mode) {
             self.mode = Some(snap.director.mode);

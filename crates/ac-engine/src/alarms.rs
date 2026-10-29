@@ -26,8 +26,9 @@
 //! one twice), so every rule is written over values that hold between
 //! samples, never over a single tick a reader could miss: when the
 //! program's run of black frames began, a source's frame age, the
-//! encoder's drop counters and the program audio pushed, the last two
-//! compared with the previous observation of the same output session.
+//! encoder's drop counters, the program audio pushed and the program audio
+//! blocks dropped for their format, the last three compared with the
+//! previous observation of the same output session.
 //!
 //! | Alarm | Raised when | Cleared when |
 //! |---|---|---|
@@ -39,6 +40,7 @@
 //! | stream reconnecting | the stream lost its connection and ffmpeg reopens it, or the ingest stopped taking packets (stalled: connected, it cannot keep up or went silent; connecting, it does not answer) | connected and taking packets for [`QUIET_AFTER`]; the stream is down or the session ends |
 //! | stream down | ffmpeg gave the stream up for the session while still running (the recording goes on) | the session ends |
 //! | recording without audio | the session records with no audio track, or no source audio was pushed for [`SILENT_AFTER`] | source audio for [`CLEAR_AFTER`], each piece within [`AUDIO_RECENT`] of the last; the session ends |
+//! | program audio unheard | the session (recording, streaming or both) dropped program audio since the previous observation for being in another format than the output was started with: its origin connected, or came back, at another rate | none dropped for [`CLEAR_AFTER`]; the session ends |
 //!
 //! The holds of the picture alarms are short, as a black or frozen program
 //! is seen at once; those of the drop and stream alarms are longer, as
@@ -129,6 +131,10 @@ pub enum AlarmCause {
     StreamDown,
     /// The recording gets no audio.
     RecordingWithoutAudio,
+    /// Program audio is dropped for being in another format than the
+    /// output was started with (an origin that came back at another rate),
+    /// so neither the recording nor the stream hears it.
+    ProgramAudioUnheard,
 }
 
 impl AlarmCause {
@@ -144,6 +150,7 @@ impl AlarmCause {
             AlarmCause::StreamReconnecting => "stream_reconnecting",
             AlarmCause::StreamDown => "stream_down",
             AlarmCause::RecordingWithoutAudio => "recording_without_audio",
+            AlarmCause::ProgramAudioUnheard => "program_audio_unheard",
         }
     }
 

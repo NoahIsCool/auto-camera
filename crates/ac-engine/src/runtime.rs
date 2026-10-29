@@ -325,7 +325,7 @@ impl Engine {
             true,
         );
         first.sidecar = sidecar.as_ref().map(|s| s.status());
-        first.audio_inputs = audio.views();
+        first.audio_inputs = audio.views(None);
         let initial = Arc::new(first);
         snapshots.publish(initial.clone());
         let (tx, commands) = channel();

@@ -141,6 +141,9 @@ struct Show {
     snap: EngineSnapshot,
     /// Source audio reaches the encoder at [`RATE`].
     audio_flows: bool,
+    /// Every observation finds a program audio block more dropped for its
+    /// format.
+    audio_mismatched: bool,
 }
 
 impl Show {
@@ -150,6 +153,7 @@ impl Show {
             alarms: Alarms::new(),
             snap: studio(),
             audio_flows: true,
+            audio_mismatched: false,
         }
     }
 
@@ -188,6 +192,11 @@ impl Show {
             && let Some(a) = &mut self.snap.output.audio
         {
             a.pushed = (secs * RATE) as u64;
+        }
+        if self.audio_mismatched
+            && let Some(a) = &mut self.snap.output.audio
+        {
+            a.mismatched_blocks += 1;
         }
         self.alarms.observe(&self.snap)
     }
@@ -232,7 +241,7 @@ fn a_healthy_show_raises_nothing() {
 fn fixture_snapshots_raise_and_clear_each_alarm() {
     /// A way to bring a cause about on the show, and one to end it.
     type Edit = fn(&mut Show);
-    let cases: [(AlarmCause, Edit, Edit); 10] = [
+    let cases: [(AlarmCause, Edit, Edit); 11] = [
         (
             AlarmCause::ProgramBlack,
             |show| show.snap.program_black_since = Some(show.snap.media_time),
@@ -282,6 +291,11 @@ fn fixture_snapshots_raise_and_clear_each_alarm() {
             AlarmCause::RecordingWithoutAudio,
             |show| show.audio_flows = false,
             |show| show.audio_flows = true,
+        ),
+        (
+            AlarmCause::ProgramAudioUnheard,
+            |show| show.audio_mismatched = true,
+            |show| show.audio_mismatched = false,
         ),
     ];
     for (cause, start, end) in cases {
@@ -567,5 +581,9 @@ fn causes_name_their_kind() {
     assert_eq!(
         AlarmCause::RecordingWithoutAudio.to_string(),
         "recording without audio"
+    );
+    assert_eq!(
+        AlarmCause::ProgramAudioUnheard.to_string(),
+        "program audio unheard"
     );
 }

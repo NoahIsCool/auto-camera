@@ -55,10 +55,12 @@ Above it, the status bar lists alarms (spec M14), one row each, for as long
 as their cause lasts: the program black for 2 s while the output runs, the
 program on a subject lost for half a second, the program's source sending
 no new frame for over half a second, encoder drops, a failed output, the
-stream reconnecting, stalled (the ingest takes no packets) or down, and a
-recording without audio (no audio track, or no source audio for 2 s). Most
-clear only once their cause has been gone for a while (a second for the
-picture and audio, five for drops and for a stream taking packets again),
+stream reconnecting, stalled (the ingest takes no packets) or down, a
+recording without audio (no audio track, or no source audio for 2 s), and
+program audio unheard (it connected, or came back, at another rate than
+the output was started with: restart the output). Most clear only once
+their cause has been gone for a while (a second for the picture and
+audio, five for drops and for a stream taking packets again),
 so they do not flicker; a failed output clears when the output starts
 again, and a stream that is down when the session ends. Acknowledge dims an alarm and removes its button,
 but it stays listed until its cause clears; one that comes back is new.
@@ -298,7 +300,8 @@ it. It lists the problems in the config's values, all of them rather than
 the first (the `lexicon`, `tracker`, `framing`, `subjects` and `director`
 tables, which the crates that use them check, give their first problem
 each), and looks at everything the config names: each file source's video
-and each audio input's file, the ffmpeg tools (`-version` of the output's
+and each audio input's file (and that a device audio input is in a build
+that can open it), the ffmpeg tools (`-version` of the output's
 ffmpeg, of the ffmpeg and ffprobe file sources and audio inputs decode
 with, and of that ffmpeg when capture sources list and capture their
 cameras with it), the detector's model files (and
@@ -344,8 +347,8 @@ UTC: the app's version and commit, the config's SHA-256 (for a show,
 also that of the studio file it lies over) and the model files (path,
 size and time at once, their SHA-256 from a background thread, so a
 start never waits for gigabytes of weights), which lines start every
-file again after a rotation, then what the studio did
-(sources starting, going offline and stopping, with the reason, detectors
+file again after a rotation, then what the studio did (sources and audio
+inputs starting, going offline and stopping, with the reason, detectors
 ready or failing, program changes, the output's lifecycle and the
 stream's connection), every line ffmpeg and the detector sidecar print on
 stderr (stream key redacted; a source decoder's repeats of one complaint
@@ -463,8 +466,8 @@ stops the start.
 Program audio is one stereo pair. `output.audio_source` names a source,
 for its embedded audio (not a capture source: a camera's audio is not
 captured), or an audio input: an audio-only feed such as the soundboard's.
-For now that is a WAV or RF64 recording of the board, played as a live
-feed (a USB audio interface comes later, behind the same input):
+That is the board itself on the Mac (an audio device, below), or a WAV or
+RF64 recording of the board, played as a live feed:
 
 ```toml
 [[audio_inputs]]
@@ -485,12 +488,81 @@ The picked channels are copied as they are; nothing is mixed. Without
 both sides at full level. A pick beyond `channel_count` fails the load; an
 input that opens without the picked channels, or with another count than
 `channel_count`, stays offline with the reason and is retried, like a
-source. The engine does not resample: program audio reaches the encoder at
+source. The window and the headless summary do not show audio inputs yet,
+but the log does: it says when an input goes offline, comes back or stops,
+with the reason (`audio input board: running -> offline (...)`), and
+writes a reason that every retry repeats only once.
+The engine does not resample: program audio reaches the encoder at
 the input's own rate (48 kHz while the input has not connected), and the
 encoder converts it to 48 kHz AAC. The engine never waits on an input: a
 stall is filled with silence and the late audio after it cut, and a sample
 clock that drifts from the engine's is kept in step the same way, so the
 program stays in sync.
+
+On the Mac the board is an input of `kind = "device"`: its USB audio
+interface is a CoreAudio device, and so is anything else with a CoreAudio
+driver (a Dante Virtual Soundcard, an AVB or MADI interface). It is named
+by its CoreAudio UID, which stays the same when it is replugged and which
+`--list-audio-devices` prints for every input device, ready to paste:
+
+```sh
+cargo run --release -p auto-camera --features coreaudio -- --list-audio-devices
+```
+
+```text
+2 audio input devices:
+  MacBook Pro Microphone (the default input): 1 input channel at 48000 Hz
+    uid = "BuiltInMicrophoneDevice"
+  SQ: 32 input channels at 48000 Hz
+    uid = "AppleUSBAudioEngine:Allen&Heath:SQ:1A2B3C:1"
+Copy a device's uid line into its [[audio_inputs]] entry, with kind = "device".
+```
+
+```toml
+[[audio_inputs]]
+id = "board"
+name = "Soundboard"
+kind = "device"
+uid = "AppleUSBAudioEngine:Allen&Heath:SQ:1A2B3C:1"
+channels = [1, 2]            # the board's stereo bus on its USB channels
+channel_count = 32           # optional, as for a file
+```
+
+The device is captured with all its input channels at the rate it runs at,
+and each block carries the time it was captured, on the engine's clock:
+the host time CoreAudio stamped it with, less the device's latency as the
+connection's first buffer had it (a few to tens of milliseconds, the same
+for every block of the connection, so only how the times advance
+matters). The rate is kept, but the cpal library that opens the
+stream switches a device that offers a 32-bit float format at that rate to
+it: a setting of the device that stays after the show and that Audio MIDI
+Setup shows. Only the device with exactly that UID is opened: one that is
+not connected leaves the input offline, retried like a source, so the
+board comes on air within seconds of being plugged in, and back after it
+was unplugged; the default microphone is never opened in its place. On
+air, it is heard if it runs at the rate the output was started with: the
+board's own if it was connected then, 48 kHz if the output started before
+it was. A board at another rate (one plugged in at 96 kHz after the output
+started without it, or one whose rate was changed during the show) is not
+heard until the output is restarted, which its error and the alarm
+"program audio unheard" say. The log says why it is offline, with the
+UIDs of the devices that are connected, and says it again when that list
+changes. A glitch the input delivers through (audio dropped because the
+input fell behind its device, a jump in the device's timestamps, an
+overload CoreAudio reports) keeps it on air: it is counted, kept as the
+input's error (`audio discontinuity (3 so far; the device reported 2 overloads): ...`)
+and written to the log, at most a line every 10 s. Overloads are counted
+apart from what the input measures, since one that lost audio also shows
+as the gap it left. A jump in the timestamps is reported half a second after
+it, once it has lasted; timestamps that are off for a few blocks and then
+back are one timestamp glitch, with no audio missing and the input's
+timeline as it was. A device that sends nothing for 2 s is reopened. Device
+inputs need macOS and a build with `--features coreaudio`, which is opt-in
+like `onnx`; any other build loads the config, `--check` reports the input
+as a problem saying how to build, and the input stays offline with that
+message. macOS asks once whether the app (or the terminal it runs in) may
+use audio input; refused, the input runs on silence, until it is allowed
+in System Settings, Privacy & Security, Microphone.
 
 A source's embedded audio is mixed to stereo by ffmpeg as it is decoded,
 with the matrix the encoder used on it before: a stereo track as it is, a
@@ -770,7 +842,7 @@ the program is silent. A headless run reports the session's values in
 | `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
 | `ac-media` | Frames, audio blocks, the source and audio input traits, latest-frame mailboxes and audio rings, and the stereo channel pick |
 | `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak |
-| `ac-sources` | File (ffmpeg), synthetic and capture (avfoundation, by unique ID) sources, file segments, audio-only file inputs (WAV, RF64) and a fake input that drifts and stalls, a frame-by-frame clip reader for offline tools; injectable clocks |
+| `ac-sources` | File (ffmpeg), synthetic and capture (avfoundation, by unique ID) sources, file segments, audio-only file inputs (WAV, RF64), CoreAudio device inputs by UID (feature `coreaudio`) and a fake input that drifts and stalls, a frame-by-frame clip reader for offline tools; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector, replay of recorded detections |
 | `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
@@ -781,7 +853,7 @@ the program is silent. A headless run reports the session's values in
 | `ac-output` | One ffmpeg encode to RTMP and fragmented MP4; `caffeinate` while live |
 | `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), the per-tick trace schema (`TraceRecord`) the engine emits, and the framing, motion, tracking and switching scorers that measure a trace against the labels, judged by a TOML thresholds file into a JSON report |
 | `ac-engine` | The runtime that wires them together (ADR 0002), the studio config and its readiness check |
-| `apps/auto-camera` | Operator window, headless runner and `--check` |
+| `apps/auto-camera` | Operator window, headless runner, `--check` and `--list-audio-devices` |
 | `apps/eval-runner` | The engine stepped over a clip on simulated time, with live or replayed detections, writing the trace |
 
 ## Develop

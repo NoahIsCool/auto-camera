@@ -224,7 +224,7 @@ fn a_sixteen_channel_input_gives_its_picked_pair_bit_for_bit() {
             "right of frame {n}"
         );
     }
-    let view = &audio.views()[0];
+    let view = &audio.views(None)[0];
     assert_eq!((view.blocks, view.unusable, view.dropped), (3, 0, 3));
     assert!(view.program);
     assert_eq!(view.pick, Some(ChannelPick::Pair(2, 3)));
@@ -261,7 +261,7 @@ fn a_block_without_the_picked_channels_is_dropped_and_counted() {
         .push([block("board", 0, 2, 480), block("board", 1, 4, 480)]);
     let out = audio.take(&[]);
     assert_eq!(out.iter().map(|b| b.seq).collect::<Vec<_>>(), [1]);
-    let view = &audio.views()[0];
+    let view = &audio.views(None)[0];
     assert_eq!((view.blocks, view.unusable), (2, 1));
 }
 
@@ -283,7 +283,7 @@ fn every_input_and_source_is_drained_and_only_the_origin_kept() {
     assert!(Arc::ptr_eq(&out[0].samples, &program.samples));
     // The others were drained too, so nothing builds up.
     assert!(cam_audio.take().is_empty() && spare_handles.queue.take().is_empty());
-    let views = audio.views();
+    let views = audio.views(None);
     assert_eq!(
         views
             .iter()
@@ -323,7 +323,7 @@ fn a_video_sources_audio_is_taken_as_it_is() {
         (480, 1)
     );
     assert_eq!(audio.phase_reference(), 0);
-    assert!(audio.views().is_empty());
+    assert!(audio.views(None).is_empty());
 }
 
 #[test]
@@ -361,7 +361,7 @@ fn an_input_that_is_not_there_yet_shows_why() {
     let audio = ProgramAudio::with_inputs(Some(Origin::Input(0)), vec![slot]);
     assert_eq!(audio.phase_reference(), 0, "the first source");
     assert_eq!(audio.origin(), Some(Origin::Input(0)));
-    let view = &audio.views()[0];
+    let view = &audio.views(None)[0];
     assert_eq!(view.state, SourceState::Offline);
     assert_eq!(view.error.as_deref(), Some("board.wav does not exist"));
     assert_eq!(view.format, None);
