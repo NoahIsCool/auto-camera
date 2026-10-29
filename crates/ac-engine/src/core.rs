@@ -4,8 +4,10 @@
 //! source the [`SourceVision`] (subject store and tracker), the query list,
 //! the shot [`Catalog`] with one framer per shot, the [`Switcher`], the
 //! [`Director`] and the [`Compositor`]. It does not own sources, detector
-//! threads or the encoder; the runtime ([`crate::runtime`]) feeds it the
-//! newest frame of every source and the discovery results that arrived, and
+//! threads or the encoder; the runtime ([`crate::runtime`]) feeds it a
+//! frame of every source (the newest of the phase reference, and for every
+//! other source the one its presentation buffer picked by PTS;
+//! [`crate::presentation`]) and the discovery results that arrived, and
 //! takes back the program frame and the discovery requests to send.
 //!
 //! One [`EngineCore::tick`] at master-clock time `now`:
@@ -22,9 +24,13 @@
 //!    sequence number and PTS. Stale and failed results change no
 //!    feedback; they are recorded as the source's newest outcome
 //!    ([`crate::snapshot::PassOutcome`]), so the window can say the
-//!    feedback is no longer current.
+//!    feedback is no longer current. Every applied result is also handed
+//!    back as a [`PassRecord`] ([`TickOutput::applied`]), for the
+//!    detection log that a replay answers from (see `applied`).
 //! 3. **Frames.** Each source's newest frame, if new, advances its tracker
-//!    and store (media time = the frame's PTS).
+//!    and store (media time = the frame's PTS). "Newest" is the newest the
+//!    runtime fed: for a source with a presentation buffer, the frame it
+//!    presented, which is why a frame it passed over counts as missed.
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
 //! 5. **Framing.** Every shot's framer steps by `dt` and is rescored.
 //! 6. **Switching.** The switcher advances its transition; when one ends,
@@ -56,16 +62,17 @@
 //! timeouts, since a detector that has not loaded cannot answer. The tick
 //! on which loading is reported over makes it due at once, so the newest
 //! frame goes out on that same tick, and records that tick's master-clock
-//! time as [`DiscoveryStats::ready_after`]. A source starts preparing when
-//! it has a detector, so the snapshot taken before the first tick already
-//! says so. A shared detector is one detector for the whole studio: while
-//! the sidecar's first start is still running (any source's loader still
-//! waits for its hello or its failure), every source is preparing, and they
-//! all become ready on the same tick, so the sources start taking turns
-//! only once that start has ended, the first source first; after a failed
-//! start each turn's pass fails with the reason. The loading state is tick
-//! input like the
-//! frames, so the core stays a deterministic function of its inputs.
+//! time as
+//! [`DiscoveryStats::ready_after`](crate::snapshot::DiscoveryStats::ready_after).
+//! A source starts preparing when it has a detector, so the snapshot taken
+//! before the first tick already says so. A shared detector is one
+//! detector for the whole studio: while the sidecar's first start is still
+//! running (any source's loader still waits for its hello or its failure),
+//! every source is preparing, and they all become ready on the same tick,
+//! so the sources start taking turns only once that start has ended, the
+//! first source first; after a failed start each turn's pass fails with
+//! the reason. The loading state is tick input like the frames, so the
+//! core stays a deterministic function of its inputs.
 //!
 //! # Sources that drop out
 //!
@@ -102,27 +109,34 @@ use ac_director::{Director, DirectorDecision};
 use ac_framing::FramerConfig;
 use ac_media::{SourceInfo, SourceState, VideoFrame};
 use ac_switcher::Switcher;
+use ac_vision::PassRecord;
 
 use crate::catalog::Catalog;
 use crate::config::{DiscoverySettings, MonitorSettings, QuerySettings, Ranking, StudioConfig};
 use crate::discovery::{DiscoveryRequest, DiscoveryResult};
+use crate::presentation::PresentationStats;
 use crate::queries::PromptReader;
 use crate::schedule::RateMeter;
-use crate::snapshot::{DiscoveryStats, MatchView};
 use crate::vision::SourceVision;
 
+use slot::{DiscoveryState, SourceSlot};
+
+mod applied;
 mod commands;
 mod directing;
 mod passes;
 mod render;
 mod shots;
 mod show;
+mod slot;
 mod snapshot;
 #[cfg(test)]
 mod tests;
 mod trace;
 
-/// A source counts as unavailable when no new frame arrived for this long.
+/// A source counts as unavailable when no new frame arrived for this long;
+/// its presentation buffer, if it has one, then stops presenting it too
+/// ([`crate::presentation`]).
 pub const SOURCE_STALE_AFTER: Duration = Duration::from_secs(1);
 
 /// What the runtime knows about a source on one tick.
@@ -130,7 +144,9 @@ pub const SOURCE_STALE_AFTER: Duration = Duration::from_secs(1);
 pub struct SourceFeed {
     /// Health reported by the source.
     pub state: SourceState,
-    /// The source's newest frame (possibly the same as last tick).
+    /// The frame to show: the source's newest, or for a source other than
+    /// the phase reference the one its presentation buffer picked for the
+    /// tick ([`crate::presentation`]); possibly the same as last tick.
     pub frame: Option<VideoFrame>,
     /// The source's detector is still loading (false without a detector);
     /// see the module docs.
@@ -146,6 +162,23 @@ pub struct SourceFeed {
     pub info: Option<SourceInfo>,
 }
 
+impl SourceFeed {
+    /// A running source showing `frame`, whose detector (if it has one) has
+    /// loaded, with no error and no newer description than the one the core
+    /// was built with (its rate stays; the frame gives the size): what a
+    /// driver that reads the frames itself, such as the eval runner, feeds
+    /// on every tick.
+    pub fn running(frame: Option<VideoFrame>) -> Self {
+        Self {
+            state: SourceState::Running,
+            frame,
+            detector_loading: false,
+            error: None,
+            info: None,
+        }
+    }
+}
+
 /// What a tick produced for the runtime.
 #[derive(Debug, Clone)]
 pub struct TickOutput {
@@ -153,122 +186,9 @@ pub struct TickOutput {
     pub program: VideoFrame,
     /// Discovery requests to hand to the workers, by source index.
     pub requests: Vec<(usize, DiscoveryRequest)>,
-}
-
-/// Discovery scheduling of one source.
-#[derive(Debug, Clone, Default)]
-struct DiscoveryState {
-    /// The source has a detector worker.
-    enabled: bool,
-    /// Earliest time of the next request.
-    next_due: Duration,
-    /// When the request in flight was sent.
-    in_flight_since: Option<Duration>,
-    /// When the newest request was sent, for taking turns on a shared
-    /// detector.
-    last_sent: Option<Duration>,
-    /// Sequence number of the newest frame requested.
-    last_requested: Option<u64>,
-    /// Sequence number of the newest frame whose results were applied.
-    last_applied: Option<u64>,
-    /// Prompt feedback: per live query, what the newest applied result
-    /// that looked for it found.
-    matches: HashMap<QueryId, MatchView>,
-    /// Counters, and whether the detector is still preparing.
-    stats: DiscoveryStats,
-}
-
-impl DiscoveryState {
-    /// The state of a source that runs discovery when `enabled`: it
-    /// prepares until a tick says its detector has loaded.
-    fn new(enabled: bool) -> Self {
-        Self {
-            enabled,
-            stats: DiscoveryStats {
-                preparing: enabled,
-                ..DiscoveryStats::default()
-            },
-            ..Self::default()
-        }
-    }
-
-    /// Takes in whether the detector is still `loading` at `now`; when it
-    /// stops, the source is ready and due at once (see the module docs).
-    fn note_loading(&mut self, loading: bool, now: Duration) {
-        if !self.enabled {
-            return;
-        }
-        if loading {
-            self.stats.preparing = true;
-        } else if self.stats.preparing {
-            self.stats.preparing = false;
-            self.stats.ready_after = Some(now);
-            self.next_due = now;
-        }
-    }
-}
-
-/// One source as the core sees it.
-#[derive(Debug)]
-struct SourceSlot {
-    /// Stable id.
-    id: SourceId,
-    /// Operator-facing name.
-    name: String,
-    /// The source's description: as given to [`EngineCore::new`], with the
-    /// size and rate of its first frame's connection once one arrived (see
-    /// [`SourceSlot::describe`]).
-    info: SourceInfo,
-    /// Picture aspect (width / height).
-    aspect: f64,
-    /// Identity and tracking.
-    vision: SourceVision,
-    /// Newest frame seen.
-    frame: Option<VideoFrame>,
-    /// Health reported by the source.
-    state: SourceState,
-    /// Why the source is not delivering, as reported with `state`.
-    error: Option<String>,
-    /// Master-clock time of the newest new frame.
-    last_frame_at: Option<Duration>,
-    /// New frames seen.
-    frames: u64,
-    /// Frames the source produced that the engine never saw (sequence gaps:
-    /// the mailbox kept only the newest).
-    missed: u64,
-    /// New-frame rate.
-    rate: RateMeter,
-    /// Discovery scheduling.
-    discovery: DiscoveryState,
-}
-
-impl SourceSlot {
-    /// Takes the description of a source's first frame, `frame`, and of the
-    /// connection that delivered it, `connection` (see the module docs): a
-    /// source missing at start was given a placeholder, and nothing has been
-    /// tracked or framed on its picture yet. The size comes from the frame,
-    /// the rate from the connection. An empty size, a description of another
-    /// source and a rate that is not positive and finite are ignored.
-    fn describe(&mut self, frame: &VideoFrame, connection: Option<&SourceInfo>) {
-        let size = (frame.width, frame.height);
-        if size != (self.info.width, self.info.height) && size.0 > 0 && size.1 > 0 {
-            self.info.width = frame.width;
-            self.info.height = frame.height;
-            self.aspect = frame.aspect();
-        }
-        let usable = |c: &&SourceInfo| c.id == self.id && c.fps.is_finite() && c.fps > 0.0;
-        if let Some(c) = connection.filter(usable) {
-            self.info.fps = c.fps;
-        }
-    }
-
-    /// True when the source is delivering and has a fresh frame at `now`.
-    fn available(&self, now: Duration) -> bool {
-        matches!(self.state, SourceState::Starting | SourceState::Running)
-            && self
-                .last_frame_at
-                .is_some_and(|t| now.saturating_sub(t) <= SOURCE_STALE_AFTER)
-    }
+    /// The discovery results the tick applied, in the order applied, for
+    /// the detection log ([`crate::detection_log`]).
+    pub applied: Vec<PassRecord>,
 }
 
 /// The deterministic engine core; see the module docs.
@@ -347,6 +267,9 @@ pub struct EngineCore {
     next_thumbs_at: Duration,
     /// Shots drawn black on the newest program frame.
     render_issues: Vec<String>,
+    /// When the run of black program frames that ends with the newest
+    /// began ([`render`]).
+    program_black_since: Option<Duration>,
     /// The sources and default recording path, as configured, for the
     /// show export ([`show`]).
     show_base: show::ShowBase,
@@ -388,6 +311,7 @@ impl EngineCore {
                 last_frame_at: None,
                 frames: 0,
                 missed: 0,
+                presentation: None,
                 rate: RateMeter::new(Duration::from_secs(1)),
                 discovery: DiscoveryState::new(detectors.get(i).copied().unwrap_or(false)),
             });
@@ -443,11 +367,15 @@ impl EngineCore {
             next_monitor_at: Duration::ZERO,
             next_thumbs_at: Duration::ZERO,
             render_issues: Vec::new(),
+            program_black_since: None,
             show_base: show::ShowBase::of(config),
         };
         // Wide shots exist from the start, so they can be staged before the
         // first tick.
         core.sync_catalog();
+        if config.switcher.start_on_wide {
+            core.start_on_wide()?;
+        }
         Ok(core)
     }
 
@@ -506,9 +434,7 @@ impl EngineCore {
         self.now = now;
         self.ticks += 1;
         self.update_protection();
-        for r in results {
-            self.apply_result(r);
-        }
+        let applied = self.apply_results(results);
         // A shared detector is ready for every source or for none.
         let studio_loading = self.shared_detector
             && feeds
@@ -529,6 +455,7 @@ impl EngineCore {
         TickOutput {
             program,
             requests: self.schedule_discovery(),
+            applied,
         }
     }
 
@@ -560,6 +487,21 @@ impl EngineCore {
         s.frames += 1;
         s.rate.record(now);
         s.vision.on_frame(frame);
+    }
+
+    /// Takes the runtime's report on its presentation buffers, one entry
+    /// per source in source order (`None` for a source without one; see
+    /// [`crate::presentation`]), for the snapshot
+    /// ([`SourceView::presentation`](crate::SourceView::presentation)).
+    /// Entries past the last source are ignored, and sources past the last
+    /// entry keep what they had.
+    pub fn note_presentation(
+        &mut self,
+        stats: impl IntoIterator<Item = Option<PresentationStats>>,
+    ) {
+        for (s, stats) in self.sources.iter_mut().zip(stats) {
+            s.presentation = stats;
+        }
     }
 
     /// Index of the source with `id`.

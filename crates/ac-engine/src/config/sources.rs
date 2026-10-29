@@ -85,6 +85,8 @@ mod tests {
             loop_playback: false,
             max_width: Some(640),
             audio: true,
+            start_s: None,
+            duration_s: None,
         });
         let info = file.placeholder_info((1280, 720));
         assert_eq!(info.id, SourceId("cam".into()));

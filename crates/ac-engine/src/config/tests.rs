@@ -288,6 +288,8 @@ fn synthetic_detector_needs_synthetic_sources() {
             loop_playback: false,
             max_width: None,
             audio: true,
+            start_s: None,
+            duration_s: None,
         },
     );
     c.validate().unwrap();

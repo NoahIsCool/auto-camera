@@ -14,6 +14,12 @@
 //! Parsing is separate from running the tool ([`parse_probe`]), so it is
 //! tested against canned ffprobe output without ffmpeg installed.
 //!
+//! Start times: a container's timestamps need not start at zero (an MPEG-TS
+//! recording often starts a second or more in), and its video need not start
+//! where the container does. Both are read, as seconds, so a
+//! [`Segment`](crate::segment::Segment) can find its frames on the file's own
+//! timeline.
+//!
 //! Frame rate: ffprobe reports `avg_frame_rate` (the measured average) and
 //! `r_frame_rate` (the timebase-derived "real" rate, which for variable-rate
 //! phone footage can be a meaningless 90000/1). The average is preferred; the
@@ -124,6 +130,8 @@ pub struct VideoStreamInfo {
     pub rotation: u32,
     /// ffprobe's `color_space` (the YUV matrix), such as `bt709`, if tagged.
     pub color_space: Option<String>,
+    /// Timestamp of the stream's first frame in seconds, when known.
+    pub start_time: Option<f64>,
 }
 
 impl VideoStreamInfo {
@@ -158,6 +166,9 @@ pub struct ProbeInfo {
     pub audio: Option<AudioStreamInfo>,
     /// Container duration, when known.
     pub duration: Option<Duration>,
+    /// Timestamp the container starts at in seconds, when known: where
+    /// ffmpeg's `-ss` counts from.
+    pub start_time: Option<f64>,
 }
 
 /// Runs ffprobe on `path` and parses the result.
@@ -212,6 +223,8 @@ struct RawProbe {
 struct RawFormat {
     /// Duration in seconds, as a decimal string.
     duration: Option<String>,
+    /// Start timestamp in seconds, as a decimal string.
+    start_time: Option<String>,
 }
 
 /// Stream fields used here; every field is optional in ffprobe's output.
@@ -232,6 +245,8 @@ struct RawStream {
     r_frame_rate: Option<String>,
     /// YUV matrix tag.
     color_space: Option<String>,
+    /// Start timestamp in seconds, as a decimal string.
+    start_time: Option<String>,
     /// Sample rate as a decimal string.
     sample_rate: Option<String>,
     /// Channel count.
@@ -286,14 +301,25 @@ pub fn parse_probe(json: &str) -> Result<ProbeInfo, MediaError> {
         .transpose()?;
     let duration = raw
         .format
-        .and_then(|f| f.duration)
-        .and_then(|d| d.trim().parse::<f64>().ok())
+        .as_ref()
+        .and_then(|f| seconds(f.duration.as_deref()))
         .and_then(|d| Duration::try_from_secs_f64(d).ok());
+    let start_time = raw
+        .format
+        .as_ref()
+        .and_then(|f| seconds(f.start_time.as_deref()));
     Ok(ProbeInfo {
         video: parse_video(video)?,
         audio,
         duration,
+        start_time,
     })
+}
+
+/// A decimal number of seconds; `None` when absent, unreadable or not
+/// finite.
+fn seconds(text: Option<&str>) -> Option<f64> {
+    text?.trim().parse::<f64>().ok().filter(|s| s.is_finite())
 }
 
 /// Validates and converts a video stream.
@@ -322,6 +348,7 @@ fn parse_video(s: &RawStream) -> Result<VideoStreamInfo, MediaError> {
         frame_rate,
         rotation,
         color_space: s.color_space.clone(),
+        start_time: seconds(s.start_time.as_deref()),
     })
 }
 
@@ -403,6 +430,28 @@ mod tests {
         let a = p.audio.unwrap();
         assert_eq!((a.index, a.sample_rate, a.channels), (1, 48_000, 2));
         assert_eq!(p.duration, Some(Duration::from_secs(1)));
+        assert_eq!((p.start_time, p.video.start_time), (None, None));
+    }
+
+    #[test]
+    fn reads_where_the_container_and_its_video_start() {
+        // Trimmed real ffprobe output for an MPEG-TS recording: audio from
+        // 1.4 s, video from 1.421333 s.
+        let json = r#"{"streams": [
+            {"index": 0, "codec_type": "video", "width": 64, "height": 36,
+             "avg_frame_rate": "30000/1001", "start_time": "1.421333"},
+            {"index": 1, "codec_type": "audio", "sample_rate": "48000", "channels": 2,
+             "start_time": "1.400000"}
+        ], "format": {"format_name": "mpegts", "start_time": "1.400000", "duration": "6.0"}}"#;
+        let p = parse_probe(json).unwrap();
+        assert_eq!(p.start_time, Some(1.4));
+        assert_eq!(p.video.start_time, Some(1.421333));
+        // Unreadable or missing times are unknown, not zero.
+        let json = r#"{"streams": [{"index": 0, "codec_type": "video", "width": 8,
+            "height": 8, "avg_frame_rate": "25/1", "start_time": "N/A"}],
+            "format": {"start_time": "nan"}}"#;
+        let p = parse_probe(json).unwrap();
+        assert_eq!((p.start_time, p.video.start_time), (None, None));
     }
 
     #[test]

@@ -51,6 +51,23 @@ and the monitors and the director's suggestion name it "Speaker 1 Close
 subject's shots (two sizes both drawn at the ceiling). The status bar shows
 source frame rates, tick timing and dropped frames.
 
+Above it, the status bar lists alarms (spec M14), one row each, for as long
+as their cause lasts: the program black for 2 s while the output runs, the
+program on a subject lost for half a second, the program's source sending
+no new frame for over half a second, encoder drops, a failed output, the
+stream reconnecting, stalled (the ingest takes no packets) or down, and a
+recording without audio (no audio track, or no source audio for 2 s). Most
+clear only once their cause has been gone for a while (a second for the
+picture and audio, five for drops and for a stream taking packets again),
+so they do not flicker; a failed output clears when the output starts
+again, and a stream that is down when the session ends. Acknowledge dims an alarm and removes its button,
+but it stays listed until its cause clears; one that comes back is new.
+With `start_on_wide = true` in the `[switcher]` table the first source's
+wide is on program from the start (it shows black until the source
+delivers), so a studio restarted after a crash goes out on a clean wide
+instead of black. Scoring a trace of such a run (`ac-eval`) counts that
+black as the start-up wait, not as a loss on program.
+
 | Input | Action |
 |---|---|
 | click a tile | stage it on preview |
@@ -180,6 +197,58 @@ starts offline and is retried, see "Studio configuration"), so a run with a
 missing file ticks and, like every run that ticked, keeps its trace: move
 or remove it before running the same command again.
 
+### Recorded detections and the eval runner
+
+`--record-detections PATH` (headless or in the window) writes every
+detector pass the engine applied as JSON Lines: the source, the frame's
+sequence number and PTS, the queries looked for, and each detection's
+query, box, score and extent (`ac_vision::PassRecord`). The summary's
+`detections` gives the lines written (`records`, with `missing` for passes
+a writer that fell behind had to drop). As for the trace, the file must not
+exist, and a run whose engine does not start removes it.
+
+The eval runner (`apps/eval-runner`) steps the engine over a studio's
+sources on simulated time, tick after tick on one thread, so the same input
+always gives the same trace, and it can answer discovery from such a log
+instead of from a model, so scoring needs no inference:
+
+```sh
+# Record once, with the studio's own detector ...
+cargo run -p eval-runner -- --config config/demo.toml --seconds 10 \
+  --trace /tmp/live.jsonl --record-detections /tmp/passes.jsonl
+# ... and replay without it: the same trace, byte for byte.
+cargo run -p eval-runner -- --config config/demo.toml --seconds 10 \
+  --trace /tmp/replay.jsonl --replay /tmp/passes.jsonl
+```
+
+Synthetic sources are drawn, and file sources decoded frame by frame, in
+step with the ticks: each tick shows the newest frame due by then. A
+discovery request is answered `--latency-ticks` ticks later (default 1),
+and the first wide goes on program as in a headless run. A replayed pass
+answers a frame at most half a frame interval from it, so a log the runner
+recorded matches frame for frame; a log the app recorded live looked at
+whichever frames real time handed its detector, so replay it with a wider
+`--tolerance-ms` (half the discovery interval, say). A request with no pass
+is a miss, which changes nothing, so a pass left out of a log skips just
+that update. The run ends after `--seconds`, or once every file source has
+played to its end, and prints a JSON report: ticks, and for each source the
+requests, applied passes, misses and detector errors. The sidecar detector
+answers in real time and cannot run in the runner: record it with the app
+and replay it.
+
+A file source can play part of its file as a clip of its own: `start_s`
+seconds in (default 0), for `duration_s` seconds (default: to the end).
+The first frame at or after `start_s` comes first, with PTS 0, and the
+audio starts with it, so a segment of a long recording is scored like a
+short clip, against the labels of the whole file once the scoring scope
+gives the same `start_s` (`ac_eval::Scope`), and a detection log recorded
+on the segment replays on it. The cut is exact in MP4 and Matroska
+files, and in a container without a seek index, such as an MPEG-TS
+recording, when it has a keyframe at least every 15 s. A `start_s` below
+0 or a `duration_s` not above 0 is a config error, as a bad `max_width`
+is: no retry of the file would mend it, so the load and `--check` refuse
+it rather than leave the source offline.
+
 ## Staying awake while live
 
 On macOS the app keeps the Mac from sleeping while program goes out: it
@@ -189,14 +258,14 @@ window's monitors show program, and for the whole of a headless run, from
 before the detector loads until the recording is final. `caffeinate` is a
 supervised child like ffmpeg: it is killed and reaped when the session or
 run ends, and `-w` ends it if the app dies. Other platforms have no
-`caffeinate`; the app says so on stderr and runs on, as it does when
-`caffeinate` cannot start or ends early (the window when an output session
-turns out not to be held, a headless run at its start or its end). The
-engine's output view (`keep_awake`) says whether a live session is held,
-by the engine's own `caffeinate` or by the headless run's, and if not,
-why. This does not stop App Nap from throttling a minimized window: that
-takes `LSAppNapIsDisabled` in an app bundle's `Info.plist`, and the
-repository builds no bundle yet.
+`caffeinate`; the app says so on stderr and in its log and runs on, as it
+does when `caffeinate` cannot start or ends early (the window when an
+output session turns out not to be held, a headless run at its start or
+its end). The engine's output view (`keep_awake`) says whether a live
+session is held, by the engine's own `caffeinate` or by the headless
+run's, and if not, why. This does not stop App Nap from throttling a
+minimized window: that takes `LSAppNapIsDisabled` in an app bundle's
+`Info.plist`, and the repository builds no bundle yet.
 
 ## Readiness check
 
@@ -237,6 +306,36 @@ Checking config/sam3-sidecar.example.toml
 The exit status is 0 when nothing was found that would stop the studio
 (warnings allowed) and 2 otherwise. Whether a model file holds the right
 weights (a hash check) is not part of it yet.
+
+## Logs and crash reports
+
+Every run, in the window or headless (not `--check`, which starts
+nothing), appends to a log in a per-user folder:
+`~/Library/Logs/auto-camera` on macOS, `$XDG_STATE_HOME/auto-camera`
+(else `~/.local/state/auto-camera`) on Linux; `--log-dir PATH` picks
+another. The current file is `auto-camera.log`; at 8 MiB it moves to
+`auto-camera.1.log` and the four newest old files are kept. A second app
+running at the same time (the window beside a headless rehearsal) writes
+`auto-camera-2.log` instead, and so on up to four. One line per event, in
+UTC: the app's version and commit, the config's SHA-256 (for a show,
+also that of the studio file it lies over) and the model files (path,
+size and time at once, their SHA-256 from a background thread, so a
+start never waits for gigabytes of weights), which lines start every
+file again after a rotation, then what the studio did
+(sources starting, going offline and stopping, with the reason, detectors
+ready or failing, program changes, the output's lifecycle and the
+stream's connection), every line ffmpeg and the detector sidecar print on
+stderr (stream key redacted; a source decoder's repeats of one complaint
+are written at most once a minute, with a count), the sidecar's starts,
+losses and restarts, and the warnings and errors the app prints on stderr
+(the config's warnings, a system not kept awake while live, a termination
+signal, an engine that failed or did not shut down cleanly, a show saved
+or not as the window closed). A panic writes `crash-<time>-<pid>-<n>.txt`
+next to the log, with the panic, its backtrace and a summary of the
+studio's newest state, and prints its path; each start keeps the 20 newest
+reports. Nothing is sent anywhere. A headless summary also reports the
+detector sidecar, when the studio has one (`sidecar`: `state`, `pid`,
+`model`, `spawns`, `restarts`, `failures` and the other host counters).
 
 ## Studio configuration
 
@@ -317,9 +416,9 @@ added in the window joins the end of the list (or gets 3 when priorities
 are given), and a priority outside 1 to 5 is a configuration error.
 
 Further sections tune the `tracker`, `subjects` (limits and lost/retire
-times), `framing`, `switcher` (default transition), `monitors` (monitor
-and multiview tile sizes and rates) and `lexicon` (below); see
-`crates/ac-engine/src/config.rs`. Every value is checked when the file
+times), `framing`, `switcher` (default transition, `start_on_wide`),
+`monitors` (monitor and multiview tile sizes and rates) and `lexicon` (below);
+see `crates/ac-engine/src/config.rs`. Every value is checked when the file
 loads; the `output` table with the encoder's own ranges (even sizes up to
 7680x4320, 1–120 fps, `video_bitrate_kbps` 100–100000,
 `audio_bitrate_kbps` 32–512, `keyframe_seconds` 1–10, an `rtmp://` or
@@ -543,14 +642,30 @@ This is Phase 2 of the model-picker design: one detector for the studio.
 Every prompt gets SAM's false hits too, so it is for trying prompts rather
 than for a show; choosing a model per query comes later.
 
+## Program loudness
+
+While the output runs with program audio (`output.audio_source`), the
+paced audio the encoder gets is also metered after ITU-R BS.1770-4 and
+EBU R 128 (`crates/ac-audio`): momentary (400 ms) and short-term (3 s)
+loudness, integrated loudness over the session (gated at −70 LUFS and
+10 LU below the programme, so silence and pauses do not count), and the
+session's sample and 4× oversampled true peak. The output panel shows
+momentary and short-term as bars, integrated loudness and the true peak as
+numbers (amber above −1 dBTP), and "—" where there is no reading yet or
+the program is silent. A headless run reports the session's values in
+`output.loudness` (`integrated_lufs`, `momentary_lufs`, `short_term_lufs`,
+`sample_peak_dbfs`, `true_peak_dbtp`, `null` without a reading, and the
+`seconds` of audio measured).
+
 ## Crates
 
 | Crate | Role |
 |---|---|
 | `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
 | `ac-media` | Frames, audio blocks and the source trait, with latest-frame mailboxes |
-| `ac-sources` | File (ffmpeg) and synthetic sources; injectable clocks |
-| `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector |
+| `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak |
+| `ac-sources` | File (ffmpeg) and synthetic sources, file segments, a frame-by-frame clip reader for offline tools; injectable clocks |
+| `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector, replay of recorded detections |
 | `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
 | `ac-framing` | Ideal crops (fill rule for objects, body cut lines for whole people, zoom-limit flags) and per-shot smoothing |
@@ -558,9 +673,10 @@ than for a show; choosing a model per query comes later.
 | `ac-switcher` | Preview/program, cut/auto/T-bar transitions, the take queued during one |
 | `ac-compositor` | CPU program compositor |
 | `ac-output` | One ffmpeg encode to RTMP and fragmented MP4; `caffeinate` while live |
-| `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), framing-quality metrics, and the per-tick trace schema (`TraceRecord`) the engine emits and they score |
+| `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), the per-tick trace schema (`TraceRecord`) the engine emits, and the framing, motion, tracking and switching scorers that measure a trace against the labels, judged by a TOML thresholds file into a JSON report |
 | `ac-engine` | The runtime that wires them together (ADR 0002), the studio config and its readiness check |
 | `apps/auto-camera` | Operator window, headless runner and `--check` |
+| `apps/eval-runner` | The engine stepped over a clip on simulated time, with live or replayed detections, writing the trace |
 
 ## Develop
 

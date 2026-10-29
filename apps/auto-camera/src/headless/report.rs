@@ -20,10 +20,11 @@ use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::EngineSnapshot;
 use ac_output::{StreamHealth, StreamState};
 
+use super::sidecar::sidecar_summary;
 use super::{
-    CropRange, DirectorSummary, HeadlessOptions, MatchSummary, OutputSummary, ProgramSummary,
-    QuerySummary, Sampler, ShotSummary, SourceSummary, StreamSummary, SubjectSummary, Summary,
-    TimingSummary, TraceSummary,
+    CropRange, DetectionsSummary, DirectorSummary, HeadlessOptions, LoudnessSummary, MatchSummary,
+    OutputSummary, ProgramSummary, QuerySummary, Sampler, ShotSummary, SourceSummary,
+    StreamSummary, SubjectSummary, Summary, TimingSummary, TraceSummary,
 };
 
 /// Counters from the engine report and the trace writer.
@@ -34,6 +35,8 @@ pub(super) struct Totals {
     pub(super) threads_joined: usize,
     /// The trace, with `--trace`.
     pub(super) trace: Option<TraceSummary>,
+    /// The detection log, with `--record-detections`.
+    pub(super) detections: Option<DetectionsSummary>,
 }
 
 /// The summary of a run whose engine never started, which leaves no trace
@@ -53,6 +56,7 @@ pub(super) fn failed_to_start(
             ticks: 0,
             threads_joined: 0,
             trace: None,
+            detections: None,
         },
         None,
         None,
@@ -210,6 +214,7 @@ pub(super) fn summarize(
             frames_pushed: o.frames_pushed,
             frames_written: o.stats.as_ref().map_or(0, |st| st.frames_written),
             frames_dropped: o.stats.as_ref().map_or(0, |st| st.frames_dropped),
+            loudness: o.loudness.as_ref().map(loudness_summary),
             encoder: o
                 .stats
                 .as_ref()
@@ -252,7 +257,9 @@ pub(super) fn summarize(
         },
         output,
         trace: totals.trace,
+        detections: totals.detections,
         render_issues: end.map(|s| s.render_issues.clone()).unwrap_or_default(),
+        sidecar: sidecar_summary(last, end),
     }
 }
 
@@ -283,4 +290,18 @@ fn stream_summary(live: Option<StreamHealth>, end: Option<StreamHealth>) -> Opti
 pub(super) fn round(v: f64, digits: i32) -> f64 {
     let scale = 10f64.powi(digits);
     (v * scale).round() / scale
+}
+
+/// The summary of the program meter's `reading`, rounded to Tech 3341's
+/// 0.1 LU resolution.
+fn loudness_summary(reading: &ac_audio::LoudnessReading) -> LoudnessSummary {
+    let tenth = |v: Option<f64>| v.map(|v| round(v, 1));
+    LoudnessSummary {
+        integrated_lufs: tenth(reading.integrated),
+        momentary_lufs: tenth(reading.momentary),
+        short_term_lufs: tenth(reading.short_term),
+        sample_peak_dbfs: tenth(reading.sample_peak),
+        true_peak_dbtp: tenth(reading.true_peak),
+        seconds: round(reading.measured.as_secs_f64(), 2),
+    }
 }

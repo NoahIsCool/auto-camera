@@ -8,6 +8,10 @@
 //! detectors that run outside the process (a sidecar): a pass that missed
 //! its deadline, and a detector that cannot run now (its process is down or
 //! waiting to restart). Both are transient: a later call may succeed.
+//!
+//! [`VisionError::NotRecorded`] is a replayed detector's miss
+//! ([`crate::replay`]): the detection log has no pass for the frame, and
+//! the engine skips that update.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -65,4 +69,13 @@ pub enum VisionError {
     /// when it will try again.
     #[error("detector unavailable: {0}")]
     Unavailable(String),
+    /// A replayed detector has no recorded pass of the frame's source
+    /// within its tolerance of the frame's PTS ([`crate::replay`]).
+    #[error("no recorded pass of source {} at {pts:?}", .id.0)]
+    NotRecorded {
+        /// Source of the frame.
+        id: SourceId,
+        /// PTS of the frame.
+        pts: Duration,
+    },
 }

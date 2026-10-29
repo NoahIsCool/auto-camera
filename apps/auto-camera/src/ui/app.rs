@@ -20,8 +20,8 @@
 //! this thread and raises its notice once written ([`super::save`]).
 //!
 //! An output session the engine cannot hold awake (no `caffeinate` on this
-//! platform, or one that cannot start or ends early) is noted on stderr
-//! once, from the output view ([`crate::awake::SessionNotes`]).
+//! platform, or one that cannot start or ends early) is noted on stderr and
+//! in the log once, from the output view ([`crate::awake::SessionNotes`]).
 //!
 //! Closing the window shuts the engine down, which finishes a running
 //! recording before the process exits; while the output is live the
@@ -58,7 +58,8 @@ pub struct OperatorApp {
     quit: QuitSignal,
     /// Notes on output sessions that are not held awake.
     awake: SessionNotes,
-    /// Where notes go: stderr ([`awake::log`]); tests collect them.
+    /// Where notes go: stderr and the log ([`awake::log`]); tests collect
+    /// them.
     log: Box<dyn FnMut(&str)>,
     /// Writes the shows Save show exports.
     saver: ShowSaver,
@@ -141,6 +142,7 @@ impl OperatorApp {
             && let Err(e) = engine.shutdown()
         {
             eprintln!("auto-camera: engine shutdown: {e}");
+            tracing::error!("engine shutdown: {e}");
         }
     }
 

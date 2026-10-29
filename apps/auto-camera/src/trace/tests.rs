@@ -67,18 +67,18 @@ fn records_are_written_one_line_each_in_order() {
 fn an_existing_file_is_never_overwritten() {
     let path = temp_path("taken.jsonl");
     std::fs::write(&path, "keep me\n").unwrap();
-    let err = TraceFile::create(&path).unwrap_err();
+    let err = TraceFile::<TraceRecord>::create(&path).unwrap_err();
     assert!(err.starts_with("cannot create the trace"), "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me\n");
     std::fs::remove_file(&path).unwrap();
     let nowhere = temp_path("no-such-dir").join("trace.jsonl");
-    assert!(TraceFile::create(&nowhere).is_err());
+    assert!(TraceFile::<TraceRecord>::create(&nowhere).is_err());
 }
 
 #[test]
 fn discarding_removes_an_empty_trace_and_keeps_one_with_lines() {
     let path = temp_path("empty.jsonl");
-    let (file, tx) = TraceFile::create(&path).unwrap();
+    let (file, tx) = TraceFile::<TraceRecord>::create(&path).unwrap();
     drop(tx);
     assert_eq!(
         file.discard_if_empty(),
@@ -97,7 +97,7 @@ fn discarding_removes_an_empty_trace_and_keeps_one_with_lines() {
     std::fs::remove_file(&path).unwrap();
     assert_eq!(ac_eval::parse_trace(&text), Ok(vec![record(1)]));
     // A file that is gone by then cannot be removed, and says so.
-    let (file, tx) = TraceFile::create(&path).unwrap();
+    let (file, tx) = TraceFile::<TraceRecord>::create(&path).unwrap();
     drop(tx);
     std::fs::remove_file(&path).unwrap();
     let report = file.discard_if_empty();

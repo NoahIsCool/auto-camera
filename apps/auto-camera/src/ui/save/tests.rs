@@ -1,9 +1,13 @@
 //! Tests of Save show: the console's button sends the export, the saver
-//! writes the shows in the order they were pressed and says where, and a
-//! live window saves a query added to its engine. Files go to fresh temp
-//! folders.
+//! writes the shows in the order they were pressed and says where (in the
+//! log, once the window has closed), and a live window saves a query added
+//! to its engine. Files go to fresh temp folders.
 
+use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ac_director::DirectorMode;
@@ -156,6 +160,103 @@ fn closing_the_window_finishes_the_saves_it_started() {
     let reopened = StudioConfig::load(&target.path).unwrap();
     assert_eq!(reopened.director.mode, DirectorMode::Auto);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// One captured event: its level, target and message.
+type Captured = (tracing::Level, String, String);
+
+/// A subscriber that keeps every event, for the assertions below.
+#[derive(Default)]
+struct Capture {
+    /// The events, in order.
+    events: Arc<Mutex<Vec<Captured>>>,
+    /// Next span id (spans are not used, but must get ids).
+    spans: AtomicU64,
+}
+
+/// Collects an event's message.
+struct Message<'a>(&'a mut String);
+
+impl tracing::field::Visit for Message<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            let _ = write!(self.0, "{value:?}");
+        }
+    }
+}
+
+impl tracing::Subscriber for Capture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(self.spans.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut text = String::new();
+        event.record(&mut Message(&mut text));
+        let meta = event.metadata();
+        let entry = (*meta.level(), meta.target().to_owned(), text);
+        self.events.lock().unwrap().push(entry);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// The events `f` emits on this thread from this module.
+///
+/// `tracing` caches whether anyone listens to a call site for the whole
+/// process, and another test's thread hitting a site for the first time
+/// without a subscriber can cache "nobody" while this one listens. So `f`
+/// runs twice: the first run registers every site it reaches, the cache is
+/// then rebuilt with this subscriber in it, and only the second run counts.
+fn captured(f: impl Fn()) -> Vec<Captured> {
+    let capture = Capture::default();
+    let events = capture.events.clone();
+    tracing::subscriber::with_default(capture, || {
+        f();
+        tracing::callsite::rebuild_interest_cache();
+        events.lock().unwrap().clear();
+        f();
+    });
+    let mine = events.lock().unwrap();
+    mine.iter()
+        .filter(|(_, target, _)| target == module_path!().trim_end_matches("::tests"))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn closing_the_window_logs_what_became_of_its_saves() {
+    let saved_to = RefCell::new(PathBuf::new());
+    let events = captured(|| {
+        let (dir, target) = folder("close-log");
+        *saved_to.borrow_mut() = target.path.clone();
+        let mut saver = ShowSaver::new(Ok(target.clone()));
+        saver.save(show(&target.studio, DirectorMode::Off));
+        drop(saver);
+        // A file that is not a show is not overwritten.
+        std::fs::write(&target.path, "not a show\n").unwrap();
+        let mut saver = ShowSaver::new(Ok(target.clone()));
+        saver.save(show(&target.studio, DirectorMode::Off));
+        drop(saver);
+        std::fs::remove_dir_all(&dir).unwrap();
+    });
+    let [(saved, _, text), (failed, _, why)] = events.as_slice() else {
+        panic!("{events:?}");
+    };
+    let path = saved_to.borrow().display().to_string();
+    assert_eq!(
+        (*saved, text.as_str()),
+        (
+            tracing::Level::INFO,
+            format!("show saved to {path}").as_str()
+        )
+    );
+    assert_eq!(*failed, tracing::Level::WARN);
+    assert!(why.starts_with("cannot save the show: "), "{why}");
 }
 
 #[test]

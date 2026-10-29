@@ -106,6 +106,7 @@ use ac_core::{Lexicon, Preset, Query, ShotSize};
 use ac_director::DirectorConfig;
 use ac_framing::FramerConfig;
 use ac_media::MediaError;
+use ac_sources::segment::Segment;
 use ac_sources::{FrameRate, SourceConfig, SyntheticPattern};
 use ac_subjects::StoreConfig;
 use ac_vision::TemplateTrackerConfig;
@@ -526,19 +527,28 @@ fn invalid_message(e: ConfigError) -> String {
 /// What the opener of `input` would refuse before looking at any file: a
 /// synthetic pattern's size, rate and subject count, against the limits
 /// [`SyntheticPattern::new`] applies, and a file's `max_width`, by
-/// [`ac_sources::output_size`] itself. So a load and `--check` catch them,
-/// not only a start. Whether the file is there is the readiness check's
-/// question.
+/// [`ac_sources::output_size`] itself, and its segment, by
+/// [`Segment::from_seconds`]. So a load and `--check` catch them, not only
+/// a start. Whether the file is there is the readiness check's question.
 fn input_problems(input: &SourceConfig) -> Vec<String> {
     let mut out = Vec::new();
+    let why = |e: MediaError| match e {
+        MediaError::Open(why) => why,
+        other => other.to_string(),
+    };
     match input {
-        SourceConfig::File { max_width, .. } => {
+        SourceConfig::File {
+            max_width,
+            start_s,
+            duration_s,
+            ..
+        } => {
             // Any picture will do: only `max_width` is in question.
             if let Err(e) = ac_sources::output_size((2, 2), *max_width) {
-                out.push(match e {
-                    MediaError::Open(why) => why,
-                    other => other.to_string(),
-                });
+                out.push(why(e));
+            }
+            if let Err(e) = Segment::from_seconds(*start_s, *duration_s) {
+                out.push(why(e));
             }
         }
         SourceConfig::Synthetic {

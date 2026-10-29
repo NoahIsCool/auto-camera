@@ -8,7 +8,9 @@
 //! the status bar's notice: where the show was saved, or why it was not.
 //! Saves never overlap. A press while one runs keeps the newest show and
 //! saves it once the running save ends, so the file ends up with the show
-//! of the last press, and closing the window finishes both first. A window
+//! of the last press, and closing the window finishes both first, noting
+//! what became of them on stderr and in the log (a failure as a warning),
+//! since no window is left to show them. A window
 //! without a target (no home folder for the data dir) says why when Save
 //! show is pressed, and saves nothing.
 
@@ -99,7 +101,8 @@ impl ShowSaver {
 
 impl Drop for ShowSaver {
     /// Finishes the running save and the queued one before the window
-    /// goes, noting their results on stderr, since no window shows them.
+    /// goes, noting their results on stderr and in the log, since no
+    /// window shows them.
     fn drop(&mut self) {
         let mut results = Vec::new();
         if let Some(job) = self.running.take() {
@@ -109,7 +112,13 @@ impl Drop for ShowSaver {
             results.push(SaveJob::start(show, target.clone()).and_then(SaveJob::wait));
         }
         for result in results {
-            crate::awake::log(&notice(result).0);
+            let (text, error) = notice(result);
+            eprintln!("auto-camera: {text}");
+            if error {
+                tracing::warn!("{text}");
+            } else {
+                tracing::info!("{text}");
+            }
         }
     }
 }

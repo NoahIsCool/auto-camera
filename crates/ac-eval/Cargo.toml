@@ -1,6 +1,6 @@
 [package]
 name = "ac-eval"
-description = "Evaluation-set labels (schema, validator, MOT import), framing-quality metrics and the per-tick trace schema"
+description = "Evaluation-set labels (schema, validator, MOT import), the per-tick trace schema, and the framing, tracking and switching scorers with their thresholds and report"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,9 @@ serde.workspace = true
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_path_to_error = "0.1"
 thiserror.workspace = true
+# The scorers' thresholds file is TOML, so each limit can carry its spec
+# source in a comment; the engine already reads its config with this crate.
+toml = "1.1"
 
 [lints]
 workspace = true

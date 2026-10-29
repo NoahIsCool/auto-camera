@@ -10,10 +10,11 @@
 //! without a window: [`layout`] (tile grid and monitor geometry), [`keys`]
 //! (shortcut mapping), [`text`] (labels), [`textures`] (upload decisions),
 //! [`close_guard`] (asking before a live output is closed or stopped),
-//! [`notices`] (what the status bar's notice says, and for how long) and
-//! the forms ([`query_form`], which reads prompts the way the engine will,
-//! and the output form in [`panels`]), and Save show's saver ([`save`],
-//! which writes off the window's thread). [`console`] draws a whole frame from
+//! [`notices`] (what the status bar's notice says, and for how long),
+//! [`alarms`] (its persistent list of what is wrong on air), the forms
+//! ([`query_form`], which reads prompts the way the engine will, and the
+//! output form in [`panels`]) and Save show's saver ([`save`], which
+//! writes off the window's thread). [`console`] draws a whole frame from
 //! a snapshot and returns commands, apart from the engine that
 //! [`app`] owns, so the window itself is tested headless: egui's test
 //! harness (`egui_kittest`, without a renderer) presses keys and clicks
@@ -22,6 +23,7 @@
 //! eframe runs with the OpenGL (glow) renderer and, on Linux, X11 (Wayland
 //! sessions use XWayland); both load their system libraries at run time.
 
+mod alarms;
 mod app;
 mod close_guard;
 mod console;
@@ -29,6 +31,7 @@ mod console;
 mod fixtures;
 mod keys;
 mod layout;
+mod meter;
 mod multiview;
 mod notices;
 mod panels;
@@ -58,6 +61,7 @@ pub fn run(
     quit: QuitSignal,
 ) -> Result<(), String> {
     let engine = Engine::start_with(config.clone(), options).map_err(|e| e.to_string())?;
+    let _watch = crate::logs::watch(engine.handle());
     let warnings = warnings.to_vec();
     let title = match config.sources.as_slice() {
         [one] => format!("Auto Camera · {}", one.display_name()),

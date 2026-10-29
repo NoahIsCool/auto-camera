@@ -27,14 +27,19 @@
 //! line. Since the path must not exist, an empty file left behind would
 //! make the same command fail again with "File exists" once the real cause
 //! is fixed, and hide that cause.
+//!
+//! The detection log (`--record-detections`, [`crate::detections`]) is
+//! written the same way, by a `TraceFile` of its own record type: a file of
+//! any [`Line`] is, and its messages name it.
 
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 
-use ac_engine::{EngineOptions, TraceRecord, TraceSender};
+use ac_engine::{EngineOptions, TraceRecord};
 
 /// Records the channel holds for a writer that is behind: about 34 s of
 /// ticks at 30 fps, a few megabytes.
@@ -49,31 +54,61 @@ pub struct TraceReport {
     pub error: Option<String>,
 }
 
+/// A record that a [`TraceFile`] writes, one per line.
+pub trait Line: Send + 'static {
+    /// What a file of them is called in messages, such as `"trace"`.
+    const NOUN: &'static str;
+    /// The name of the writer thread.
+    const THREAD: &'static str;
+    /// The record as one line of JSON Lines, with its final `\n`.
+    fn to_json_line(&self) -> String;
+}
+
+impl Line for TraceRecord {
+    const NOUN: &'static str = "trace";
+    const THREAD: &'static str = "ac-trace";
+
+    fn to_json_line(&self) -> String {
+        TraceRecord::to_json_line(self)
+    }
+}
+
 /// A trace file being written; see the module docs.
 #[derive(Debug)]
-pub struct TraceFile {
+pub struct TraceFile<T = TraceRecord> {
     /// Where.
     path: PathBuf,
     /// The writer thread.
     thread: JoinHandle<TraceReport>,
+    /// The records it writes.
+    records: PhantomData<fn(T)>,
 }
 
-impl TraceFile {
+impl<T: Line> TraceFile<T> {
     /// Creates the file at `path`, which must not exist, and starts its
     /// writer; the engine sends to the returned channel.
-    pub fn create(path: &Path) -> Result<(Self, TraceSender), String> {
+    pub fn create(path: &Path) -> Result<(Self, SyncSender<T>), String> {
+        let noun = T::NOUN;
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
-            .map_err(|e| format!("cannot create the trace {}: {e}", path.display()))?;
+            .map_err(|e| format!("cannot create the {noun} {}: {e}", path.display()))?;
         let (tx, rx) = sync_channel(QUEUE);
         let thread = std::thread::Builder::new()
-            .name("ac-trace".into())
+            .name(T::THREAD.into())
             .spawn(move || write_lines(&rx, BufWriter::new(file)))
-            .map_err(|e| format!("cannot start the trace writer: {e}"))?;
+            .map_err(|e| format!("cannot start the {noun} writer: {e}"))?;
         let path = path.to_owned();
-        Ok((Self { path, thread }, tx))
+        let records = PhantomData;
+        Ok((
+            Self {
+                path,
+                thread,
+                records,
+            },
+            tx,
+        ))
     }
 
     /// The file's path.
@@ -87,7 +122,7 @@ impl TraceFile {
     pub fn finish(self) -> TraceReport {
         self.thread.join().unwrap_or_else(|_| TraceReport {
             lines: 0,
-            error: Some("the trace writer panicked".into()),
+            error: Some(format!("the {} writer panicked", T::NOUN)),
         })
     }
 
@@ -104,7 +139,8 @@ impl TraceFile {
             && let Err(e) = std::fs::remove_file(&path)
         {
             report.error = report.error.or(Some(format!(
-                "cannot remove the empty trace {}: {e}",
+                "cannot remove the empty {} {}: {e}",
+                T::NOUN,
                 path.display()
             )));
         }
@@ -114,13 +150,13 @@ impl TraceFile {
 
 /// Writes every record from `rx` to `out`, one line each, until the channel
 /// closes or a write fails, and flushes.
-fn write_lines(rx: &Receiver<TraceRecord>, mut out: impl Write) -> TraceReport {
+fn write_lines<T: Line>(rx: &Receiver<T>, mut out: impl Write) -> TraceReport {
     let mut lines = 0;
     for record in rx {
         if let Err(e) = out.write_all(record.to_json_line().as_bytes()) {
             return TraceReport {
                 lines,
-                error: Some(format!("cannot write the trace: {e}")),
+                error: Some(format!("cannot write the {}: {e}", T::NOUN)),
             };
         }
         lines += 1;
@@ -130,7 +166,7 @@ fn write_lines(rx: &Receiver<TraceRecord>, mut out: impl Write) -> TraceReport {
         error: out
             .flush()
             .err()
-            .map(|e| format!("cannot write the trace: {e}")),
+            .map(|e| format!("cannot write the {}: {e}", T::NOUN)),
     }
 }
 

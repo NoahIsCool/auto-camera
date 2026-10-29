@@ -10,6 +10,13 @@
 //! pushes each line into a ring that keeps the newest `capacity` lines and
 //! drops the oldest.
 //!
+//! The ring only holds the recent past, so the drain also hands every line
+//! to the app's log, as a `tracing` event of target [`TARGET`] with the
+//! child's pid. The sidecar logs with Python's `logging` as
+//! `date time LEVEL name: message` ([`severity`] reads the level); any
+//! other line (a traceback, a stand-in's own lines) is info. This crate
+//! installs no subscriber: the app decides where the lines go.
+//!
 //! # Invariants
 //!
 //! * Memory is bounded: at most `capacity` lines of at most [`MAX_LINE`]
@@ -18,7 +25,9 @@
 //!   push one line or to copy the lines out, never across I/O. This ring
 //!   is the crate's one piece of state shared between threads (the drain
 //!   writes, readers take snapshots).
-//! * Empty lines are not kept; carriage returns are trimmed.
+//! * Empty lines are not kept or logged; carriage returns are trimmed.
+//! * Logging never blocks the drain on the host (the app's subscriber
+//!   drops lines rather than wait).
 
 use std::collections::VecDeque;
 use std::io::{BufRead, ErrorKind};
@@ -29,6 +38,9 @@ pub const MAX_LINE: usize = 2000;
 
 /// Marker appended to a line that was cut at [`MAX_LINE`].
 const CUT: &str = " [...]";
+
+/// The target of the sidecar's stderr lines in the app's log.
+pub(crate) const TARGET: &str = "ac_sidecar::stderr";
 
 /// Locks `m`, recovering the data if a holder panicked: every critical
 /// section here leaves the data consistent.
@@ -71,11 +83,39 @@ impl LogRing {
         lock(&self.lines).iter().cloned().collect()
     }
 
-    /// Drains `input` line by line into the ring until it ends or fails.
-    pub(crate) fn drain(&self, mut input: impl BufRead) {
+    /// Drains `input`, the stderr of child `pid`, line by line into the
+    /// ring and the log until it ends or fails.
+    pub(crate) fn drain(&self, mut input: impl BufRead, pid: u32) {
         while let Some(line) = read_line(&mut input, MAX_LINE) {
+            forward(pid, &line);
             self.push(line);
         }
+    }
+}
+
+/// The severity of a sidecar's stderr line: the level of a Python
+/// `logging` line (`2026-10-28 12:00:00,123 WARNING sam3_sidecar: ...`,
+/// the third word), info for any other line.
+pub(crate) fn severity(line: &str) -> tracing::Level {
+    match line.split_whitespace().nth(2) {
+        Some("CRITICAL" | "ERROR") => tracing::Level::ERROR,
+        Some("WARNING") => tracing::Level::WARN,
+        Some("DEBUG") => tracing::Level::DEBUG,
+        _ => tracing::Level::INFO,
+    }
+}
+
+/// Sends one stderr line of child `pid` to the log at its [`severity`];
+/// blank lines are skipped, as in the ring.
+fn forward(pid: u32, line: &str) {
+    if line.trim().is_empty() {
+        return;
+    }
+    match severity(line) {
+        tracing::Level::ERROR => tracing::error!(target: TARGET, pid, "{line}"),
+        tracing::Level::WARN => tracing::warn!(target: TARGET, pid, "{line}"),
+        tracing::Level::DEBUG => tracing::debug!(target: TARGET, pid, "{line}"),
+        _ => tracing::info!(target: TARGET, pid, "{line}"),
     }
 }
 
@@ -137,7 +177,7 @@ mod tests {
     #[test]
     fn draining_splits_lines_and_trims_endings() {
         let ring = LogRing::new(10);
-        ring.drain(&b"loading\r\nready\n\nlast without newline"[..]);
+        ring.drain(&b"loading\r\nready\n\nlast without newline"[..], 1);
         assert_eq!(ring.lines(), ["loading", "ready", "last without newline"]);
     }
 
@@ -147,6 +187,25 @@ mod tests {
         assert_eq!(read_line(&mut input, 3).as_deref(), Some("abc [...]"));
         assert_eq!(read_line(&mut input, 3).as_deref(), Some("ij"));
         assert_eq!(read_line(&mut input, 3), None);
+    }
+
+    #[test]
+    fn python_levels_set_the_severity() {
+        use tracing::Level;
+        let at = |level: &str| format!("2026-10-28 12:00:00,123 {level} sam3_sidecar: x");
+        assert_eq!(severity(&at("CRITICAL")), Level::ERROR);
+        assert_eq!(severity(&at("ERROR")), Level::ERROR);
+        assert_eq!(severity(&at("WARNING")), Level::WARN);
+        assert_eq!(severity(&at("INFO")), Level::INFO);
+        assert_eq!(severity(&at("DEBUG")), Level::DEBUG);
+        for other in [
+            "Traceback (most recent call last):",
+            "fake: request 640x360",
+            "ERROR at the start is not a logging line",
+            "",
+        ] {
+            assert_eq!(severity(other), Level::INFO, "{other:?}");
+        }
     }
 
     #[test]

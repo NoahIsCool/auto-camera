@@ -19,6 +19,9 @@ ac-media.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 rayon = "1.12"
+# The detection log (`replay`). Exact float parsing: a replayed box is bit
+# for bit the recorded one, which default parsing can miss by one ULP.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 # Only what the detector uses: no ndarray or tracing integration. The
 # download (with its TLS stack) is what fetches ONNX Runtime at build time
 # when ORT_LIB_LOCATION does not name a local one.

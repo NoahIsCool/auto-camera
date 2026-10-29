@@ -6,13 +6,19 @@
 //! auto-camera [--config PATH] --check                           # readiness check
 //! ```
 //!
+//! The window and headless runs take `--log-dir PATH`, the folder for the
+//! log and crash reports (the per-user log folder when absent; see the
+//! `logs` module), and `--record-detections PATH`.
+//!
 //! The headless options are only accepted together with `--headless`, so a
 //! typo cannot silently open a window that records nothing, and `--check`
 //! is accepted only on its own, since it starts nothing. `--trace` works in
 //! both other modes: it writes the engine's per-tick trace as JSON Lines
-//! ([`crate::trace`]). `--save-show` is the window's alone: the show file
-//! its Save show writes ([`crate::show`]); a headless run changes nothing
-//! a show holds, so it has nothing to save and refuses the flag.
+//! ([`crate::trace`]). So does `--record-detections`: it writes every
+//! detector pass the engine applied, for the eval runner to replay
+//! ([`crate::detections`]). `--save-show` is the window's alone: the show
+//! file its Save show writes ([`crate::show`]); a headless run changes
+//! nothing a show holds, so it has nothing to save and refuses the flag.
 //! `--config` opens a studio file or a saved show. The config path
 //! defaults to the demo studio relative to the working directory, which is
 //! the repository root under `cargo run`.
@@ -59,6 +65,10 @@ pub struct Cli {
     /// crops, program and preview) to this file; it must not exist.
     #[arg(long, value_name = "PATH")]
     pub trace: Option<PathBuf>,
+    /// Write every detector pass the engine applies (source, frame, boxes,
+    /// scores) to this file as JSON lines, for replay; it must not exist.
+    #[arg(long, value_name = "PATH")]
+    pub record_detections: Option<PathBuf>,
     /// Save the show (queries, director, transition) to this file when
     /// Save show is pressed in the window. Without it the window saves to
     /// the show file it opened, or to the data dir's `shows` folder.
@@ -67,8 +77,24 @@ pub struct Cli {
     /// Check the studio without starting it: list the problems with the
     /// config and the files, tools and folders it names, then exit 0 when
     /// there is none and 2 otherwise.
-    #[arg(long, conflicts_with_all = ["headless", "seconds", "record", "trace", "save_show"])]
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "headless",
+            "seconds",
+            "record",
+            "trace",
+            "record_detections",
+            "log_dir",
+            "save_show",
+        ]
+    )]
     pub check: bool,
+    /// Folder for the log and crash reports [default:
+    /// ~/Library/Logs/auto-camera on macOS, $XDG_STATE_HOME/auto-camera or
+    /// ~/.local/state/auto-camera on Linux].
+    #[arg(long, value_name = "PATH")]
+    pub log_dir: Option<PathBuf>,
 }
 
 /// Parses a positive, finite number of seconds up to one day.
@@ -101,6 +127,7 @@ mod tests {
         assert!(!cli.check);
         assert_eq!(cli.record, None);
         assert_eq!(cli.trace, None);
+        assert_eq!(cli.log_dir, None);
     }
 
     #[test]
@@ -111,6 +138,23 @@ mod tests {
         let headless = parse(&["--headless", "--trace", "t.jsonl"]).unwrap();
         assert_eq!(headless.trace, Some(PathBuf::from("t.jsonl")));
         assert!(parse(&["--trace"]).is_err(), "a path is required");
+    }
+
+    #[test]
+    fn both_modes_take_a_detection_log() {
+        let window = parse(&["--record-detections", "/tmp/d.jsonl"]).unwrap();
+        assert!(!window.headless);
+        assert_eq!(
+            window.record_detections,
+            Some(PathBuf::from("/tmp/d.jsonl"))
+        );
+        let headless = parse(&["--headless", "--record-detections", "d.jsonl"]).unwrap();
+        assert_eq!(headless.record_detections, Some(PathBuf::from("d.jsonl")));
+        assert_eq!(parse(&[]).unwrap().record_detections, None);
+        assert!(
+            parse(&["--record-detections"]).is_err(),
+            "a path is required"
+        );
     }
 
     #[test]
@@ -125,9 +169,22 @@ mod tests {
     }
 
     #[test]
-    fn check_takes_no_trace() {
-        // A check starts no engine, so there is no trace to write.
+    fn check_takes_no_trace_or_log() {
+        // A check starts no engine, so there is no trace or detection log to
+        // write.
         assert!(parse(&["--check", "--trace", "t.jsonl"]).is_err());
+        assert!(parse(&["--check", "--record-detections", "d.jsonl"]).is_err());
+        // Nor does it keep the app's log.
+        assert!(parse(&["--check", "--log-dir", "logs"]).is_err());
+    }
+
+    #[test]
+    fn both_modes_take_a_log_folder() {
+        let window = parse(&["--log-dir", "/tmp/logs"]).unwrap();
+        assert_eq!(window.log_dir, Some(PathBuf::from("/tmp/logs")));
+        let headless = parse(&["--headless", "--log-dir", "logs"]).unwrap();
+        assert_eq!(headless.log_dir, Some(PathBuf::from("logs")));
+        assert!(parse(&["--log-dir"]).is_err(), "the folder is required");
     }
 
     #[test]
@@ -140,6 +197,19 @@ mod tests {
         assert!(parse(&["--headless", "--save-show", "s.toml"]).is_err());
         // A check starts no engine, so there is no show to save.
         assert!(parse(&["--check", "--save-show", "s.toml"]).is_err());
+        // The window's other files go with it.
+        let all = parse(&[
+            "--save-show",
+            "s.toml",
+            "--log-dir",
+            "logs",
+            "--record-detections",
+            "passes.jsonl",
+        ])
+        .unwrap();
+        assert_eq!(all.save_show, Some(PathBuf::from("s.toml")));
+        assert_eq!(all.log_dir, Some(PathBuf::from("logs")));
+        assert_eq!(all.record_detections, Some(PathBuf::from("passes.jsonl")));
     }
 
     #[test]

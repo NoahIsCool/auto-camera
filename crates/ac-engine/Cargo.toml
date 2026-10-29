@@ -25,6 +25,7 @@ ac-switcher.workspace = true
 ac-compositor.workspace = true
 ac-output.workspace = true
 ac-sidecar.workspace = true
+ac-audio.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 serde_json = "1.0"
@@ -34,9 +35,14 @@ toml = "1.1"
 # Only to name the global pool's threads in the shutdown test.
 rayon = "1.12"
 
-# One test that also serves as its own fake sidecar; see the file's docs.
+# Tests that also serve as their own fake sidecar; see
+# tests/common/one_test.rs.
 [[test]]
 name = "shutdown"
+harness = false
+
+[[test]]
+name = "restart"
 harness = false
 
 [lints]
