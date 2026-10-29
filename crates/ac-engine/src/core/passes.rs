@@ -6,7 +6,10 @@
 //! An answer frees its source's request slot only when it answers the
 //! newest request: a late answer to a request that timed out must not let
 //! a second request go out while the newer one is still being worked on.
-//! It is then applied unless it is stale ([`staleness`]). An applied answer
+//! It is then applied unless it is stale ([`staleness`]), which includes an
+//! answer about a frame of an older epoch once a frame of the source's new
+//! connection has come in: the old answer frees the slot, so a request on
+//! the new picture can follow, but its boxes are dropped. An applied answer
 //! *replaces* the feedback of every live query it looked for on that
 //! source (a later pass that found nothing reads "no matches", it does not
 //! add to the earlier count), and it is counted before the subject store
@@ -65,8 +68,9 @@ impl EngineCore {
                 return;
             }
         };
-        let newest = s.frame.as_ref().map(|f| f.pts);
-        if staleness(r.frame.seq, r.frame.pts, d.last_applied, newest, max_age).is_some() {
+        let newest = s.frame.as_ref().map(|f| (f.epoch, f.pts));
+        let (epoch, seq, pts) = (r.frame.epoch, r.frame.seq, r.frame.pts);
+        if staleness(epoch, seq, pts, d.last_applied, newest, max_age).is_some() {
             d.stats.stale += 1;
             d.stats.last_outcome = Some(PassOutcome::Stale);
             return;

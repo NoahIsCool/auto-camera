@@ -11,5 +11,8 @@ ac-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+proptest = { version = "1.12", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true

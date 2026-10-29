@@ -27,9 +27,13 @@
 //!    and store (media time = the frame's PTS).
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
 //! 5. **Framing.** Every shot's framer steps by `dt` and is rescored.
-//! 6. **Switching.** The switcher advances its transition; the director
-//!    proposes (and in Auto mode takes) a shot, weighing each shot's
-//!    quality and its subject's query priority.
+//! 6. **Switching.** The switcher advances its transition; when one ends,
+//!    a take the operator queued during it fires if the catalog still has
+//!    its shot available, and is dropped with the reason otherwise
+//!    ([`ac_switcher`]). The director then proposes (and in Auto mode
+//!    takes) a shot, weighing each shot's quality and its subject's query
+//!    priority; a shot the operator staged during the transition that
+//!    landed on preview as it ended counts as the operator's staging.
 //! 7. **Rendering.** The compositor renders the program; monitors and
 //!    multiview tiles are rendered at their own, lower rates.
 //! 8. **Discovery requests** are issued for sources that are due (at most
@@ -62,8 +66,30 @@
 //! input like the
 //! frames, so the core stays a deterministic function of its inputs.
 //!
+//! # Sources that drop out
+//!
+//! The runtime's sources are supervised (`ac_sources::supervisor`): one that
+//! loses its input reports [`SourceState::Offline`] or
+//! [`SourceState::Reconnecting`], with the reason in [`SourceFeed::error`],
+//! and comes back under a new *epoch* (see `ac_media`), its sequence numbers
+//! and PTS continuing where they left off. The core only compares epochs:
+//!
+//! * a source that is not delivering is unavailable at once, so its shots
+//!   cannot be taken; its last picture stays where it is shown;
+//! * a discovery answer about a frame of an older epoch than the source's
+//!   newest frame is stale ([`crate::discovery::Staleness::OldEpoch`]): it
+//!   describes the picture of a connection that is gone, however recent it
+//!   is in media time;
+//! * a source that was missing when the engine started is described by a
+//!   placeholder ([`crate::config::SourceEntry::placeholder_info`]); its
+//!   first frame gives the core its real picture size, and the description
+//!   of the connection that delivered it ([`SourceFeed::info`]) its frame
+//!   rate. A source's description is otherwise fixed: a later connection is
+//!   taken to have the first one's.
+//!
 //! Given the same configuration, frames, results and commands, the core
-//! produces the same program, which is what the deterministic tests rely on.
+//! produces the same program, which is what the deterministic tests rely on,
+//! and the same per-tick trace record ([`EngineCore::trace_record`]).
 //! Commands are applied between ticks by [`EngineCore::apply`].
 
 use std::collections::HashMap;
@@ -92,6 +118,7 @@ mod shots;
 mod snapshot;
 #[cfg(test)]
 mod tests;
+mod trace;
 
 /// A source counts as unavailable when no new frame arrived for this long.
 pub const SOURCE_STALE_AFTER: Duration = Duration::from_secs(1);
@@ -106,6 +133,15 @@ pub struct SourceFeed {
     /// The source's detector is still loading (false without a detector);
     /// see the module docs.
     pub detector_loading: bool,
+    /// Why the source is not delivering, when an error is the reason: what
+    /// stopped it, or what keeps it offline while it reconnects.
+    pub error: Option<String>,
+    /// The description of what the source delivers now
+    /// (`VideoSource::current_info`), read after `frame`, so it is that
+    /// frame's connection's or a newer one's; `None` when not known. The
+    /// core takes it with the source's first frame only (see the module
+    /// docs).
+    pub info: Option<SourceInfo>,
 }
 
 /// What a tick produced for the runtime.
@@ -177,7 +213,9 @@ struct SourceSlot {
     id: SourceId,
     /// Operator-facing name.
     name: String,
-    /// Static description from the source.
+    /// The source's description: as given to [`EngineCore::new`], with the
+    /// size and rate of its first frame's connection once one arrived (see
+    /// [`SourceSlot::describe`]).
     info: SourceInfo,
     /// Picture aspect (width / height).
     aspect: f64,
@@ -187,6 +225,8 @@ struct SourceSlot {
     frame: Option<VideoFrame>,
     /// Health reported by the source.
     state: SourceState,
+    /// Why the source is not delivering, as reported with `state`.
+    error: Option<String>,
     /// Master-clock time of the newest new frame.
     last_frame_at: Option<Duration>,
     /// New frames seen.
@@ -201,9 +241,28 @@ struct SourceSlot {
 }
 
 impl SourceSlot {
-    /// True when the source has a fresh frame at `now`.
+    /// Takes the description of a source's first frame, `frame`, and of the
+    /// connection that delivered it, `connection` (see the module docs): a
+    /// source missing at start was given a placeholder, and nothing has been
+    /// tracked or framed on its picture yet. The size comes from the frame,
+    /// the rate from the connection. An empty size, a description of another
+    /// source and a rate that is not positive and finite are ignored.
+    fn describe(&mut self, frame: &VideoFrame, connection: Option<&SourceInfo>) {
+        let size = (frame.width, frame.height);
+        if size != (self.info.width, self.info.height) && size.0 > 0 && size.1 > 0 {
+            self.info.width = frame.width;
+            self.info.height = frame.height;
+            self.aspect = frame.aspect();
+        }
+        let usable = |c: &&SourceInfo| c.id == self.id && c.fps.is_finite() && c.fps > 0.0;
+        if let Some(c) = connection.filter(usable) {
+            self.info.fps = c.fps;
+        }
+    }
+
+    /// True when the source is delivering and has a fresh frame at `now`.
     fn available(&self, now: Duration) -> bool {
-        self.state != SourceState::Stopped
+        matches!(self.state, SourceState::Starting | SourceState::Running)
             && self
                 .last_frame_at
                 .is_some_and(|t| now.saturating_sub(t) <= SOURCE_STALE_AFTER)
@@ -248,6 +307,9 @@ pub struct EngineCore {
     decision: DirectorDecision,
     /// Suggestion last staged on preview in suggest mode.
     last_staged: Option<ShotId>,
+    /// A shot the operator staged during a transition has landed on
+    /// preview since the director last ran (see [`directing`]).
+    operator_staged: bool,
     /// Takes requested by the director.
     director_takes: u64,
     /// Program renderer.
@@ -310,6 +372,7 @@ impl EngineCore {
                 info,
                 frame: None,
                 state: SourceState::Starting,
+                error: None,
                 last_frame_at: None,
                 frames: 0,
                 missed: 0,
@@ -351,6 +414,7 @@ impl EngineCore {
             director,
             decision: DirectorDecision::off(),
             last_staged: None,
+            operator_staged: false,
             director_takes: 0,
             compositor,
             now: Duration::ZERO,
@@ -441,7 +505,10 @@ impl EngineCore {
         }
         self.sync_catalog();
         self.step_framing(dt);
-        self.switcher.tick(dt);
+        let queued = self.switcher.queued().cloned();
+        let catalog = &self.catalog;
+        self.switcher.tick(dt, |id| catalog.is_available(id));
+        self.note_landing(queued);
         self.note_program();
         self.run_director();
         self.note_program();
@@ -452,13 +519,16 @@ impl EngineCore {
         }
     }
 
-    /// Takes a source's newest frame and advances its vision when it is new,
-    /// and whether its detector is still loading: its own loader, or, when
-    /// `studio_loading`, the shared detector's (see the module docs).
+    /// Takes a source's health and newest frame and advances its vision when
+    /// the frame is new, and whether its detector is still loading: its own
+    /// loader, or, when `studio_loading`, the shared detector's (see the
+    /// module docs). The first frame of a source sets its picture size and
+    /// rate ([`SourceSlot::describe`]).
     fn ingest_feed(&mut self, i: usize, feed: &SourceFeed, studio_loading: bool) {
         let now = self.now;
         let s = &mut self.sources[i];
         s.state = feed.state;
+        s.error.clone_from(&feed.error);
         s.discovery
             .note_loading(feed.detector_loading || studio_loading, now);
         let Some(frame) = &feed.frame else {
@@ -466,6 +536,9 @@ impl EngineCore {
         };
         if frame.source != s.id || s.frame.as_ref().is_some_and(|f| frame.seq <= f.seq) {
             return;
+        }
+        if s.frame.is_none() {
+            s.describe(frame, feed.info.as_ref());
         }
         let expected = s.frame.as_ref().map_or(0, |f| f.seq + 1);
         s.missed += frame.seq.saturating_sub(expected);

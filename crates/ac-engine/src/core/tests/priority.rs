@@ -324,6 +324,8 @@ impl Twins {
                         ..self.still.clone()
                     }),
                     detector_loading: false,
+                    error: None,
+                    info: None,
                 })
                 .collect();
             let results = std::mem::take(&mut self.pending);

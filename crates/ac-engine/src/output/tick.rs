@@ -56,6 +56,7 @@ impl OutputController {
                 .or_else(|| self.last_stats.clone()),
             audio: self.pacer.as_ref().map(AudioPacer::stats),
             frames_pushed: self.frames_pushed,
+            keep_awake: self.awake.state(),
         }
     }
 }
