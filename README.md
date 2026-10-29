@@ -223,12 +223,14 @@ A file source can play part of its file as a clip of its own: `start_s`
 seconds in (default 0), for `duration_s` seconds (default: to the end).
 The first frame at or after `start_s` comes first, with PTS 0, and the
 audio starts with it, so a segment of a long recording is scored like a
-short clip, and a detection log recorded on the segment replays on it. The
-cut is exact in MP4 and Matroska files, and in a container without a seek
-index, such as an MPEG-TS recording, when it has a keyframe at least every
-15 s. A `start_s` below 0 or a `duration_s` not above 0 is a config error,
-as a bad `max_width` is: no retry of the file would mend it, so the load
-and `--check` refuse it rather than leave the source offline.
+short clip, against the labels of the whole file once the scoring scope
+gives the same `start_s` (`ac_eval::Scope`), and a detection log recorded
+on the segment replays on it. The cut is exact in MP4 and Matroska
+files, and in a container without a seek index, such as an MPEG-TS
+recording, when it has a keyframe at least every 15 s. A `start_s` below
+0 or a `duration_s` not above 0 is a config error, as a bad `max_width`
+is: no retry of the file would mend it, so the load and `--check` refuse
+it rather than leave the source offline.
 
 ## Staying awake while live
 
@@ -593,7 +595,7 @@ the program is silent. A headless run reports the session's values in
 | `ac-switcher` | Preview/program, cut/auto/T-bar transitions, the take queued during one |
 | `ac-compositor` | CPU program compositor |
 | `ac-output` | One ffmpeg encode to RTMP and fragmented MP4; `caffeinate` while live |
-| `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), framing-quality metrics, and the per-tick trace schema (`TraceRecord`) the engine emits and they score |
+| `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), the per-tick trace schema (`TraceRecord`) the engine emits, and the framing, motion, tracking and switching scorers that measure a trace against the labels, judged by a TOML thresholds file into a JSON report |
 | `ac-engine` | The runtime that wires them together (ADR 0002), the studio config and its readiness check |
 | `apps/auto-camera` | Operator window, headless runner and `--check` |
 | `apps/eval-runner` | The engine stepped over a clip on simulated time, with live or replayed detections, writing the trace |
