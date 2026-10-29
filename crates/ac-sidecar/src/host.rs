@@ -37,6 +37,10 @@
 //!   child's last stderr line. The host is then *unavailable*: requests are
 //!   refused at once until the backoff delay passes (`backoff` module),
 //!   and the first request after it starts a new process.
+//! * **Log.** Starts, hellos, losses (with the reason and the restart
+//!   backoff) and shutdowns go to the stderr ring as `[host]` notes and to
+//!   the app's log as `tracing` events; the child's own stderr lines go
+//!   there too (`logs` module).
 //! * **Shutdown.** [`SamHost::shutdown`] and `Drop` close stdin (the
 //!   child's signal to exit), wait up to [`HostConfig::exit_grace`] (2 s by
 //!   default), then kill the process group and reap. [`StopHandle::stop`]
@@ -302,11 +306,12 @@ impl SamHost {
         let dir = self.config.current_dir.as_deref();
         match Process::spawn(&self.config.command, dir, &self.logs, &self.wake) {
             Ok(process) => {
+                let command = self.config.command.join(" ");
                 self.logs.push(format!(
-                    "{HOST_LINE} started pid {}: {}",
-                    process.pid(),
-                    self.config.command.join(" ")
+                    "{HOST_LINE} started pid {}: {command}",
+                    process.pid()
                 ));
+                tracing::info!(pid = process.pid(), "sidecar started: {command}");
                 self.stats.spawns += 1;
                 self.started = Instant::now();
                 self.hello = None;
@@ -315,6 +320,7 @@ impl SamHost {
             }
             Err(e) => {
                 let reason = format!("cannot start {:?}: {e}", self.config.command[0]);
+                tracing::warn!("sidecar {reason}");
                 self.stats.failures += 1;
                 self.backoff.fail(Instant::now());
                 self.failure = Some(reason.clone());
@@ -323,14 +329,16 @@ impl SamHost {
         }
     }
 
-    /// Logs a hello.
+    /// Logs a hello, in the ring and the app's log.
     fn note_hello(&self, hello: &Hello) {
-        self.logs.push(format!(
-            "{HOST_LINE} hello: model {}, input side {}, weights {}",
+        let note = format!(
+            "model {}, input side {}, weights {}",
             hello.model,
             hello.input_side,
             hello.weights_sha256.as_deref().unwrap_or("unchecked")
-        ));
+        );
+        tracing::info!(pid = self.pid(), "sidecar ready: {note}");
+        self.logs.push(format!("{HOST_LINE} hello: {note}"));
     }
 
     /// Records a healthy answer.
@@ -371,6 +379,14 @@ impl SamHost {
         self.hello = None;
         self.stats.failures += 1;
         self.backoff.fail(Instant::now());
+        tracing::warn!(
+            failures = self.stats.failures,
+            retry_in_ms = self
+                .backoff
+                .wait_left(Instant::now())
+                .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            "sidecar lost: {reason}"
+        );
         self.failure = Some(reason.clone());
         reason
     }
@@ -391,11 +407,9 @@ impl SamHost {
         if let Some(mut process) = self.process.take() {
             let exit = process.finish(self.config.exit_grace);
             self.stats.detached_threads += exit.detached as u64;
-            self.logs.push(format!(
-                "{HOST_LINE} pid {} {} at shutdown",
-                process.pid(),
-                exit.describe()
-            ));
+            let note = format!("pid {} {} at shutdown", process.pid(), exit.describe());
+            tracing::info!("sidecar {note}");
+            self.logs.push(format!("{HOST_LINE} {note}"));
         }
         self.hello = None;
     }

@@ -24,6 +24,10 @@
 //! an error, and an older one is upgraded by the migration steps in
 //! `schema` before it is deserialized.
 //!
+//! A show file ([`crate::show`]), which the app saves, is read as the
+//! studio file it names with the show laid over it, so every loader here
+//! opens either kind of file (`load`).
+//!
 //! Sections mirror the pipeline: `sources` (any [`SourceConfig`] plus an id
 //! and a name), `queries` (prompts with their framing presets), `lexicon`
 //! (additions to the prompt parser's shot, role and person words),
@@ -102,6 +106,7 @@ use ac_core::{Lexicon, Preset, Query, ShotSize};
 use ac_director::DirectorConfig;
 use ac_framing::FramerConfig;
 use ac_media::MediaError;
+use ac_sources::segment::Segment;
 use ac_sources::{FrameRate, SourceConfig, SyntheticPattern};
 use ac_subjects::StoreConfig;
 use ac_vision::TemplateTrackerConfig;
@@ -113,11 +118,12 @@ use crate::queries::PromptReader;
 mod detector;
 mod director;
 mod discovery;
+mod load;
 mod monitors;
 mod output;
 mod partial;
 mod queries;
-mod schema;
+pub(crate) mod schema;
 mod sidecar;
 mod sources;
 mod subjects;
@@ -135,6 +141,7 @@ pub use sources::SourceEntry;
 pub use subjects::SubjectSettings;
 pub use switcher::{SettleSettings, SwitcherSettings};
 
+pub(crate) use load::open_show;
 use partial::{partial, validate_framing};
 
 // The tests (`config/tests.rs`) name `QueryId` through `use super::*`; it
@@ -151,6 +158,15 @@ pub struct LoadedConfig {
     /// Things to fix that did not stop the load (a missing `schema` key),
     /// each a sentence starting with the file's path.
     pub warnings: Vec<String>,
+    /// The studio file read: the file itself, or the one a show names.
+    pub studio: PathBuf,
+    /// The file was a show, laid over `studio`.
+    pub show: bool,
+    /// The studio file's config as read, before a show was laid over it
+    /// (so `config` itself, unvalidated, when the file is a studio file):
+    /// what a show saved from this config leaves out where it only repeats
+    /// it ([`crate::Show::leave_out_repeats`]).
+    pub base: StudioConfig,
 }
 
 /// Errors from loading or validating a [`StudioConfig`].
@@ -276,28 +292,12 @@ impl StudioConfig {
         Ok(loaded)
     }
 
-    /// Reads and parses the file at `path` and resolves its relative paths,
-    /// without validating the values, so that the readiness check can list
-    /// every problem ([`Self::problems`]) rather than the first.
+    /// Reads and parses the file at `path` (a studio file, or a show over
+    /// the one it names) and resolves its relative paths, without
+    /// validating the values, so that the readiness check can list every
+    /// problem ([`Self::problems`]) rather than the first.
     pub fn read_file(path: &Path) -> Result<LoadedConfig, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.into(),
-            source,
-        })?;
-        let json = path.extension().is_some_and(|e| e == "json");
-        let (mut config, warnings) =
-            Self::parse_with_warnings(&text, json).map_err(|message| ConfigError::Parse {
-                path: path.into(),
-                message,
-            })?;
-        if let Some(dir) = path.parent() {
-            config.resolve_paths(dir);
-        }
-        let warnings = warnings
-            .into_iter()
-            .map(|w| format!("{}: {w}", path.display()))
-            .collect();
-        Ok(LoadedConfig { config, warnings })
+        load::read_file(path)
     }
 
     /// Parses `text` as JSON or TOML without validating it; the warnings
@@ -527,19 +527,28 @@ fn invalid_message(e: ConfigError) -> String {
 /// What the opener of `input` would refuse before looking at any file: a
 /// synthetic pattern's size, rate and subject count, against the limits
 /// [`SyntheticPattern::new`] applies, and a file's `max_width`, by
-/// [`ac_sources::output_size`] itself. So a load and `--check` catch them,
-/// not only a start. Whether the file is there is the readiness check's
-/// question.
+/// [`ac_sources::output_size`] itself, and its segment, by
+/// [`Segment::from_seconds`]. So a load and `--check` catch them, not only
+/// a start. Whether the file is there is the readiness check's question.
 fn input_problems(input: &SourceConfig) -> Vec<String> {
     let mut out = Vec::new();
+    let why = |e: MediaError| match e {
+        MediaError::Open(why) => why,
+        other => other.to_string(),
+    };
     match input {
-        SourceConfig::File { max_width, .. } => {
+        SourceConfig::File {
+            max_width,
+            start_s,
+            duration_s,
+            ..
+        } => {
             // Any picture will do: only `max_width` is in question.
             if let Err(e) = ac_sources::output_size((2, 2), *max_width) {
-                out.push(match e {
-                    MediaError::Open(why) => why,
-                    other => other.to_string(),
-                });
+                out.push(why(e));
+            }
+            if let Err(e) = Segment::from_seconds(*start_s, *duration_s) {
+                out.push(why(e));
             }
         }
         SourceConfig::Synthetic {

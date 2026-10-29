@@ -2,8 +2,9 @@
 //!
 //! Each pipe has exactly one owner thread: the video writer owns ffmpeg's
 //! stdin, the audio writer owns the audio socket, and two readers own stdout
-//! (progress and mux statistics) and stderr (errors and the stream monitor);
-//! the readers are in the `readers` child module. The engine talks to the
+//! (progress and mux statistics) and stderr (the log, errors and the stream
+//! monitor); the readers are in the `readers` child module, and the
+//! stderr lines' way into the app's log in `forward`. The engine talks to the
 //! writers only through bounded channels; the threads publish counters and
 //! snapshots into [`Shared`], whose locks are held for a copy and never
 //! across I/O.
@@ -51,6 +52,7 @@ use std::time::{Duration, Instant};
 use crate::progress::Progress;
 use crate::stream::StreamMonitor;
 
+mod forward;
 mod readers;
 
 pub use readers::{progress_reader, stderr_reader};

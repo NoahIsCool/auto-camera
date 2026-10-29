@@ -1,5 +1,6 @@
-//! The per-tick trace record: what it says about a tick, and that equal
-//! inputs give byte-identical traces.
+//! The per-tick trace record: what it says about a tick, that equal
+//! inputs give byte-identical traces, and that a studio starting on its
+//! wide scores no loss on program while its source starts.
 
 use ac_eval::TraceRecord;
 use ac_eval::trace::TransitionTrace;
@@ -266,4 +267,49 @@ fn a_lost_subject_has_no_target_and_its_crop_holds() {
     );
     // The wide still aims at its crop.
     assert_eq!(r.shots[0].target, Some(r.shots[0].crop));
+}
+
+/// A label file for the rig's camera: 320x180 at 30 fps, nobody labelled.
+const UNLABELLED: &str = r#"{
+    "schema_version": 1,
+    "clip": {
+        "id": "rig", "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "camera": "cam", "width": 320, "height": 180,
+        "fps": { "num": 30, "den": 1 }, "frame_count": 120
+    },
+    "box_extent": "visible", "exclusions": [], "tracks": [], "roles": [], "keyframes": []
+}"#;
+
+#[test]
+fn a_studio_starting_on_its_wide_waits_for_the_source_without_a_loss() {
+    // `start_on_wide` puts the wide on program before the source has
+    // delivered; its first frame comes 1.5 s in (tick 45).
+    let mut c = config(1);
+    c.switcher.start_on_wide = true;
+    let mut rig = Rig::new(c);
+    let trace: Vec<TraceRecord> = (0..120)
+        .map(|tick| {
+            rig.starting = tick < 45;
+            rig.step();
+            rig.core.trace_record()
+        })
+        .collect();
+    assert_eq!(trace[0].switcher.program, Some(shot("cam/wide")));
+    assert_eq!(trace[44].sources[0].frame, None);
+    assert!(trace[45].sources[0].frame.is_some());
+    let labels = ac_eval::LabelFile::from_json(UNLABELLED).unwrap();
+    let scope = ac_eval::Scope::new(cam());
+    let report = ac_eval::score(&labels, &trace, &scope, &ac_eval::Thresholds::default()).unwrap();
+    // The black while the source starts is the start-up wait, not a loss
+    // the director should have fallen back from.
+    let fall_back = report.metric("switching.time_to_fall_back", None).unwrap();
+    assert_eq!(
+        (fall_back.value(), fall_back.verdict),
+        (Some(0.0), ac_eval::Verdict::Pass)
+    );
+    let total = report
+        .metric("switching.time_unavailable_on_program", None)
+        .unwrap();
+    assert_eq!(total.value(), Some(0.0));
+    assert!((total.details["start_up_s"] - 1.5).abs() < 1e-6);
 }

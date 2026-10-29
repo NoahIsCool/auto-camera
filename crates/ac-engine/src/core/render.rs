@@ -13,6 +13,17 @@
 //! come from their own buffer pool, and the tile pool is sized to the shot
 //! count before each refresh, so a large multiview held by the window
 //! recycles its buffers instead of allocating on the engine thread.
+//!
+//! Each program frame is also checked for black ([`is_black`]), and when
+//! the run of consecutive black frames ending with the newest began is
+//! published
+//! ([`EngineSnapshot::program_black_since`](crate::EngineSnapshot::program_black_since))
+//! for the program-black alarm ([`crate::alarms`]). The check is on the
+//! pixels, not on what the switcher asked for, so it also sees a source
+//! that sends black (a capture card without signal, a capped lens) and a
+//! full dip. It samples a fixed grid rather than every pixel, so it costs
+//! the same at any program size, and follows ffmpeg's `blackdetect`
+//! defaults in spirit: a picture is black when nearly all of it is dark.
 
 use std::time::Duration;
 
@@ -55,6 +66,49 @@ fn describe(issue: &LayerIssue) -> String {
     }
 }
 
+/// Columns and rows of the grid of pixels [`is_black`] samples (fewer on
+/// a smaller picture: one per pixel at most).
+const BLACK_GRID: (u32, u32) = (32, 18);
+
+/// Largest BT.709 luma of a dark pixel, in 1/10000 of a code value (so
+/// 16 of 255): the black of a limited-range picture, below what a dark
+/// stage shows, so a dim scene is not taken for black.
+const DARK_LUMA: u32 = 16 * 10_000;
+
+/// Smallest share of the samples, in percent, that must be dark for the
+/// picture to be black (`blackdetect`'s `picture_black_ratio_th`), so a
+/// black picture with a small caption or logo still counts.
+const BLACK_SHARE: usize = 98;
+
+/// True when `frame` looks black: at least [`BLACK_SHARE`] percent of a
+/// [`BLACK_GRID`] of samples, one at the centre of each cell, have a luma
+/// of at most [`DARK_LUMA`]. An empty frame shows nothing and is black; a
+/// sample past the end of malformed data counts as dark, as the compositor
+/// would draw such a frame black.
+pub(super) fn is_black(frame: &VideoFrame) -> bool {
+    let cols = BLACK_GRID.0.min(frame.width);
+    let rows = BLACK_GRID.1.min(frame.height);
+    if cols == 0 || rows == 0 {
+        return true;
+    }
+    let mut dark = 0;
+    for row in 0..rows {
+        let y = (2 * row + 1) * frame.height / (2 * rows);
+        for col in 0..cols {
+            let x = (2 * col + 1) * frame.width / (2 * cols);
+            let i = (y as usize * frame.width as usize + x as usize) * 4;
+            let luma = match frame.data.get(i..i + 3) {
+                Some(&[r, g, b]) => 2126 * u32::from(r) + 7152 * u32::from(g) + 722 * u32::from(b),
+                _ => 0,
+            };
+            if luma <= DARK_LUMA {
+                dark += 1;
+            }
+        }
+    }
+    dark * 100 >= (cols * rows) as usize * BLACK_SHARE
+}
+
 /// Interval for a refresh rate in Hz, or `None` when disabled.
 fn interval(rate_hz: f64) -> Option<Duration> {
     (rate_hz > 0.0).then(|| Duration::from_secs_f64(1.0 / rate_hz))
@@ -68,6 +122,11 @@ impl EngineCore {
         let rendered = self.compositor.render(&out, &layers, self.now);
         self.render_issues = rendered.report.issues.iter().map(describe).collect();
         let program = rendered.frame;
+        if !is_black(&program) {
+            self.program_black_since = None;
+        } else if self.program_black_since.is_none() {
+            self.program_black_since = Some(self.now);
+        }
         self.refresh_monitors(&program);
         self.refresh_thumbnails();
         self.program_frame = Some(program.clone());

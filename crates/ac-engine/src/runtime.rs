@@ -36,7 +36,7 @@
 //!
 //! | From → to | Channel | Policy |
 //! |---|---|---|
-//! | source → engine | [`ac_media::LatestFrame`] inside the source | newest frame only |
+//! | source → engine | [`ac_media::LatestFrame`] inside the source | newest frame only, read at every wake; a source other than the phase reference keeps up to 4 in its [`PresentationBuffer`] |
 //! | engine → worker | [`Slot`](crate::mailbox::Slot) per worker | newest request only |
 //! | worker → engine | `mpsc` channel | drained every tick; stale results dropped |
 //! | worker → engine | `mpsc` channel per worker | one "loaded" message, read every tick |
@@ -44,12 +44,14 @@
 //! | engine → callers | [`Latest`]`<Arc<EngineSnapshot>>` | newest snapshot only |
 //! | engine → encoder | bounded queues inside [`ac_output::ProgramEncoder`] | drop and repay |
 //! | engine → trace writer | bounded [`TraceSender`] of [`EngineOptions::trace`] | never waits: a full channel drops the record ([`crate::trace`]) |
+//! | engine → detection log writer | bounded [`PassSender`] of [`EngineOptions::detections`] | never waits: a full channel drops the pass ([`crate::detection_log`]) |
 //!
 //! No lock is shared between threads except inside these mailboxes, and none
 //! is held across I/O. [`Engine::shutdown`] (or dropping the [`Engine`])
 //! sends [`EngineCommand::Shutdown`]; the engine thread then stops the
 //! sidecar (interrupting a pass or a load in progress, so the workers end
-//! at once; see [`crate::detectors`]), stops and joins the workers,
+//! at once; see [`crate::detectors`]; its final status stays readable for
+//! the final snapshot), stops and joins the workers,
 //! finishes the encoder (the recording is finalized), stops every source,
 //! publishes a final snapshot with `running == false` and exits, and
 //! `shutdown` joins it. No thread or child process outlives the engine.
@@ -84,10 +86,12 @@ use thiserror::Error;
 use crate::command::{CommandError, CommandReply, EngineCommand};
 use crate::config::{ConfigError, StudioConfig};
 use crate::core::EngineCore;
+use crate::detection_log::{PassRecord, PassSender};
 use crate::detectors::Detectors;
 use crate::discovery::{DiscoveryResult, DiscoveryWorker};
 use crate::mailbox::Latest;
 use crate::output::OutputController;
+use crate::presentation::{PresentationBuffer, buffers_for, stats_by_source};
 use crate::schedule::TickTimer;
 use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 use crate::trace::{TraceSender, Tracer};
@@ -155,6 +159,9 @@ pub struct EngineOptions {
     /// this sender, so the channel closes when the engine stops, unless a
     /// clone of these options still holds one.
     pub trace: Option<TraceSender>,
+    /// Where the engine thread sends every discovery pass it applied
+    /// ([`crate::detection_log`]); `None` for no log. Owned like `trace`.
+    pub detections: Option<PassSender>,
     /// How the machine is held awake while output runs (the display too
     /// when the monitors show program): the system's `caffeinate` on macOS
     /// ([`Caffeinate::system`]), a stand-in in tests, or [`Caffeinate::Off`]
@@ -165,13 +172,14 @@ pub struct EngineOptions {
 }
 
 impl Default for EngineOptions {
-    /// Real time, a one-second lag limit, no trace and the system's
-    /// `caffeinate` while output runs.
+    /// Real time, a one-second lag limit, no trace, no detection log and
+    /// the system's `caffeinate` while output runs.
     fn default() -> Self {
         Self {
             clock: Arc::new(WallClock::new()),
             max_lag: Duration::from_secs(1),
             trace: None,
+            detections: None,
             keep_awake: Caffeinate::system(),
         }
     }
@@ -182,6 +190,7 @@ impl std::fmt::Debug for EngineOptions {
         f.debug_struct("EngineOptions")
             .field("max_lag", &self.max_lag)
             .field("trace", &self.trace.is_some())
+            .field("detections", &self.detections.is_some())
             .field("keep_awake", &self.keep_awake)
             .finish_non_exhaustive()
     }
@@ -220,6 +229,9 @@ struct Runtime {
     core: EngineCore,
     /// Sources, in config order, each under its supervisor.
     sources: Vec<Box<dyn VideoSource>>,
+    /// Presentation buffers, by source: `None` for the phase reference,
+    /// which is read as it is ([`crate::presentation`]).
+    presenters: Vec<Option<PresentationBuffer>>,
     /// The detector sidecar the workers share, if any. Declared before the
     /// workers so that, when a panic unwinds the thread, it is dropped
     /// first too (see [`Runtime::shutdown`]).
@@ -251,6 +263,8 @@ struct Runtime {
     skipped: u64,
     /// Where each tick's trace record goes.
     trace: Tracer,
+    /// Where each applied pass goes.
+    detections: Tracer<PassRecord>,
 }
 
 impl Engine {
@@ -282,7 +296,7 @@ impl Engine {
         } = Detectors::build(&config)?;
         let infos: Vec<SourceInfo> = sources.iter().map(|s| s.info().clone()).collect();
         let enabled: Vec<bool> = detectors.iter().map(Option::is_some).collect();
-        let core = EngineCore::new(&config, infos, &enabled).map_err(EngineError::Setup)?;
+        let mut core = EngineCore::new(&config, infos, &enabled).map_err(EngineError::Setup)?;
         let (results_tx, results) = channel();
         let mut workers = Vec::new();
         for ((entry, detector), i) in config.sources.iter().zip(detectors).zip(0..) {
@@ -296,20 +310,28 @@ impl Engine {
             .audio_source
             .as_ref()
             .and_then(|id| config.sources.iter().position(|s| &s.id == id));
+        let presenters = buffers_for(
+            config.sources.iter().map(|e| e.source_id()),
+            audio_source.unwrap_or(0),
+        );
+        core.note_presentation(stats_by_source(&presenters));
         let snapshots = Arc::new(Latest::new());
-        let initial = Arc::new(core.snapshot(
+        let mut first = core.snapshot(
             OutputView::default(),
             TimingView {
                 budget_ms: config.frame_period().as_secs_f64() * 1e3,
                 ..TimingView::default()
             },
             true,
-        ));
+        );
+        first.sidecar = sidecar.as_ref().map(|s| s.status());
+        let initial = Arc::new(first);
         snapshots.publish(initial.clone());
         let (tx, commands) = channel();
         let runtime = Runtime {
             core,
             sources,
+            presenters,
             sidecar,
             workers,
             results,
@@ -327,6 +349,7 @@ impl Engine {
             late: 0,
             skipped: 0,
             trace: Tracer::new(options.trace),
+            detections: Tracer::new(options.detections),
         };
         let last_words = snapshots.clone();
         let thread =

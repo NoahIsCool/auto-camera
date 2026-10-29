@@ -335,6 +335,8 @@ fn studio_with_file(path: &std::path::Path) -> ac_engine::StudioConfig {
             loop_playback: true,
             max_width: None,
             audio: false,
+            start_s: None,
+            duration_s: None,
         },
     });
     config

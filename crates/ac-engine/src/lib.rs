@@ -4,7 +4,7 @@
 //! # Pipeline
 //!
 //! ```text
-//!  sources ──newest frame──► engine thread (master clock, one tick per output frame)
+//!  sources ──frame by PTS──► engine thread (master clock, one tick per output frame)
 //!     │                        │  tracker step per new frame ─► subject store (per source)
 //!     │                        │  catalog: wide + subject × preset shots ─► framers
 //!     │                        │  switcher ◄── commands      director ─► suggestion / take
@@ -23,7 +23,10 @@
 //! * [`Engine`] is the runtime around it: it opens the sources, each under
 //!   a supervisor that reopens it when its input is lost
 //!   ([`ac_sources::open_supervised`]), runs the discovery workers,
-//!   drives the core from a master clock on its own thread, owns the program
+//!   drives the core from a master clock on its own thread (feeding it the
+//!   newest frame of the phase reference, whose frames the ticks are moved
+//!   to fall between, and of every other source the frame its
+//!   [`presentation`] buffer picks by PTS for the tick), owns the program
 //!   encoder, accepts [`EngineCommand`]s over a channel and publishes an
 //!   immutable [`EngineSnapshot`] every tick. See [`runtime`] for the
 //!   threads, channels and mailboxes.
@@ -36,6 +39,20 @@
 //! * [`trace`] carries one record per tick (subjects, shot targets and
 //!   crops, program and preview) from the engine thread to a writer, such
 //!   as the app's `--trace` file, for scoring with `ac_eval`.
+//! * [`detection_log`] carries every discovery pass the engine applied to
+//!   a writer, such as the app's `--record-detections` file, so that a run's
+//!   detections can be replayed without its model
+//!   (`ac_vision::ReplayDetector`).
+//! * [`alarms`] reads the snapshots a reader takes into a persistent list
+//!   of what is wrong on air (spec M14): program black, frozen or on a
+//!   lost subject, encoder drops, a failed output, a stream reconnecting,
+//!   stalled or down, a recording without audio. It is pure: each reader
+//!   keeps its own, and acknowledges alarms there.
+//! * [`show`] is what the operator built on a studio (queries, director
+//!   mode and profile, transition; sources and recording path where they
+//!   differ from the studio file's, never the stream key): the core
+//!   exports it on [`EngineCommand::ExportShow`], the app saves it, and a
+//!   show file opens as its studio file with the show laid over it.
 //! * [`queries`] reads each query's prompt once, when it is created: the
 //!   detector is asked for the parsed phrase ("speaker upper body" asks for
 //!   "a person speaking"), and the prompt's shot words pick its framings
@@ -55,24 +72,29 @@
 //! every detection arrive too old to apply; the [`EngineCore`] itself
 //! takes `now` as an argument and is tested on simulated time directly.
 
+pub mod alarms;
 pub mod audio;
 pub mod catalog;
 pub mod command;
 pub mod config;
 pub mod core;
+pub mod detection_log;
 pub mod detectors;
 pub mod discovery;
 pub mod mailbox;
 pub mod output;
+pub mod presentation;
 pub mod queries;
 pub mod readiness;
 pub mod runtime;
 pub mod schedule;
 pub mod settle;
+pub mod show;
 pub mod snapshot;
 pub mod trace;
 pub mod vision;
 
+pub use alarms::{Alarm, AlarmCause, AlarmChange, Alarms};
 pub use catalog::{ShotStatus, subject_shot_id, wide_shot_id};
 pub use command::{CommandError, CommandReply, EngineCommand};
 pub use config::{
@@ -81,9 +103,11 @@ pub use config::{
     preset_for,
 };
 pub use core::{EngineCore, SourceFeed, TickOutput};
+pub use detection_log::{PassRecord, PassSender};
 pub use queries::{PromptReader, build_query, default_presets, read_prompt, shot_presets};
 pub use readiness::{Readiness, SystemInspector};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};
+pub use show::{SHOW_VERSION, Show};
 pub use snapshot::{
     DirectorView, EngineSnapshot, KeepAwakeState, MatchView, OutputState, OutputView, PassOutcome,
     QueryView, ShotView, SourceView, SubjectView, SwitcherView, Tally, TimingView,

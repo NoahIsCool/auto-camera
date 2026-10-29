@@ -313,6 +313,9 @@ pub fn output(
             a.pushed, a.silence, a.dropped
         ));
     }
+    if let Some(reading) = &out.loudness {
+        super::meter::show(ui, reading);
+    }
     commands
 }
 

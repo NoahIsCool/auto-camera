@@ -32,6 +32,8 @@ use ac_subjects::StoreError;
 use ac_switcher::{SwitchError, Transition};
 use thiserror::Error;
 
+use crate::show::Show;
+
 /// A request to change engine state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineCommand {
@@ -154,6 +156,11 @@ pub enum EngineCommand {
     },
     /// Finish the program encoder (the recording is finalized).
     StopOutput,
+    /// Export the show: the sources, queries, director mode and profile,
+    /// transition and default recording path as they stand, never the
+    /// stream key ([`crate::show`]). Changes nothing; the reply is
+    /// [`CommandReply::Show`], which the sender saves.
+    ExportShow,
     /// Stop everything and end the engine thread.
     Shutdown,
 }
@@ -180,6 +187,7 @@ impl EngineCommand {
             EngineCommand::ReleasePreview => "release_preview",
             EngineCommand::StartOutput { .. } => "start_output",
             EngineCommand::StopOutput => "stop_output",
+            EngineCommand::ExportShow => "export_show",
             EngineCommand::Shutdown => "shutdown",
         }
     }
@@ -202,6 +210,9 @@ pub enum CommandReply {
     /// Applied, and as the operator's own switching while the director ran
     /// in Auto mode, it took over as `director.takeover` says.
     TookOver(Handover),
+    /// The show as it stands, for [`EngineCommand::ExportShow`] (boxed:
+    /// the reply stays small).
+    Show(Box<Show>),
 }
 
 /// Why a command was refused.
@@ -336,6 +347,7 @@ mod tests {
                 record_path: None,
             },
             EngineCommand::StopOutput,
+            EngineCommand::ExportShow,
             EngineCommand::Shutdown,
         ];
         let names: std::collections::HashSet<_> = commands.iter().map(|c| c.name()).collect();

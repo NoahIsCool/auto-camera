@@ -55,6 +55,9 @@ skip_s = 30
 [switcher]
 transition = "mix"
 duration = 0.8
+# Put the first source's wide on program from the start instead of black,
+# so a restart after a crash goes out on a clean wide.
+start_on_wide = false
 
 # Settle-before-take, off by default: an operator Cut, Auto or Accept waits
 # up to max_wait_s for the preview crop to settle; a second press takes at

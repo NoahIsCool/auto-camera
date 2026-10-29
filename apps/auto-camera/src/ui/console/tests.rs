@@ -6,6 +6,7 @@
 //! the window draws and checks the commands it sends; [`switching`] sends
 //! them to a live core instead, to see what goes on air.
 
+mod alarms;
 mod operator;
 mod settle;
 mod switching;

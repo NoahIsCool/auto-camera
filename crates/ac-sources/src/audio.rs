@@ -242,11 +242,11 @@ impl AudioWorker {
                 break;
             }
         }
-        drop(stdout);
         // A decoder whose output ended has exited: with success at end of
         // input, otherwise it was killed or crashed and the input is lost,
         // which fails the whole source (see `crate::file`). One that was cut
-        // off, trimmed or stopped is simply done.
+        // off, trimmed or stopped is simply done. Either way it is gone before
+        // its pipe closes (see `crate::process`).
         if ended
             && let Some(status) = shared.children.finish_within(key, END_GRACE)
             && !status.success()
@@ -258,6 +258,7 @@ impl AudioWorker {
             return false;
         }
         shared.children.kill(key);
+        drop(stdout);
         !stopped
     }
 

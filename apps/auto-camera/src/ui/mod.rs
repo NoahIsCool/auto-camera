@@ -12,9 +12,11 @@
 //! monitor's notes on a waiting take and a lost subject), [`textures`]
 //! (upload decisions),
 //! [`close_guard`] (asking before a live output is closed or stopped),
-//! [`notices`] (what the status bar's notice says, and for how long) and
-//! the forms ([`query_form`], which reads prompts the way the engine will,
-//! and the output form in [`panels`]). [`console`] draws a whole frame from
+//! [`notices`] (what the status bar's notice says, and for how long),
+//! [`alarms`] (its persistent list of what is wrong on air), the forms
+//! ([`query_form`], which reads prompts the way the engine will, and the
+//! output form in [`panels`]) and Save show's saver ([`save`], which
+//! writes off the window's thread). [`console`] draws a whole frame from
 //! a snapshot and returns commands, apart from the engine that
 //! [`app`] owns, so the window itself is tested headless: egui's test
 //! harness (`egui_kittest`, without a renderer) presses keys and clicks
@@ -23,6 +25,7 @@
 //! eframe runs with the OpenGL (glow) renderer and, on Linux, X11 (Wayland
 //! sessions use XWayland); both load their system libraries at run time.
 
+mod alarms;
 mod app;
 mod caption;
 mod close_guard;
@@ -31,10 +34,12 @@ mod console;
 mod fixtures;
 mod keys;
 mod layout;
+mod meter;
 mod multiview;
 mod notices;
 mod panels;
 mod query_form;
+mod save;
 mod switching;
 mod text;
 mod textures;
@@ -42,21 +47,24 @@ mod textures;
 use ac_engine::{Engine, EngineOptions, StudioConfig};
 use eframe::egui;
 
+use crate::show::ShowTarget;
 use crate::signals::QuitSignal;
 use app::OperatorApp;
 
 /// Starts the engine from `config` with `options` and runs the window until
 /// it is closed, or until `quit` is requested (a termination signal), which
 /// closes it. The window opens with `warnings`, the config's, in its status
-/// bar. The engine has stopped when this returns, whether the window opened
-/// or not.
+/// bar, and Save show writes to `show`. The engine has stopped when this
+/// returns, whether the window opened or not.
 pub fn run(
     config: StudioConfig,
     options: EngineOptions,
     warnings: &[String],
+    show: Result<ShowTarget, String>,
     quit: QuitSignal,
 ) -> Result<(), String> {
     let engine = Engine::start_with(config.clone(), options).map_err(|e| e.to_string())?;
+    let _watch = crate::logs::watch(engine.handle());
     let warnings = warnings.to_vec();
     let title = match config.sources.as_slice() {
         [one] => format!("Auto Camera · {}", one.display_name()),
@@ -81,7 +89,8 @@ pub fn run(
             Ok(Box::new(
                 OperatorApp::new(engine, &config)
                     .with_quit(quit)
-                    .with_warnings(&warnings),
+                    .with_warnings(&warnings)
+                    .with_show_target(show),
             ))
         }),
     )

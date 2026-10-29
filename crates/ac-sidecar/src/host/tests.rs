@@ -150,3 +150,15 @@ fn errors_read_well() {
     };
     assert_eq!(e.to_string(), "the sidecar's result timed out after 5s");
 }
+
+#[test]
+fn restarts_are_the_starts_after_the_first() {
+    let stats = |spawns| HostStats {
+        spawns,
+        ..HostStats::default()
+    };
+    assert_eq!(stats(0).restarts(), 0, "never started");
+    assert_eq!(stats(1).restarts(), 0, "started once");
+    assert_eq!(stats(4).restarts(), 3);
+    assert_eq!(stats(u64::MAX).restarts(), u64::MAX - 1);
+}

@@ -52,7 +52,9 @@
 //! the wait in progress, the thread shuts the process down (stdin closed,
 //! 2 s grace, then kill and reap) and exits, and the drop joins it. Jobs
 //! still queued, and every later call of a client, fail with
-//! `Unavailable`.
+//! `Unavailable`. [`SidecarService::stop`] does the same but keeps the
+//! service, so its final status (stopped, with the session's counters,
+//! restarts among them) can still be read.
 //!
 //! # Invariants
 //!
@@ -169,15 +171,23 @@ impl SidecarService {
 
     /// Stops the service and its process; the same as dropping it.
     pub fn shutdown(self) {}
-}
 
-impl Drop for SidecarService {
-    fn drop(&mut self) {
+    /// Stops the service and its process as dropping it does, and joins
+    /// the service thread, but keeps the service: [`SidecarService::status`]
+    /// then reports the final status, `Stopped` with the session's
+    /// counters. Idempotent.
+    pub fn stop(&mut self) {
         self.stop.stop();
         let _ = self.jobs.send(Job::Stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+impl Drop for SidecarService {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
