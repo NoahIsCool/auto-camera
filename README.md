@@ -510,10 +510,10 @@ of 2 ppm pass through bit for bit, as a file input on the engine's clock
 always does; a source's embedded audio is never resampled, and drift of
 the video itself (a camera against the engine) is not corrected; drift
 beyond 1000 ppm is left to the fills and cuts. The window's output panel
-shows the program input's correction, its resets and the steps made up,
-and a headless summary reports them for every input (`audio_inputs`:
-`id`, `name`, `program`, `correction_ppm`, `drift_resets`,
-`drift_steps`).
+shows the program input's correction, its resets and the steps made up
+(or, while the input is not running, its state and why, in amber), and a
+headless summary reports them for every input (`audio_inputs`: `id`,
+`name`, `program`, `correction_ppm`, `drift_resets`, `drift_steps`).
 
 A source's embedded audio is mixed to stereo by ffmpeg as it is decoded,
 with the matrix the encoder used on it before: a stereo track as it is, a

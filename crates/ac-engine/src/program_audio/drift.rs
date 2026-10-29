@@ -42,8 +42,12 @@
 //! keeps its PTS and is not a step.
 //!
 //! A change of format (a reconnection at another rate) starts a new
-//! corrector, counted as a reset too; the few frames the old one held back
-//! go with it, as the pacer drops the old rate's blocks anyway.
+//! corrector, counted as a reset too. The few frames the old one held back
+//! (about half a millisecond, and only while it was resampling) are
+//! discarded with it, unheard beside the reconnection's own gap. The output
+//! keeps the rate it was started with, so until it is started again its
+//! pacer drops the new rate's blocks (see the Rate section of
+//! [`crate::program_audio`]).
 //!
 //! # Invariants
 //!
