@@ -541,7 +541,10 @@ delivers through (audio dropped because the input fell behind its device,
 a jump in the device's timestamps, an overload CoreAudio reports) keeps it
 on air: it is counted, kept as the input's error
 (`audio discontinuity (3 so far): ...`) and written to the log, at most a
-line every 10 s. A device that sends nothing for 2 s is reopened. Device
+line every 10 s. A jump in the timestamps is reported half a second after
+it, once it has lasted; timestamps that are off for a few blocks and then
+back are one timestamp glitch, with no audio missing and the input's
+timeline as it was. A device that sends nothing for 2 s is reopened. Device
 inputs need macOS and a build with `--features coreaudio`, which is opt-in
 like `onnx`; any other build loads the config, `--check` reports the input
 as a problem saying how to build, and the input stays offline with that

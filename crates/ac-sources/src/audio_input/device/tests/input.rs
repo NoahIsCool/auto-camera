@@ -259,10 +259,13 @@ fn discontinuities_are_counted_and_shown_while_the_input_runs() {
     let mut cb = backend.callbacks();
     play(&mut cb.sink, start, 0);
     play(&mut cb.sink, start, 1);
-    // Block 2 is due at 20 ms and captured at 50 ms.
-    play(&mut cb.sink, start + ms(30), 2);
+    // Block 2 is due at 20 ms and captured at 50 ms, and the stream stays
+    // there: a gap, reported once its window has passed.
+    for k in 2..=53 {
+        play(&mut cb.sink, start + ms(30), k);
+    }
     let mut got = Vec::new();
-    drain_until(&input, &mut got, 3);
+    drain_until(&input, &mut got, 54);
     assert!(eventually(|| input.discontinuities() == 1));
     assert_eq!(
         input.error().as_deref(),
@@ -281,8 +284,8 @@ fn discontinuities_are_counted_and_shown_while_the_input_runs() {
             .unwrap()
             .starts_with("audio discontinuity (2 so far): the device reported an overload")
     );
-    play(&mut cb.sink, start + ms(30), 3);
-    drain_until(&input, &mut got, 4);
+    play(&mut cb.sink, start + ms(30), 54);
+    drain_until(&input, &mut got, 55);
     assert_eq!(input.state(), SourceState::Running);
     input.stop();
 }
@@ -416,9 +419,11 @@ fn a_supervisor_shows_the_trouble_and_reopens_the_board_when_it_is_back() {
     let mut input = SupervisedAudio::start(opener, offline, clock, quick).unwrap();
     let mut cb = backend.callbacks();
     play(&mut cb.sink, start, 0);
-    play(&mut cb.sink, start + ms(30), 1);
+    for k in 1..=52 {
+        play(&mut cb.sink, start + ms(30), k);
+    }
     let mut got = Vec::new();
-    drain_until(&input, &mut got, 2);
+    drain_until(&input, &mut got, 53);
     // The gap is shown while the board stays on air.
     assert!(eventually(|| input.error().is_some_and(
         |e| e.starts_with("audio discontinuity (1 so far)")
@@ -442,10 +447,10 @@ fn a_supervisor_shows_the_trouble_and_reopens_the_board_when_it_is_back() {
     for k in 0..3 {
         play(&mut again.sink, start + ms(500), k);
     }
-    drain_until(&input, &mut got, 5);
+    drain_until(&input, &mut got, 56);
     assert_eq!(input.state(), SourceState::Running);
     assert_eq!(input.error(), None);
-    assert_eq!(seqs(&got), [0, 1, 2, 3, 4]);
+    assert_eq!(seqs(&got), (0..56).collect::<Vec<u64>>());
     assert!(got.windows(2).all(|w| w[0].pts < w[1].pts), "PTS go on");
     input.stop();
     assert!(again.dropped.load(Ordering::SeqCst));

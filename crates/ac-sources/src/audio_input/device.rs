@@ -41,8 +41,9 @@
 //!
 //! # Trouble
 //!
-//! * A **discontinuity** (audio the hand-off dropped, a host-time jump,
-//!   an overload the device reported) does not stop the input: it is
+//! * A **discontinuity** (audio the hand-off dropped, a host-time jump
+//!   that lasted or a timestamp glitch that came back, see [`timing`], an
+//!   overload the device reported) does not stop the input: it is
 //!   counted, logged (at most a line per [`input::LOG_QUIET`], counting
 //!   the rest) and shown as the input's error while it keeps running,
 //!   with how many there were. Blocks the hand-off dropped count in
