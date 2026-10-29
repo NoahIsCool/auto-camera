@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use ac_audio::LoudnessReading;
 use ac_core::{
     ParsedPrompt, Preset, QueryId, Rect, ShotId, ShotSize, SourceId, SubjectId, TrackState,
 };
@@ -349,6 +350,10 @@ pub struct OutputView {
     pub stats: Option<EncoderStats>,
     /// Program audio pacing, when the output carries audio.
     pub audio: Option<AudioPacerStats>,
+    /// Program loudness and peaks (EBU R 128) of the session, measured on
+    /// the paced audio, when the output carries audio; final once the
+    /// session has ended.
+    pub loudness: Option<LoudnessReading>,
     /// Program frames handed to the encoder this session.
     pub frames_pushed: u64,
     /// Whether the machine is held awake for the session.
