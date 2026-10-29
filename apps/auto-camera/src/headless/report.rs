@@ -22,9 +22,9 @@ use ac_output::{StreamHealth, StreamState};
 
 use super::sidecar::sidecar_summary;
 use super::{
-    CropRange, DirectorSummary, HeadlessOptions, LoudnessSummary, MatchSummary, OutputSummary,
-    ProgramSummary, QuerySummary, Sampler, ShotSummary, SourceSummary, StreamSummary,
-    SubjectSummary, Summary, TimingSummary, TraceSummary,
+    CropRange, DetectionsSummary, DirectorSummary, HeadlessOptions, LoudnessSummary, MatchSummary,
+    OutputSummary, ProgramSummary, QuerySummary, Sampler, ShotSummary, SourceSummary,
+    StreamSummary, SubjectSummary, Summary, TimingSummary, TraceSummary,
 };
 
 /// Counters from the engine report and the trace writer.
@@ -35,6 +35,8 @@ pub(super) struct Totals {
     pub(super) threads_joined: usize,
     /// The trace, with `--trace`.
     pub(super) trace: Option<TraceSummary>,
+    /// The detection log, with `--record-detections`.
+    pub(super) detections: Option<DetectionsSummary>,
 }
 
 /// The summary of a run whose engine never started, which leaves no trace
@@ -54,6 +56,7 @@ pub(super) fn failed_to_start(
             ticks: 0,
             threads_joined: 0,
             trace: None,
+            detections: None,
         },
         None,
         None,
@@ -254,6 +257,7 @@ pub(super) fn summarize(
         },
         output,
         trace: totals.trace,
+        detections: totals.detections,
         render_issues: end.map(|s| s.render_issues.clone()).unwrap_or_default(),
         sidecar: sidecar_summary(last, end),
     }

@@ -180,6 +180,56 @@ starts offline and is retried, see "Studio configuration"), so a run with a
 missing file ticks and, like every run that ticked, keeps its trace: move
 or remove it before running the same command again.
 
+### Recorded detections and the eval runner
+
+`--record-detections PATH` (headless or in the window) writes every
+detector pass the engine applied as JSON Lines: the source, the frame's
+sequence number and PTS, the queries looked for, and each detection's
+query, box, score and extent (`ac_vision::PassRecord`). The summary's
+`detections` gives the lines written (`records`, with `missing` for passes
+a writer that fell behind had to drop). As for the trace, the file must not
+exist, and a run whose engine does not start removes it.
+
+The eval runner (`apps/eval-runner`) steps the engine over a studio's
+sources on simulated time, tick after tick on one thread, so the same input
+always gives the same trace, and it can answer discovery from such a log
+instead of from a model, so scoring needs no inference:
+
+```sh
+# Record once, with the studio's own detector ...
+cargo run -p eval-runner -- --config config/demo.toml --seconds 10 \
+  --trace /tmp/live.jsonl --record-detections /tmp/passes.jsonl
+# ... and replay without it: the same trace, byte for byte.
+cargo run -p eval-runner -- --config config/demo.toml --seconds 10 \
+  --trace /tmp/replay.jsonl --replay /tmp/passes.jsonl
+```
+
+Synthetic sources are drawn, and file sources decoded frame by frame, in
+step with the ticks: each tick shows the newest frame due by then. A
+discovery request is answered `--latency-ticks` ticks later (default 1),
+and the first wide goes on program as in a headless run. A replayed pass
+answers a frame at most half a frame interval from it, so a log the runner
+recorded matches frame for frame; a log the app recorded live looked at
+whichever frames real time handed its detector, so replay it with a wider
+`--tolerance-ms` (half the discovery interval, say). A request with no pass
+is a miss, which changes nothing, so a pass left out of a log skips just
+that update. The run ends after `--seconds`, or once every file source has
+played to its end, and prints a JSON report: ticks, and for each source the
+requests, applied passes, misses and detector errors. The sidecar detector
+answers in real time and cannot run in the runner: record it with the app
+and replay it.
+
+A file source can play part of its file as a clip of its own: `start_s`
+seconds in (default 0), for `duration_s` seconds (default: to the end).
+The first frame at or after `start_s` comes first, with PTS 0, and the
+audio starts with it, so a segment of a long recording is scored like a
+short clip, and a detection log recorded on the segment replays on it. The
+cut is exact in MP4 and Matroska files, and in a container without a seek
+index, such as an MPEG-TS recording, when it has a keyframe at least every
+15 s. A `start_s` below 0 or a `duration_s` not above 0 is a config error,
+as a bad `max_width` is: no retry of the file would mend it, so the load
+and `--check` refuse it rather than leave the source offline.
+
 ## Staying awake while live
 
 On macOS the app keeps the Mac from sleeping while program goes out: it
@@ -534,8 +584,8 @@ the program is silent. A headless run reports the session's values in
 | `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
 | `ac-media` | Frames, audio blocks and the source trait, with latest-frame mailboxes |
 | `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak |
-| `ac-sources` | File (ffmpeg) and synthetic sources; injectable clocks |
-| `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector |
+| `ac-sources` | File (ffmpeg) and synthetic sources, file segments, a frame-by-frame clip reader for offline tools; injectable clocks |
+| `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector, replay of recorded detections |
 | `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
 | `ac-framing` | Ideal crops (fill rule for objects, body cut lines for whole people, zoom-limit flags) and per-shot smoothing |
@@ -546,6 +596,7 @@ the program is silent. A headless run reports the session's values in
 | `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), framing-quality metrics, and the per-tick trace schema (`TraceRecord`) the engine emits and they score |
 | `ac-engine` | The runtime that wires them together (ADR 0002), the studio config and its readiness check |
 | `apps/auto-camera` | Operator window, headless runner and `--check` |
+| `apps/eval-runner` | The engine stepped over a clip on simulated time, with live or replayed detections, writing the trace |
 
 ## Develop
 

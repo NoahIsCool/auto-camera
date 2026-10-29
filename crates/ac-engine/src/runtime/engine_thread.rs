@@ -7,10 +7,12 @@
 //! core the newest frame of every source and the discovery results that
 //! arrived, hands the core's requests to the workers, pushes the program
 //! frame and audio to the output, sends the tick's trace record (when the
-//! engine traces; [`crate::trace`]) and publishes a snapshot. The frame the
-//! tick read from the phase reference (the program audio source, else the
-//! first source) goes to the [`PhaseLock`], which delays the schedule when
-//! ticks collide with that source's frames (see [`crate::schedule`]).
+//! engine traces; [`crate::trace`]) and the passes it applied (when it logs
+//! detections; [`crate::detection_log`]) and publishes a snapshot. The
+//! frame the tick read from the phase reference (the program audio source,
+//! else the first source) goes to the [`PhaseLock`], which delays the
+//! schedule when ticks collide with that source's frames (see
+//! [`crate::schedule`]).
 //!
 //! Commands are applied in order at tick start, and only on this thread:
 //! `StartOutput` and `StopOutput` go to the
@@ -177,6 +179,9 @@ impl Runtime {
             if let Some(Some(worker)) = self.workers.get(i) {
                 worker.submit(request);
             }
+        }
+        for pass in out.applied {
+            self.detections.send(pass);
         }
         let mut program_audio = Vec::new();
         for (i, s) in self.sources.iter().enumerate() {

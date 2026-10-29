@@ -3,7 +3,7 @@
 //!
 //! CLAUDE.md keeps the core crates pure and deterministic, with I/O in the
 //! adapter crates; a log is I/O. So only the adapters (which run ffmpeg,
-//! the sidecar and the engine's threads) and the app emit `tracing`
+//! the sidecar and the engine's threads) and the apps may emit `tracing`
 //! events, and the core publishes its state as data, which the app's
 //! snapshot watcher logs. This test reads the workspace's manifests with
 //! `cargo metadata` (offline, no dependency resolution) and checks every
@@ -20,13 +20,15 @@ use std::process::Command;
 
 use serde_json::Value;
 
-/// The workspace crates that may log.
-const ADAPTERS: [&str; 5] = [
+/// The workspace crates that may log: the adapters and the apps (the eval
+/// runner drives the engine and decodes files, so it is one of them too).
+const ADAPTERS: [&str; 6] = [
     "ac-engine",
     "ac-output",
     "ac-sidecar",
     "ac-sources",
     "auto-camera",
+    "eval-runner",
 ];
 
 /// True when a dependency named `name` is a logging crate.

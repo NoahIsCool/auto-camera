@@ -595,6 +595,24 @@ fn a_source_its_opener_would_refuse_is_a_config_problem() {
         ["source \"cam-1\": max_width must be at least 2, got 1"]
     );
     assert_eq!(narrowed(2), Vec::<String>::new());
+
+    // So is a segment no file can have, however many keys are wrong.
+    let cut = |keys: &str| file_studio(keys).problems();
+    assert_eq!(
+        cut("start_s = -1.0\n"),
+        ["source \"cam-1\": start_s must be a finite number of seconds, at least 0; got -1"]
+    );
+    assert_eq!(
+        cut("max_width = 1\nduration_s = 0.0\n"),
+        [
+            "source \"cam-1\": max_width must be at least 2, got 1",
+            "source \"cam-1\": duration_s must be a finite number of seconds, more than 0; got 0",
+        ]
+    );
+    assert_eq!(
+        cut("start_s = 1800.0\nduration_s = 240.0\n"),
+        Vec::<String>::new()
+    );
 }
 
 /// The repository's example configs.

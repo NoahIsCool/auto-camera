@@ -1,5 +1,6 @@
 //! Headless runs on small synthetic studios (real time, about a second each).
 
+mod detections;
 mod keep_awake;
 mod summary;
 mod trace;
@@ -51,6 +52,7 @@ fn options(seconds: f64, record: Option<PathBuf>) -> HeadlessOptions {
         seconds,
         record,
         trace: None,
+        record_detections: None,
     }
 }
 
@@ -648,6 +650,8 @@ fn a_run_with_a_source_that_never_delivers_fails_and_says_why() {
             loop_playback: false,
             max_width: None,
             audio: false,
+            start_s: None,
+            duration_s: None,
         },
     });
     let s = run(
