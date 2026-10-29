@@ -44,6 +44,7 @@
 //! | engine → callers | [`Latest`]`<Arc<EngineSnapshot>>` | newest snapshot only |
 //! | engine → encoder | bounded queues inside [`ac_output::ProgramEncoder`] | drop and repay |
 //! | engine → trace writer | bounded [`TraceSender`] of [`EngineOptions::trace`] | never waits: a full channel drops the record ([`crate::trace`]) |
+//! | engine → detection log writer | bounded [`PassSender`] of [`EngineOptions::detections`] | never waits: a full channel drops the pass ([`crate::detection_log`]) |
 //!
 //! No lock is shared between threads except inside these mailboxes, and none
 //! is held across I/O. [`Engine::shutdown`] (or dropping the [`Engine`])
@@ -85,6 +86,7 @@ use thiserror::Error;
 use crate::command::{CommandError, CommandReply, EngineCommand};
 use crate::config::{ConfigError, StudioConfig};
 use crate::core::EngineCore;
+use crate::detection_log::{PassRecord, PassSender};
 use crate::detectors::Detectors;
 use crate::discovery::{DiscoveryResult, DiscoveryWorker};
 use crate::mailbox::Latest;
@@ -156,6 +158,9 @@ pub struct EngineOptions {
     /// this sender, so the channel closes when the engine stops, unless a
     /// clone of these options still holds one.
     pub trace: Option<TraceSender>,
+    /// Where the engine thread sends every discovery pass it applied
+    /// ([`crate::detection_log`]); `None` for no log. Owned like `trace`.
+    pub detections: Option<PassSender>,
     /// How the machine is held awake while output runs (the display too
     /// when the monitors show program): the system's `caffeinate` on macOS
     /// ([`Caffeinate::system`]), a stand-in in tests, or [`Caffeinate::Off`]
@@ -166,13 +171,14 @@ pub struct EngineOptions {
 }
 
 impl Default for EngineOptions {
-    /// Real time, a one-second lag limit, no trace and the system's
-    /// `caffeinate` while output runs.
+    /// Real time, a one-second lag limit, no trace, no detection log and
+    /// the system's `caffeinate` while output runs.
     fn default() -> Self {
         Self {
             clock: Arc::new(WallClock::new()),
             max_lag: Duration::from_secs(1),
             trace: None,
+            detections: None,
             keep_awake: Caffeinate::system(),
         }
     }
@@ -183,6 +189,7 @@ impl std::fmt::Debug for EngineOptions {
         f.debug_struct("EngineOptions")
             .field("max_lag", &self.max_lag)
             .field("trace", &self.trace.is_some())
+            .field("detections", &self.detections.is_some())
             .field("keep_awake", &self.keep_awake)
             .finish_non_exhaustive()
     }
@@ -252,6 +259,8 @@ struct Runtime {
     skipped: u64,
     /// Where each tick's trace record goes.
     trace: Tracer,
+    /// Where each applied pass goes.
+    detections: Tracer<PassRecord>,
 }
 
 impl Engine {
@@ -330,6 +339,7 @@ impl Engine {
             late: 0,
             skipped: 0,
             trace: Tracer::new(options.trace),
+            detections: Tracer::new(options.detections),
         };
         let last_words = snapshots.clone();
         let thread =

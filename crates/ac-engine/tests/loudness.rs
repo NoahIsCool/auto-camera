@@ -66,6 +66,8 @@ fn the_snapshot_meters_the_program_audio() {
         loop_playback: true,
         max_width: None,
         audio: true,
+        start_s: None,
+        duration_s: None,
     };
     config.detector = DetectorSettings::None;
     config.queries.clear();

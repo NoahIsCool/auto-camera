@@ -418,6 +418,8 @@ fn unusable_files_fail_to_open() {
             loop_playback: false,
             max_width: None,
             audio: true,
+            start_s: None,
+            duration_s: None,
         };
         match open_source(&config, SourceId("bad".into())) {
             Err(MediaError::Open(msg)) => assert!(msg.contains(needle), "{msg}"),

@@ -9,6 +9,9 @@
 //!   tier that keeps shots framed between detector updates.
 //! * [`ScriptedDetector`], a detector driven by a closure or keyframe table,
 //!   for tests, demos and offline evaluation.
+//! * [`ReplayDetector`], a detector that answers from a detection log of
+//!   recorded passes ([`replay`]), so offline evaluation replays a run's
+//!   detections without its model.
 //! * Behind the `onnx` feature, `OnnxOwlDetector`: OWLv2 / OWL-ViT through
 //!   ONNX Runtime (CoreML on macOS when available, CPU otherwise). Its pure
 //!   pre- and post-processing lives in [`owl`] and is always compiled, so it is
@@ -27,6 +30,7 @@ mod ncc;
 #[cfg(feature = "onnx")]
 pub mod onnx_owl;
 pub mod owl;
+pub mod replay;
 pub mod scripted;
 pub mod tracker;
 
@@ -35,5 +39,6 @@ pub use boxes::{clamp_box, cxcywh_to_rect, nms, nms_indices};
 pub use error::VisionError;
 #[cfg(feature = "onnx")]
 pub use onnx_owl::{OnnxOwlDetector, OwlConfig, OwlModel, OwlTensorNames};
+pub use replay::{PASS_LOG_VERSION, PassLogError, PassRecord, ReplayDetector, parse_pass_log};
 pub use scripted::ScriptedDetector;
 pub use tracker::{TemplateTracker, TemplateTrackerConfig};

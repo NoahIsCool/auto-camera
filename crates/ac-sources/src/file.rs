@@ -16,6 +16,12 @@
 //!   outlasts its video, the tail can still be drained after the state turns
 //!   `Stopped`.
 //!
+//! With a [`Segment`](crate::segment::Segment) (`FileOptions::segment`),
+//! both decoders cut the file at the same frame and stop after its
+//! duration, and the source delivers the segment as if it were the whole
+//! file: the first frame at or after the start comes first, with sequence
+//! number 0 and PTS 0, and the audio starts with it ([`crate::segment`]).
+//!
 //! Looping restarts the decoders at end of file. PTS keeps counting from where
 //! the previous pass ended, so it increases monotonically across loops, and the
 //! next pass's decoder is started in advance so the restart has no gap. Each
@@ -73,6 +79,8 @@ pub struct FileOptions {
     /// Most audio blocks queued between drains (at least one); older blocks
     /// are dropped.
     pub audio_queue_blocks: usize,
+    /// The part of the file to play (default: all of it).
+    pub segment: crate::segment::Segment,
     /// The ffmpeg executables.
     pub tools: FfmpegTools,
 }
@@ -84,6 +92,7 @@ impl Default for FileOptions {
             max_width: None,
             audio: true,
             audio_queue_blocks: DEFAULT_AUDIO_QUEUE_BLOCKS,
+            segment: crate::segment::Segment::WHOLE,
             tools: FfmpegTools::from_env(),
         }
     }
@@ -194,7 +203,8 @@ impl FileSource {
         };
         let looping = options.loop_playback;
 
-        let args = video_args(&path, &probe.video, (width, height), rate);
+        let cut = options.segment.cut(&probe);
+        let args = video_args(&path, &probe.video, (width, height), rate, &cut);
         let decoder = source.respawner(&options.tools, args, looping, "video")?;
         let video = VideoWorker {
             source: id.clone(),
@@ -206,7 +216,7 @@ impl FileSource {
         source.spawn_worker(format!("ac-video-{}", id.0), move |s| video.run(s))?;
 
         if let Some(stream) = audio {
-            let args = audio_args(&path, &stream);
+            let args = audio_args(&path, &stream, &cut);
             let decoder = source.respawner(&options.tools, args, looping, "audio")?;
             let worker = AudioWorker {
                 source: id.clone(),
