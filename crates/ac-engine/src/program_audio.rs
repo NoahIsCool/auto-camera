@@ -50,10 +50,10 @@
 //! Blocks within the drift's dead band pass as they are, as a file input's
 //! on the engine's clock always do. A step in the PTS is not drift: lost
 //! audio up to the pacer's slack is made up with silence as soon as the
-//! audio after it comes, and a larger step (a reconnection) is a break
-//! that restarts the measurement ([`AudioInputView::drift_resets`]). A
-//! video source's embedded audio is never resampled, and drift of the
-//! video itself is not corrected.
+//! audio after it comes ([`AudioInputView::drift_steps`]), and a larger
+//! step (a reconnection) is a break that restarts the measurement
+//! ([`AudioInputView::drift_resets`]). A video source's embedded audio is
+//! never resampled, and drift of the video itself is not corrected.
 //!
 //! # Ownership and threads
 //!
@@ -140,6 +140,9 @@ pub struct AudioInputView {
     /// Breaks in its PTS (reconnections, long losses) and format changes
     /// that restarted the drift measurement.
     pub drift_resets: u64,
+    /// Steps in its PTS (audio lost, timestamps that went back) that the
+    /// drift correction made up with silence or a cut.
+    pub drift_steps: u64,
 }
 
 /// An opened audio input and what the engine counts of it.
@@ -304,6 +307,7 @@ impl ProgramAudio {
                     unusable: slot.unusable,
                     correction_ppm: slot.drift.correction_ppm(),
                     drift_resets: slot.drift.resets(),
+                    drift_steps: slot.drift.steps(),
                 }
             })
             .collect()

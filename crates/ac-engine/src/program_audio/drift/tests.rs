@@ -227,7 +227,7 @@ fn three_hours(ppm: f64) {
         (view.correction_ppm - cancels).abs() < 1.0,
         "{ppm}: {view:?}"
     );
-    assert_eq!(view.drift_resets, 0);
+    assert_eq!((view.drift_resets, view.drift_steps), (0, 0));
     assert!(run.resampled > 0);
 }
 
@@ -446,6 +446,10 @@ fn audio_lost_up_to_the_slack_is_made_up_once() {
             );
             let cancels = -ppm / (1.0 + ppm * 1e-6);
             assert!((run.view.correction_ppm - cancels).abs() < 1.0, "{what}");
+            // A step made up once, or a break the pacer filled.
+            let (steps, resets) = (run.view.drift_steps, run.view.drift_resets);
+            assert_eq!(steps + resets, 1, "{what}");
+            assert!(lost == 100 || steps == 1, "{what}");
         }
     }
 }

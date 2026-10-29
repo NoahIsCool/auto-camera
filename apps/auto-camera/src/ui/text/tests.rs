@@ -707,6 +707,7 @@ fn the_program_inputs_drift_correction_is_shown() {
         unusable: 0,
         correction_ppm: -37.26,
         drift_resets: 0,
+        drift_steps: 0,
     };
     snap.audio_inputs = vec![board.clone()];
     assert_eq!(drift_line(&snap), None, "not program audio");
@@ -717,14 +718,26 @@ fn the_program_inputs_drift_correction_is_shown() {
     );
     snap.audio_inputs[0].drift_resets = 1;
     assert!(drift_line(&snap).unwrap().ends_with(" · 1 reset"));
+    snap.audio_inputs[0].drift_steps = 1;
+    assert!(
+        drift_line(&snap)
+            .unwrap()
+            .ends_with(" · 1 reset · 1 step made up")
+    );
     snap.audio_inputs[0] = ac_engine::AudioInputView {
         correction_ppm: 0.0,
         drift_resets: 3,
+        drift_steps: 2,
         ..board
     };
     snap.audio_inputs[0].program = true;
     assert_eq!(
         drift_line(&snap).as_deref(),
-        Some("Soundboard drift correction 0.0 ppm · 3 resets")
+        Some("Soundboard drift correction 0.0 ppm · 3 resets · 2 steps made up")
+    );
+    snap.audio_inputs[0].drift_resets = 0;
+    assert_eq!(
+        drift_line(&snap).as_deref(),
+        Some("Soundboard drift correction 0.0 ppm · 2 steps made up")
     );
 }

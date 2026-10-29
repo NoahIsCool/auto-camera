@@ -31,11 +31,12 @@
 //! measuring again from zero and counts the reset. A smaller step (audio
 //! a full ring dropped, a short loss) is made up by the corrector as soon
 //! as its block comes: that much silence ahead of the block, or for a step
-//! back that much cut. A loss close to the slack can run the pacer out of
-//! slack too; then the pacer's silence comes first, and the corrector's
-//! comes after it as late audio, which the pacer cuts against the silence
-//! it owes, so the gap is made up once either way. A stall whose audio
-//! arrives late keeps its PTS and is not a step.
+//! back that much cut, and counted ([`InputDrift::steps`]). A loss close
+//! to the slack can run the pacer out of slack too; then the pacer's
+//! silence comes first, and the corrector's comes after it as late audio,
+//! which the pacer cuts against the silence it owes, so the gap is made up
+//! once either way. A stall whose audio arrives late keeps its PTS and is
+//! not a step.
 //!
 //! A change of format (a reconnection at another rate) starts a new
 //! corrector, counted as a reset too; the few frames the old one held back
@@ -79,6 +80,8 @@ pub(crate) struct InputDrift {
     corrector: Option<DriftCorrector>,
     /// Resets of correctors a format change replaced, and those changes.
     earlier_resets: u64,
+    /// Steps made up by correctors a format change replaced.
+    earlier_steps: u64,
 }
 
 impl InputDrift {
@@ -88,7 +91,9 @@ impl InputDrift {
         let format = (block.sample_rate, block.channels);
         if self.corrector.as_ref().map(DriftCorrector::format) != Some(format) {
             if let Some(old) = self.corrector.take() {
-                self.earlier_resets += old.stats().resets + 1;
+                let stats = old.stats();
+                self.earlier_resets += stats.resets + 1;
+                self.earlier_steps += stats.steps;
             }
             self.corrector =
                 DriftCorrector::new(block.sample_rate, block.channels, settings()).ok();
@@ -128,6 +133,11 @@ impl InputDrift {
     /// Breaks and format changes that restarted the measurement.
     pub(crate) fn resets(&self) -> u64 {
         self.earlier_resets + self.corrector.as_ref().map_or(0, |c| c.stats().resets)
+    }
+
+    /// Steps in the PTS made up with silence or a cut.
+    pub(crate) fn steps(&self) -> u64 {
+        self.earlier_steps + self.corrector.as_ref().map_or(0, |c| c.stats().steps)
     }
 }
 

@@ -552,19 +552,26 @@ pub fn destinations(output: &OutputView) -> String {
 }
 
 /// The drift correction of program audio from an audio input, for the
-/// output panel: "Soundboard drift correction -37.3 ppm · 1 reset" (below
-/// zero for a board whose clock runs fast; 0.0 while its blocks pass as
-/// they are). `None` while program audio is not an audio input's.
+/// output panel: "Soundboard drift correction -37.3 ppm · 1 reset · 2 steps
+/// made up" (below zero for a board whose clock runs fast; 0.0 while its
+/// blocks pass as they are; steps are the silence put in, or audio cut, for
+/// a step in its timestamps). `None` while program audio is not an audio
+/// input's.
 pub fn drift_line(snap: &EngineSnapshot) -> Option<String> {
     let input = snap.audio_inputs.iter().find(|a| a.program)?;
     let mut line = format!(
         "{} drift correction {:.1} ppm",
         input.name, input.correction_ppm
     );
-    match input.drift_resets {
-        0 => {}
-        1 => line.push_str(" · 1 reset"),
-        n => line.push_str(&format!(" · {n} resets")),
+    for (n, one, many) in [
+        (input.drift_resets, "reset", "resets"),
+        (input.drift_steps, "step made up", "steps made up"),
+    ] {
+        match n {
+            0 => {}
+            1 => line.push_str(&format!(" · 1 {one}")),
+            n => line.push_str(&format!(" · {n} {many}")),
+        }
     }
     Some(line)
 }
