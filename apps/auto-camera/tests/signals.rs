@@ -1,8 +1,9 @@
 //! A termination signal shuts the app down cleanly: the built binary, run
 //! headless on the demo studio (synthetic, no camera, model or network),
 //! gets `SIGINT` or `SIGTERM` and must exit with status 130 after printing
-//! its summary, which says it was interrupted. Unix only: the signals are
-//! sent with `kill`.
+//! its summary, which says it was interrupted, and its log (in a
+//! temporary folder) says so too. Unix only: the signals are sent with
+//! `kill`.
 
 #![cfg(unix)]
 
@@ -35,8 +36,20 @@ fn wait(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> 
 /// Runs a 30 s headless demo, sends `signal` after it has started, and
 /// checks the exit status and summary.
 fn interrupted_by(signal: &str) {
+    let logs = std::env::temp_dir().join(format!(
+        "auto-camera-signals-{}{signal}",
+        std::process::id()
+    ));
     let mut child = Command::new(APP)
-        .args(["--config", DEMO, "--headless", "--seconds", "30"])
+        .args([
+            "--config",
+            DEMO,
+            "--headless",
+            "--seconds",
+            "30",
+            "--log-dir",
+        ])
+        .arg(&logs)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -74,6 +87,12 @@ fn interrupted_by(signal: &str) {
         "{signal}: {summary}"
     );
     assert!(log.contains("termination signal, shutting down"), "{log}");
+    let file = std::fs::read_to_string(logs.join("auto-camera.log")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&logs);
+    assert!(
+        file.contains("headless run failed: interrupted by a termination signal"),
+        "{signal}: {file}"
+    );
 }
 
 #[test]

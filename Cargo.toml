@@ -25,6 +25,10 @@ ac-sources = { path = "crates/ac-sources" }
 ac-sidecar = { path = "crates/ac-sidecar" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+# Logging in the adapter crates and the app only; the core crates stay
+# free of it (apps/auto-camera/tests/core_purity.rs checks). No spans or
+# attribute macros are used, so the default features are off.
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 missing_docs = "deny"
@@ -42,6 +46,11 @@ missing_docs_in_private_items = "warn"
 opt-level = 3
 
 [profile.dev.package.ac-compositor]
+opt-level = 3
+
+# The app hashes model files (hundreds of MB) for its log on a background
+# thread; unoptimized SHA-256 would keep a core busy for minutes.
+[profile.dev.package.hmac-sha256]
 opt-level = 3
 
 # The sidecar host downscales every frame it sends with a box filter.

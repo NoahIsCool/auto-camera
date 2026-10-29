@@ -49,7 +49,8 @@
 //! is held across I/O. [`Engine::shutdown`] (or dropping the [`Engine`])
 //! sends [`EngineCommand::Shutdown`]; the engine thread then stops the
 //! sidecar (interrupting a pass or a load in progress, so the workers end
-//! at once; see [`crate::detectors`]), stops and joins the workers,
+//! at once; see [`crate::detectors`]; its final status stays readable for
+//! the final snapshot), stops and joins the workers,
 //! finishes the encoder (the recording is finalized), stops every source,
 //! publishes a final snapshot with `running == false` and exits, and
 //! `shutdown` joins it. No thread or child process outlives the engine.
@@ -297,14 +298,16 @@ impl Engine {
             .as_ref()
             .and_then(|id| config.sources.iter().position(|s| &s.id == id));
         let snapshots = Arc::new(Latest::new());
-        let initial = Arc::new(core.snapshot(
+        let mut first = core.snapshot(
             OutputView::default(),
             TimingView {
                 budget_ms: config.frame_period().as_secs_f64() * 1e3,
                 ..TimingView::default()
             },
             true,
-        ));
+        );
+        first.sidecar = sidecar.as_ref().map(|s| s.status());
+        let initial = Arc::new(first);
         snapshots.publish(initial.clone());
         let (tx, commands) = channel();
         let runtime = Runtime {

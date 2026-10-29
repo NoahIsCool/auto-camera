@@ -189,14 +189,14 @@ window's monitors show program, and for the whole of a headless run, from
 before the detector loads until the recording is final. `caffeinate` is a
 supervised child like ffmpeg: it is killed and reaped when the session or
 run ends, and `-w` ends it if the app dies. Other platforms have no
-`caffeinate`; the app says so on stderr and runs on, as it does when
-`caffeinate` cannot start or ends early (the window when an output session
-turns out not to be held, a headless run at its start or its end). The
-engine's output view (`keep_awake`) says whether a live session is held,
-by the engine's own `caffeinate` or by the headless run's, and if not,
-why. This does not stop App Nap from throttling a minimized window: that
-takes `LSAppNapIsDisabled` in an app bundle's `Info.plist`, and the
-repository builds no bundle yet.
+`caffeinate`; the app says so on stderr and in its log and runs on, as it
+does when `caffeinate` cannot start or ends early (the window when an
+output session turns out not to be held, a headless run at its start or
+its end). The engine's output view (`keep_awake`) says whether a live
+session is held, by the engine's own `caffeinate` or by the headless
+run's, and if not, why. This does not stop App Nap from throttling a
+minimized window: that takes `LSAppNapIsDisabled` in an app bundle's
+`Info.plist`, and the repository builds no bundle yet.
 
 ## Readiness check
 
@@ -237,6 +237,35 @@ Checking config/sam3-sidecar.example.toml
 The exit status is 0 when nothing was found that would stop the studio
 (warnings allowed) and 2 otherwise. Whether a model file holds the right
 weights (a hash check) is not part of it yet.
+
+## Logs and crash reports
+
+Every run, in the window or headless (not `--check`, which starts
+nothing), appends to a log in a per-user folder:
+`~/Library/Logs/auto-camera` on macOS, `$XDG_STATE_HOME/auto-camera`
+(else `~/.local/state/auto-camera`) on Linux; `--log-dir PATH` picks
+another. The current file is `auto-camera.log`; at 8 MiB it moves to
+`auto-camera.1.log` and the four newest old files are kept. A second app
+running at the same time (the window beside a headless rehearsal) writes
+`auto-camera-2.log` instead, and so on up to four. One line per event, in
+UTC: the app's version and commit, the config's SHA-256 and the model
+files (path, size and time at once, their SHA-256 from a background
+thread, so a start never waits for gigabytes of weights), which lines
+start every file again after a rotation, then what the studio did
+(sources starting, going offline and stopping, with the reason, detectors
+ready or failing, program changes, the output's lifecycle and the
+stream's connection), every line ffmpeg and the detector sidecar print on
+stderr (stream key redacted; a source decoder's repeats of one complaint
+are written at most once a minute, with a count), the sidecar's starts,
+losses and restarts, and the warnings and errors the app prints on stderr
+(the config's warnings, a system not kept awake while live, a termination
+signal, an engine that failed or did not shut down cleanly). A panic
+writes `crash-<time>-<pid>-<n>.txt` next to the log, with the panic, its
+backtrace and a summary of the studio's newest state, and prints its path;
+each start keeps the 20 newest reports. Nothing is sent anywhere. A
+headless summary also reports the detector sidecar, when the studio has
+one (`sidecar`: `state`, `pid`, `model`, `spawns`, `restarts`,
+`failures` and the other host counters).
 
 ## Studio configuration
 

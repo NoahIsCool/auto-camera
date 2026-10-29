@@ -54,6 +54,7 @@ pub fn run(
     quit: QuitSignal,
 ) -> Result<(), String> {
     let engine = Engine::start_with(config.clone(), options).map_err(|e| e.to_string())?;
+    let _watch = crate::logs::watch(engine.handle());
     let warnings = warnings.to_vec();
     let title = match config.sources.as_slice() {
         [one] => format!("Auto Camera · {}", one.display_name()),

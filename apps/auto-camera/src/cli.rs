@@ -6,6 +6,10 @@
 //! auto-camera [--config PATH] --check                           # readiness check
 //! ```
 //!
+//! The window and headless runs take `--log-dir PATH`, the folder for the
+//! log and crash reports (the per-user log folder when absent; see the
+//! `logs` module).
+//!
 //! The headless options are only accepted together with `--headless`, so a
 //! typo cannot silently open a window that records nothing, and `--check`
 //! is accepted only on its own, since it starts nothing. `--trace` works in
@@ -57,8 +61,16 @@ pub struct Cli {
     /// Check the studio without starting it: list the problems with the
     /// config and the files, tools and folders it names, then exit 0 when
     /// there is none and 2 otherwise.
-    #[arg(long, conflicts_with_all = ["headless", "seconds", "record", "trace"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["headless", "seconds", "record", "trace", "log_dir"]
+    )]
     pub check: bool,
+    /// Folder for the log and crash reports [default:
+    /// ~/Library/Logs/auto-camera on macOS, $XDG_STATE_HOME/auto-camera or
+    /// ~/.local/state/auto-camera on Linux].
+    #[arg(long, value_name = "PATH")]
+    pub log_dir: Option<PathBuf>,
 }
 
 /// Parses a positive, finite number of seconds up to one day.
@@ -91,6 +103,7 @@ mod tests {
         assert!(!cli.check);
         assert_eq!(cli.record, None);
         assert_eq!(cli.trace, None);
+        assert_eq!(cli.log_dir, None);
     }
 
     #[test]
@@ -115,9 +128,20 @@ mod tests {
     }
 
     #[test]
-    fn check_takes_no_trace() {
+    fn check_takes_no_trace_or_log() {
         // A check starts no engine, so there is no trace to write.
         assert!(parse(&["--check", "--trace", "t.jsonl"]).is_err());
+        // Nor does it keep a log.
+        assert!(parse(&["--check", "--log-dir", "logs"]).is_err());
+    }
+
+    #[test]
+    fn both_modes_take_a_log_folder() {
+        let window = parse(&["--log-dir", "/tmp/logs"]).unwrap();
+        assert_eq!(window.log_dir, Some(PathBuf::from("/tmp/logs")));
+        let headless = parse(&["--headless", "--log-dir", "logs"]).unwrap();
+        assert_eq!(headless.log_dir, Some(PathBuf::from("logs")));
+        assert!(parse(&["--log-dir"]).is_err(), "the folder is required");
     }
 
     #[test]

@@ -150,6 +150,7 @@ impl EngineCore {
             render_issues: self.render_issues.clone(),
             program_changes: self.program_changes,
             shared_detector: self.shared_detector,
+            sidecar: None,
         }
     }
 }

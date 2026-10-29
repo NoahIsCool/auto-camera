@@ -88,6 +88,7 @@ use ac_output::AwakeMode;
 
 mod flags;
 mod report;
+mod sidecar;
 mod summary;
 
 pub use flags::HeadlessOptions;
@@ -160,6 +161,7 @@ pub fn run_with(
             return failed_to_start(path, options, started, error);
         }
     };
+    let _watch = crate::logs::watch(engine.handle());
     let mut sampler = Sampler::default();
     let error = drive(&engine, options, limit, &mut sampler, quit).err();
     let (ticks, threads_joined, final_snapshot, error) = match engine.shutdown() {
