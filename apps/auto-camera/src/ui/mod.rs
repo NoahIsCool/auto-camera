@@ -8,20 +8,28 @@
 //!
 //! The code is split so that everything but the drawing is testable
 //! without a window: [`layout`] (tile grid and monitor geometry), [`keys`]
-//! (shortcut mapping), [`text`] (labels), [`textures`] (upload decisions)
-//! and the forms ([`query_form`], which reads prompts the way the engine
-//! will, and the output form in [`panels`]). The drawing modules also
-//! render in tests through a headless `egui::Context`.
+//! (shortcut mapping), [`text`] (labels), [`textures`] (upload decisions),
+//! [`close_guard`] (asking before a live output is closed or stopped),
+//! [`notices`] (what the status bar's notice says, and for how long) and
+//! the forms ([`query_form`], which reads prompts the way the engine will,
+//! and the output form in [`panels`]). [`console`] draws a whole frame from
+//! a snapshot and returns commands, apart from the engine that
+//! [`app`] owns, so the window itself is tested headless: egui's test
+//! harness (`egui_kittest`, without a renderer) presses keys and clicks
+//! widgets found through the AccessKit tree, with no GPU or display.
 //!
 //! eframe runs with the OpenGL (glow) renderer and, on Linux, X11 (Wayland
 //! sessions use XWayland); both load their system libraries at run time.
 
 mod app;
+mod close_guard;
+mod console;
 #[cfg(test)]
 mod fixtures;
 mod keys;
 mod layout;
 mod multiview;
+mod notices;
 mod panels;
 mod query_form;
 mod switching;
