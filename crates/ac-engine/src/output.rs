@@ -30,19 +30,26 @@
 //! frames ([`ProgramEncoder::repeat_frames`]) and counted in the frame
 //! count, so the encoded timeline stays on the master clock. Program audio,
 //! when configured, is paced against that frame count by an [`AudioPacer`].
+//!
+//! The controller's methods are split by their part in a session: the state
+//! machine above (start, stop, poll) here, pushing the program and reading
+//! the view in `tick`, and finishing encoders (in the background, at
+//! shutdown and on drop) in `finish`.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use ac_media::{AudioBlock, VideoFrame};
 use ac_output::{AudioFormat, EncoderStats, OutputError, ProgramEncoder};
 
-use crate::audio::{AudioPacer, PacedAudio};
+use crate::audio::AudioPacer;
 use crate::command::{CommandError, CommandReply};
 use crate::config::OutputSettings;
-use crate::snapshot::{OutputState, OutputView};
+use crate::snapshot::OutputState;
+
+mod finish;
+mod tick;
 
 /// Audio may lag video by this much before silence is inserted.
 const AUDIO_SLACK: Duration = Duration::from_millis(100);
@@ -220,32 +227,6 @@ impl OutputController {
         }
     }
 
-    /// Moves the encoder to a helper thread that finishes it.
-    fn finish_in_background(&mut self) {
-        let Some(encoder) = self.encoder.take() else {
-            return;
-        };
-        let tx = self.sender.clone();
-        let session = self.session;
-        let spawned = std::thread::Builder::new()
-            .name("ac-output-finish".into())
-            .spawn(move || {
-                let before = Box::new(encoder.stats());
-                let result = encoder.finish();
-                let _ = tx.send(Event::Finished {
-                    session,
-                    result,
-                    before,
-                });
-            });
-        match spawned {
-            Ok(h) => self.helpers.push(h),
-            // Could not spawn: the encoder was moved into the failed closure
-            // and dropped with it, which kills and reaps ffmpeg.
-            Err(e) => self.state = OutputState::Failed(format!("cannot finish output: {e}")),
-        }
-    }
-
     /// Collects helper results and notices a dead ffmpeg.
     pub fn poll(&mut self) {
         while let Ok(event) = self.events.try_recv() {
@@ -306,94 +287,6 @@ impl OutputController {
             }
         }
         self.helpers.retain(|h| !h.is_finished());
-    }
-
-    /// Pushes one program frame and the program audio drained this tick.
-    /// `skipped` ticks were skipped just before this one; the encoder is
-    /// owed a repeated frame for each, and they count as pushed, so the
-    /// encoded timeline and the audio target stay on the master clock.
-    pub fn push(&mut self, frame: &VideoFrame, audio: Vec<AudioBlock>, skipped: u64) {
-        let Some(encoder) = &self.encoder else {
-            return;
-        };
-        self.frames_pushed += encoder.repeat_frames(skipped);
-        if encoder.push_frame(frame).is_ok() {
-            self.frames_pushed += 1;
-        }
-        let Some(pacer) = &mut self.pacer else {
-            return;
-        };
-        for item in pacer.plan(self.frames_pushed, audio) {
-            let _ = match item {
-                PacedAudio::Block(block) => encoder.push_audio_block(&block),
-                PacedAudio::Silence(frames) => {
-                    let channels = encoder.config().audio.map_or(2, |a| a.channels);
-                    let n = usize::try_from(frames).unwrap_or(0) * usize::from(channels);
-                    encoder.push_audio(&vec![0.0; n])
-                }
-            };
-        }
-    }
-
-    /// The output as published in snapshots.
-    pub fn view(&self) -> OutputView {
-        OutputView {
-            state: self.state.clone(),
-            rtmp_url: self.rtmp_url.as_deref().map(ac_output::config::redact_url),
-            record_path: self.record_path.clone(),
-            stats: self
-                .encoder
-                .as_ref()
-                .map(ProgramEncoder::stats)
-                .or_else(|| self.last_stats.clone()),
-            audio: self.pacer.as_ref().map(AudioPacer::stats),
-            frames_pushed: self.frames_pushed,
-        }
-    }
-
-    /// Finishes a running encoder synchronously and joins every helper.
-    /// Returns the number of helper threads joined.
-    pub fn shutdown(&mut self) -> usize {
-        if let Some(encoder) = self.encoder.take() {
-            let before = Box::new(encoder.stats());
-            let result = encoder.finish();
-            let _ = self.sender.send(Event::Finished {
-                session: self.session,
-                result,
-                before,
-            });
-            if self.state == OutputState::Running {
-                self.state = OutputState::Stopping;
-            }
-        }
-        let mut joined = 0;
-        for h in self.helpers.drain(..) {
-            let _ = h.join();
-            joined += 1;
-        }
-        // A start that completed during shutdown leaves an encoder to finish.
-        self.poll();
-        if let Some(encoder) = self.encoder.take() {
-            let before = Box::new(encoder.stats());
-            let result = encoder.finish();
-            let _ = self.sender.send(Event::Finished {
-                session: self.session,
-                result,
-                before,
-            });
-            self.poll();
-        }
-        for h in self.helpers.drain(..) {
-            let _ = h.join();
-            joined += 1;
-        }
-        joined
-    }
-}
-
-impl Drop for OutputController {
-    fn drop(&mut self) {
-        self.shutdown();
     }
 }
 

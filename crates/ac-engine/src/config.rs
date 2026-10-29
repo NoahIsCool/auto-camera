@@ -41,31 +41,87 @@
 //! (`sources[].path`, detector model paths and the path-like elements of a
 //! sidecar's `command`) are resolved against the directory of the config
 //! file.
+//!
+//! # Layout
+//!
+//! Each table has a private module holding its type, its defaults and its
+//! own checks (`lexicon`, whose type is `ac_core`'s, is applied here), and
+//! every type is re-exported here, so callers name
+//! `crate::config::OutputSettings` whatever file it lives in:
+//!
+//! | Table | Type | Module |
+//! |---|---|---|
+//! | `sources` | [`SourceEntry`] | `sources` |
+//! | `queries` | [`QuerySettings`], [`PresetSpec`] | `queries` |
+//! | `lexicon` | [`Lexicon`], applied by [`StudioConfig::prompt_lexicon`] | here |
+//! | `detector` | [`DetectorSettings`], [`SidecarSettings`] | `detector`, `sidecar` |
+//! | `discovery` | [`DiscoverySettings`] | `discovery` |
+//! | `tracker`, `framing` | partial tables over `ac_vision` and `ac_framing` | `partial` |
+//! | `subjects` | [`SubjectSettings`] | `subjects` |
+//! | `director` | [`DirectorSettings`] | `director` |
+//! | `switcher` | [`SwitcherSettings`] | `switcher` |
+//! | `output` | [`OutputSettings`], [`EncoderSetting`] | `output` |
+//! | `monitors` | [`MonitorSettings`] | `monitors` |
+//!
+//! This module keeps the root table, [`StudioConfig`]: loading, path
+//! resolution and [`StudioConfig::validate`], which runs every table's check
+//! and the checks that span tables (a synthetic detector needs synthetic
+//! sources, the sidecar's request deadline must be below
+//! `discovery.timeout_s`, `output.audio_source` must name a source). It
+//! also keeps the helpers used beyond one table: [`valid_id`] for every id
+//! and [`preset_for`] for bare shot sizes and the engine's default presets.
+//!
+//! The flat tables (`discovery`, `subjects`, `director`, `switcher`,
+//! `output` and `monitors`) have a default for every key
+//! (`#[serde(default)]`), and every table rejects unknown keys, so a typo in
+//! a config file is an error rather than a silently ignored setting.
+//! Durations are written as seconds (`*_s` keys) and converted, with range
+//! checks, when the engine builds its components.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ac_core::{Lexicon, Preset, Query, QueryId, ShotSize, SourceId};
+use ac_core::{Lexicon, Preset, Query, ShotSize};
 use ac_director::DirectorConfig;
 use ac_framing::FramerConfig;
 use ac_sources::SourceConfig;
 use ac_subjects::StoreConfig;
 use ac_vision::TemplateTrackerConfig;
-use serde::de::{DeserializeOwned, Error as _};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::queries::PromptReader;
 
-mod settings;
+mod detector;
+mod director;
+mod discovery;
+mod monitors;
+mod output;
+mod partial;
+mod queries;
 mod sidecar;
+mod sources;
+mod subjects;
+mod switcher;
 
-pub use settings::{
-    DetectorSettings, DirectorSettings, DiscoverySettings, EncoderSetting, MonitorSettings,
-    OutputSettings, SubjectSettings, SwitcherSettings,
-};
+pub use detector::DetectorSettings;
+pub use director::DirectorSettings;
+pub use discovery::DiscoverySettings;
+pub use monitors::MonitorSettings;
+pub use output::{EncoderSetting, OutputSettings};
+pub use queries::{PresetSpec, QuerySettings, slug, validate_query};
 pub use sidecar::SidecarSettings;
+pub use sources::SourceEntry;
+pub use subjects::SubjectSettings;
+pub use switcher::SwitcherSettings;
+
+use partial::{partial, validate_framing};
+
+// The tests (`config/tests.rs`) name `QueryId` through `use super::*`; it
+// was in scope here before the `queries` table moved to its own module.
+#[cfg(test)]
+use ac_core::QueryId;
 
 /// Errors from loading or validating a [`StudioConfig`].
 #[derive(Debug, Error)]
@@ -91,51 +147,6 @@ pub enum ConfigError {
     Invalid(String),
 }
 
-/// One video source.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SourceEntry {
-    /// Stable identifier, used in shot ids; letters, digits, `-` and `_`.
-    pub id: String,
-    /// Operator-facing name (defaults to the id).
-    #[serde(default)]
-    pub name: Option<String>,
-    /// How to open it (`kind = "file"` or `"synthetic"`).
-    #[serde(flatten)]
-    pub input: SourceConfig,
-}
-
-impl SourceEntry {
-    /// The source id.
-    pub fn source_id(&self) -> SourceId {
-        SourceId(self.id.clone())
-    }
-
-    /// The operator-facing name.
-    pub fn display_name(&self) -> &str {
-        self.name.as_deref().unwrap_or(&self.id)
-    }
-}
-
-/// A preset given either as a bare shot size or in full.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum PresetSpec {
-    /// A shot size with the standard headroom and zoom limit.
-    Size(ShotSize),
-    /// A fully specified preset.
-    Full(Preset),
-}
-
-impl PresetSpec {
-    /// The preset this spec describes.
-    pub fn to_preset(&self) -> Preset {
-        match self {
-            PresetSpec::Size(size) => preset_for(*size),
-            PresetSpec::Full(p) => p.clone(),
-        }
-    }
-}
-
 /// The standard preset for `size`, with a snake-case id and a title-case name.
 pub fn preset_for(size: ShotSize) -> Preset {
     let (id, name) = match size {
@@ -146,113 +157,6 @@ pub fn preset_for(size: ShotSize) -> Preset {
         ShotSize::Close => ("close", "Close"),
     };
     Preset::new(id, name, size)
-}
-
-/// A text prompt and the framings applied to every subject it matches.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct QuerySettings {
-    /// Stable identifier (defaults to a slug of the name).
-    #[serde(default)]
-    pub id: Option<String>,
-    /// Operator-facing name, such as "Pastor".
-    pub name: String,
-    /// The operator's prompt, such as "speaker upper body": shot words pick
-    /// framings, role words are rewritten for the detector (see
-    /// [`crate::queries`]).
-    pub prompt: String,
-    /// Framing presets. When given they always win over the prompt's shot
-    /// words; when absent the shot words decide, and without shot words the
-    /// default is medium and close.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presets: Option<Vec<PresetSpec>>,
-    /// Send the prompt to the detector exactly as typed, without reading
-    /// shot or role words (for experiments).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub literal: bool,
-}
-
-impl QuerySettings {
-    /// A query named `name` for `prompt`, with no explicit presets.
-    pub fn new(name: &str, prompt: &str) -> Self {
-        Self {
-            id: None,
-            name: name.into(),
-            prompt: prompt.into(),
-            presets: None,
-            literal: false,
-        }
-    }
-
-    /// The query id: the explicit id or a slug of the name.
-    pub fn query_id(&self) -> QueryId {
-        QueryId(self.id.clone().unwrap_or_else(|| slug(&self.name)))
-    }
-
-    /// The explicit presets, if any.
-    pub fn explicit_presets(&self) -> Option<Vec<Preset>> {
-        self.presets
-            .as_ref()
-            .map(|specs| specs.iter().map(PresetSpec::to_preset).collect())
-    }
-
-    /// The query, its prompt read with `reader`; see [`crate::queries`].
-    pub fn build(&self, reader: &PromptReader) -> Result<Query, String> {
-        crate::queries::build_query(
-            self.query_id(),
-            &self.name,
-            &self.prompt,
-            self.explicit_presets(),
-            self.literal,
-            reader,
-        )
-    }
-}
-
-/// Lower-case `text` with runs of anything but letters and digits replaced by
-/// one `-`; `"query"` when nothing is left.
-pub fn slug(text: &str) -> String {
-    let mut out = String::new();
-    for c in text.chars().flat_map(char::to_lowercase) {
-        if c.is_ascii_alphanumeric() {
-            out.push(c);
-        } else if !out.is_empty() && !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    if out.is_empty() { "query".into() } else { out }
-}
-
-/// Deserializes a partial table onto `T::default()`, rejecting unknown keys.
-fn partial<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Serialize + DeserializeOwned + Default,
-{
-    let patch = serde_json::Value::deserialize(deserializer)?;
-    merge_onto_default(patch).map_err(D::Error::custom)
-}
-
-/// Overlays the keys of `patch` on the serialized default of `T`.
-fn merge_onto_default<T>(patch: serde_json::Value) -> Result<T, String>
-where
-    T: Serialize + DeserializeOwned + Default,
-{
-    let mut base = serde_json::to_value(T::default()).map_err(|e| e.to_string())?;
-    let (serde_json::Value::Object(fields), serde_json::Value::Object(patch)) = (&mut base, patch)
-    else {
-        return Err("expected a table".into());
-    };
-    for (key, value) in patch {
-        if !fields.contains_key(&key) {
-            return Err(format!("unknown field `{key}`"));
-        }
-        fields.insert(key, value);
-    }
-    serde_json::from_value(base).map_err(|e| e.to_string())
 }
 
 /// Everything needed to start an engine; see the module docs.
@@ -516,67 +420,6 @@ pub fn valid_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-/// Checks a query's name, prompt and presets (shared with `AddQuery`).
-pub fn validate_query(name: &str, prompt: &str, presets: &[Preset]) -> Result<(), String> {
-    if name.trim().is_empty() {
-        return Err("query name must not be empty".into());
-    }
-    if prompt.trim().is_empty() {
-        return Err(format!("query {name:?}: prompt must not be empty"));
-    }
-    if presets.is_empty() {
-        return Err(format!("query {name:?}: at least one preset is required"));
-    }
-    let mut seen = HashSet::new();
-    for p in presets {
-        if !valid_id(&p.id) {
-            return Err(format!("query {name:?}: preset id {:?} is invalid", p.id));
-        }
-        if !seen.insert(p.id.as_str()) {
-            return Err(format!("query {name:?}: duplicate preset {:?}", p.id));
-        }
-        if p.size == ShotSize::Wide {
-            return Err(format!(
-                "query {name:?}: preset {:?} is a wide; every source already has a wide shot",
-                p.id
-            ));
-        }
-        if !(0.0..=0.5).contains(&p.headroom) {
-            return Err(format!(
-                "query {name:?}: preset {:?} headroom must be in 0..=0.5",
-                p.id
-            ));
-        }
-        if !(1.0..=20.0).contains(&p.max_zoom) {
-            return Err(format!(
-                "query {name:?}: preset {:?} max_zoom must be in 1..=20",
-                p.id
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Checks that every framing parameter is a positive finite number.
-fn validate_framing(f: &FramerConfig) -> Result<(), String> {
-    let values = [
-        ("pan_half_life", f.pan_half_life),
-        ("zoom_half_life", f.zoom_half_life),
-        ("max_pan_speed", f.max_pan_speed),
-        ("max_zoom_speed", f.max_zoom_speed),
-        ("dead_zone_x", f.dead_zone_x),
-        ("dead_zone_y", f.dead_zone_y),
-        ("dead_zone_zoom", f.dead_zone_zoom),
-        ("head_half_life", f.head_half_life),
-    ];
-    for (name, v) in values {
-        if !(v.is_finite() && v > 0.0) {
-            return Err(format!("framing.{name} must be a positive number, got {v}"));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
