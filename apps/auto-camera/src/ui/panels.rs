@@ -7,7 +7,8 @@
 //! [`query_form`], and [`OutputForm`]), and the forms validate themselves
 //! into commands without a window, so the rules (a query needs a name, a
 //! prompt with something to frame and at least one framing; an output needs
-//! a destination) are tested directly.
+//! a destination) are tested directly. The output panel's Stop button goes
+//! through the [`CloseGuard`], which asks before a live output is stopped.
 
 use std::path::PathBuf;
 
@@ -16,6 +17,8 @@ use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::{EngineCommand, EngineSnapshot, OutputState, PromptReader};
 use eframe::egui::{self, Color32, RichText, Ui};
 
+use super::close_guard::{self, CloseGuard};
+use super::keys;
 use super::query_form::{self, QueryForm};
 use super::text::{
     Tone, destinations, dropped_line, encoder_lines, match_lines, output_state, percent,
@@ -194,8 +197,14 @@ pub fn queries(
     commands
 }
 
-/// The output panel: destinations, start/stop and encoder statistics.
-pub fn output(ui: &mut Ui, snap: &EngineSnapshot, form: &mut OutputForm) -> Vec<EngineCommand> {
+/// The output panel: destinations, start/stop and encoder statistics. Stop
+/// asks `guard` first while the output is live.
+pub fn output(
+    ui: &mut Ui,
+    snap: &EngineSnapshot,
+    form: &mut OutputForm,
+    guard: &mut CloseGuard,
+) -> Vec<EngineCommand> {
     let mut commands = Vec::new();
     let out = &snap.output;
     ui.heading("Output");
@@ -230,7 +239,7 @@ pub fn output(ui: &mut Ui, snap: &EngineSnapshot, form: &mut OutputForm) -> Vec<
             .add_enabled(out.state == OutputState::Running, egui::Button::new("Stop"))
             .clicked()
         {
-            commands.push(EngineCommand::StopOutput);
+            commands.extend(guard.stop_requested(close_guard::output_live(snap)));
         }
         let color = match out.state {
             OutputState::Running => Color32::from_rgb(230, 40, 40),
@@ -261,8 +270,9 @@ pub fn output(ui: &mut Ui, snap: &EngineSnapshot, form: &mut OutputForm) -> Vec<
     commands
 }
 
-/// The status bar: sources, tick timing, drops and the latest notice.
-pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, notice: Option<(&str, bool)>) {
+/// The status bar: sources, tick timing, drops, [`keys::PAUSED`] while the
+/// shortcuts are `paused`, and the latest notice.
+pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, paused: bool, notice: Option<(&str, bool)>) {
     ui.horizontal_wrapped(|ui| {
         for s in &snap.sources {
             let line = source_line(s, snap.media_time);
@@ -285,6 +295,11 @@ pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, notice: Option<(&str, bool
             ui.label(
                 RichText::new(format!("render: {}", snap.render_issues.join("; "))).color(AMBER),
             );
+        }
+        if paused {
+            ui.separator();
+            ui.label(RichText::new(keys::PAUSED).color(AMBER))
+                .on_hover_text(keys::PAUSED_HOVER);
         }
         if let Some((text, error)) = notice {
             ui.separator();
@@ -351,14 +366,15 @@ mod tests {
         snap.sources[0].discovery_enabled = true;
         let mut q = QueryForm::default();
         let mut o = OutputForm::default();
+        let mut guard = CloseGuard::default();
         let mut commands = Vec::new();
         let prompts = PromptReader::new(ac_core::Lexicon::builtin(), false);
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             commands.clear();
             commands.extend(director(ui, &snap));
             commands.extend(queries(ui, &snap, &mut q, &prompts));
-            commands.extend(output(ui, &snap, &mut o));
-            status_bar(ui, &snap, Some(("cut: no preview", true)));
+            commands.extend(output(ui, &snap, &mut o, &mut guard));
+            status_bar(ui, &snap, true, Some(("cut: no preview", true)));
         });
         assert!(commands.is_empty(), "{commands:?}");
     }

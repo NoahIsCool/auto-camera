@@ -8,36 +8,46 @@
 //!
 //! The code is split so that everything but the drawing is testable
 //! without a window: [`layout`] (tile grid and monitor geometry), [`keys`]
-//! (shortcut mapping), [`text`] (labels), [`textures`] (upload decisions)
-//! and the forms ([`query_form`], which reads prompts the way the engine
-//! will, and the output form in [`panels`]). The drawing modules also
-//! render in tests through a headless `egui::Context`.
+//! (shortcut mapping), [`text`] (labels), [`textures`] (upload decisions),
+//! [`close_guard`] (asking before a live output is closed or stopped),
+//! [`notices`] (what the status bar's notice says, and for how long) and
+//! the forms ([`query_form`], which reads prompts the way the engine will,
+//! and the output form in [`panels`]). [`console`] draws a whole frame from
+//! a snapshot and returns commands, apart from the engine that
+//! [`app`] owns, so the window itself is tested headless: egui's test
+//! harness (`egui_kittest`, without a renderer) presses keys and clicks
+//! widgets found through the AccessKit tree, with no GPU or display.
 //!
 //! eframe runs with the OpenGL (glow) renderer and, on Linux, X11 (Wayland
 //! sessions use XWayland); both load their system libraries at run time.
 
 mod app;
+mod close_guard;
+mod console;
 #[cfg(test)]
 mod fixtures;
 mod keys;
 mod layout;
 mod multiview;
+mod notices;
 mod panels;
 mod query_form;
 mod switching;
 mod text;
 mod textures;
 
-use ac_engine::{Engine, StudioConfig};
+use ac_engine::{Engine, EngineOptions, StudioConfig};
 use eframe::egui;
 
 use crate::signals::QuitSignal;
 use app::OperatorApp;
 
-/// Starts the engine from `config` and runs the window until it is closed,
-/// or until `quit` is requested (a termination signal), which closes it.
-pub fn run(config: StudioConfig, quit: QuitSignal) -> Result<(), String> {
-    let engine = Engine::start(config.clone()).map_err(|e| e.to_string())?;
+/// Starts the engine from `config` with `options` and runs the window until
+/// it is closed, or until `quit` is requested (a termination signal), which
+/// closes it. The engine has stopped when this returns, whether the window
+/// opened or not.
+pub fn run(config: StudioConfig, options: EngineOptions, quit: QuitSignal) -> Result<(), String> {
+    let engine = Engine::start_with(config.clone(), options).map_err(|e| e.to_string())?;
     let title = match config.sources.as_slice() {
         [one] => format!("Auto Camera · {}", one.display_name()),
         many => format!("Auto Camera · {} sources", many.len()),

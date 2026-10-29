@@ -51,19 +51,40 @@ source frame rates, tick timing and dropped frames.
 | Input | Action |
 |---|---|
 | click a tile | stage it on preview |
-| double-click a tile | stage it and cut it to program |
+| double-click a tile | cut it straight to program ("Cut now") |
 | right-click a subject tile | pin, hide or re-acquire the subject |
-| `1`–`9` | stage tile 1–9 on preview |
-| `Space` | cut |
-| `Enter` | auto transition |
+| `1`–`9` | stage tile 1–9 on preview (during a transition, for its end) |
+| `Space` | cut (during a transition, cut it short) |
+| `Enter` | auto transition (during one, queue a take of the shot staged meanwhile) |
+| `Esc` | leave a focused field or control, so the shortcuts work again |
 
-Shortcuts are ignored while a text field has focus and on key repeat.
+Shortcuts are paused while a field or control has the keyboard (a prompt or
+number being edited, or a control reached with `Tab`), and the status bar
+then says "shortcuts paused"; they are also ignored on key repeat and with
+Ctrl, Alt or Cmd held. While the output is starting or running, closing the
+window or clicking Stop asks first, so a stray click cannot end the show; a
+termination signal (Ctrl-C, `SIGTERM`) still quits without asking.
+
+A running transition does not block the controls. A shot staged during
+one waits for its end and then lands on preview (the preview caption says
+"next …"); Auto queues a take of it, which fires once, when the transition
+ends, if the shot is still available, and is otherwise dropped with a
+notice saying why. Cut cuts the transition short: the shot it brings in,
+which the preview monitor shows, lands on program at once, provided it is
+still available; a shot staged meanwhile then lands on preview, and a take
+queued of it is cancelled. A double click on a tile still puts that tile
+on air at once, ending the transition in the same step. The T-bar and the
+clock never share a transition: the T-bar cannot take over a running Auto,
+and while the T-bar holds a transition CUT is disabled, and `Space` and a
+double click on a tile are refused with a notice (the lever finishes or
+abandons it; the double click's first click still stages the tile for the
+end).
 
 ## Headless mode
 
 ```sh
 cargo run -p auto-camera -- --headless --seconds 5 --record /tmp/demo.mp4
-auto-camera [--config PATH] --headless [--seconds N] [--record PATH]
+auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
 ```
 
 A headless run starts the engine without a window, waits for the first
@@ -102,10 +123,38 @@ queries they answer:
 
 (abridged). Each query's `matches` is the prompt feedback of the window:
 what the newest applied detector pass of each source found for it, and on
-which frame. The exit status is 0 on success, 1 when the engine or the output
-failed or a source never delivered a picture during the run (`ok` is false
-and `error` says why), 2 for usage and configuration errors. Recordings
-are never overwritten: an existing `--record` path is an error.
+which frame. The exit status is 0 on success, 1 when the engine, the output
+or the trace failed or a source never delivered a picture during the run
+(`ok` is false and `error` says why), 2 for usage and configuration errors.
+Recordings are never overwritten: an existing `--record` path is an error.
+
+### Per-tick trace
+
+`--trace PATH` (headless or in the window) writes what the engine did on
+every tick as JSON Lines, one compact JSON object per tick, for scoring
+framing offline with `ac-eval` (spec V9: containment, framing error, jerk,
+latency):
+
+```sh
+cargo run -p auto-camera -- --headless --seconds 2 --trace /tmp/demo.jsonl
+```
+
+Each line has the tick number and its PTS (`tick`, `pts_ns`), whether it
+started late and how many ticks were skipped before it (`late`,
+`skipped`), each source's newest frame and its subjects with box and track
+state, each shot's `target` (the ideal crop for its subject's box, `null`
+while the subject is lost) and its `crop` (where the smoothing actually
+drew it), and the program, preview and running transition. The schema is
+`ac_eval::TraceRecord`; its docs show a full record. The line count equals
+the summary's `ticks`, which the summary's `trace` repeats (`records`, with
+`missing` for ticks a writer that fell over half a minute behind had to
+drop). The file must not exist, as for `--record`; a run whose engine does
+not start (a setup no retry mends, such as a detector sidecar whose program
+is missing) removes its empty trace, so the same command works once the
+cause is fixed. A source that cannot be opened does not stop the engine (it
+starts offline and is retried, see "Studio configuration"), so a run with a
+missing file ticks and, like every run that ticked, keeps its trace: move
+or remove it before running the same command again.
 
 ## Studio configuration
 
@@ -329,10 +378,10 @@ than for a show; choosing a model per query comes later.
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
 | `ac-framing` | Ideal crops (fill rule for objects, body cut lines for whole people, zoom-limit flags) and per-shot smoothing |
 | `ac-director` | Shot scoring, suggestions and opt-in auto-takes |
-| `ac-switcher` | Preview/program, cut/auto/T-bar transitions |
+| `ac-switcher` | Preview/program, cut/auto/T-bar transitions, the take queued during one |
 | `ac-compositor` | CPU program compositor |
 | `ac-output` | One ffmpeg encode to RTMP and fragmented MP4 |
-| `ac-eval` | Framing-quality metrics |
+| `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), framing-quality metrics, and the per-tick trace schema (`TraceRecord`) the engine emits and they score |
 | `ac-engine` | The runtime that wires them together (ADR 0002) |
 | `apps/auto-camera` | Operator window and headless runner |
 

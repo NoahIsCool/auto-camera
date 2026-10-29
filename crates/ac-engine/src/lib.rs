@@ -29,6 +29,9 @@
 //!   threads, channels and mailboxes.
 //! * [`StudioConfig`] describes a studio (sources, queries, detector,
 //!   output, director, framing) as TOML or JSON.
+//! * [`trace`] carries one record per tick (subjects, shot targets and
+//!   crops, program and preview) from the engine thread to a writer, such
+//!   as the app's `--trace` file, for scoring with `ac_eval`.
 //! * [`queries`] reads each query's prompt once, when it is created: the
 //!   detector is asked for the parsed phrase ("speaker upper body" asks for
 //!   "a person speaking"), and the prompt's shot words pick its framings
@@ -58,6 +61,7 @@ pub mod queries;
 pub mod runtime;
 pub mod schedule;
 pub mod snapshot;
+pub mod trace;
 pub mod vision;
 
 pub use catalog::{ShotStatus, subject_shot_id, wide_shot_id};
@@ -73,3 +77,4 @@ pub use snapshot::{
     DirectorView, EngineSnapshot, MatchView, OutputState, OutputView, PassOutcome, QueryView,
     ShotView, SourceView, SubjectView, SwitcherView, Tally, TimingView,
 };
+pub use trace::{TraceRecord, TraceSender};

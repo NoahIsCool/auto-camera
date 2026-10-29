@@ -1,6 +1,7 @@
 //! Headless runs on small synthetic studios (real time, about a second each).
 
 mod summary;
+mod trace;
 
 use super::report::round;
 use super::*;
@@ -43,7 +44,11 @@ fn studio() -> StudioConfig {
 
 /// Run options.
 fn options(seconds: f64, record: Option<PathBuf>) -> HeadlessOptions {
-    HeadlessOptions { seconds, record }
+    HeadlessOptions {
+        seconds,
+        record,
+        trace: None,
+    }
 }
 
 /// The snapshot of [`studio`] before its first tick, built by a real core:
@@ -69,7 +74,7 @@ fn first_snapshot(config: &StudioConfig) -> Arc<EngineSnapshot> {
 /// True when `tool -version` succeeds. When it does not and
 /// `AC_REQUIRE_FFMPEG` is set (CI), panics instead of letting the caller
 /// skip.
-fn have(tool: &str) -> bool {
+pub(crate) fn have(tool: &str) -> bool {
     let found = std::process::Command::new(tool)
         .arg("-version")
         .stdout(std::process::Stdio::null())
@@ -85,7 +90,7 @@ fn have(tool: &str) -> bool {
 }
 
 /// A fresh, unique path in the temp directory (not created).
-fn temp_path(name: &str) -> PathBuf {
+pub(crate) fn temp_path(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());

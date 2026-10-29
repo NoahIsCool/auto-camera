@@ -6,7 +6,8 @@
 //! [`WAIT_SLICE`] at a time. A tick applies the pending commands, feeds the
 //! core the newest frame of every source and the discovery results that
 //! arrived, hands the core's requests to the workers, pushes the program
-//! frame and audio to the output, and publishes a snapshot. The frame the
+//! frame and audio to the output, sends the tick's trace record (when the
+//! engine traces; [`crate::trace`]) and publishes a snapshot. The frame the
 //! tick read from the phase reference (the program audio source, else the
 //! first source) goes to the [`PhaseLock`], which delays the schedule when
 //! ticks collide with that source's frames (see [`crate::schedule`]).
@@ -94,6 +95,7 @@ impl Runtime {
             self.timer.record(started.elapsed());
             self.late += u64::from(late);
             self.skipped += skipped;
+            self.send_trace(late, skipped);
             self.publish(true);
         }
         self.shutdown()
@@ -185,6 +187,18 @@ impl Runtime {
         }
         self.output.push(&out.program, program_audio, skipped);
         reference
+    }
+
+    /// Sends the trace record of the tick just run, with the clock's word
+    /// on it: it started `late`, after `skipped` skipped ticks.
+    fn send_trace(&mut self, late: bool, skipped: u64) {
+        if !self.trace.is_on() {
+            return;
+        }
+        let mut record = self.core.trace_record();
+        record.late = late;
+        record.skipped = skipped;
+        self.trace.send(record);
     }
 
     /// Publishes the current snapshot and returns it.
