@@ -1,8 +1,8 @@
 //! Tests of drift correction in program audio, through the output's pacer:
 //! a board 100 ppm off the engine's clock kept in sync for three hours
-//! without silence or cuts, steps in its PTS taken for breaks and not for
-//! drift, and audio on the engine's clock (a file input, a camera's) passed
-//! on untouched.
+//! without silence or cuts, steps in its PTS taken for breaks or made up
+//! once and never taken for drift, and audio on the engine's clock (a file
+//! input, a camera's) passed on untouched.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -420,4 +420,32 @@ fn a_new_format_starts_a_new_measurement() {
     assert!(Arc::ptr_eq(&out.samples, &odd.samples));
     assert_eq!(drift.resets(), 2, "the 44.1 kHz epoch ended");
     assert_eq!(settings().discontinuity, AUDIO_SLACK);
+}
+
+#[test]
+fn audio_lost_up_to_the_slack_is_made_up_once() {
+    // A ring that overflowed loses 40, 90 or 100 ms of a board, drift-free
+    // or 100 ppm fast. The corrector fills a step that size with silence;
+    // close to 100 ms the pacer's slack can run out first, and it fills the
+    // gap too (then cuts the corrector's silence as late audio), or the
+    // step is a break, the pacer's alone. Either way the gap is made up
+    // once: the lead is back within the spec's bound at once, and the
+    // drift's correction is what it was.
+    for ppm in [0.0, 100.0] {
+        for lost in [40, 90, 100] {
+            let mut board = Board::new(ppm);
+            let from = Duration::from_secs(30);
+            board.lost = Some((from, from + Duration::from_millis(lost)));
+            let run = play(&mut board, 240, 31);
+            let what = format!("{ppm} ppm, {lost} ms lost: {:?}, {:?}", run.pacer, run.view);
+            assert!(
+                -SYNC_MS <= run.low && run.high <= SYNC_MS,
+                "{what}: lead from {} to {} ms",
+                run.low,
+                run.high
+            );
+            let cancels = -ppm / (1.0 + ppm * 1e-6);
+            assert!((run.view.correction_ppm - cancels).abs() < 1.0, "{what}");
+        }
+    }
 }

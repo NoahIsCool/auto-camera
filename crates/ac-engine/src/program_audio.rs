@@ -48,10 +48,12 @@
 //! PTS and resampled by that much, smoothly, before the pacer, so the pacer
 //! neither fills nor cuts for it ([`AudioInputView::correction_ppm`]).
 //! Blocks within the drift's dead band pass as they are, as a file input's
-//! on the engine's clock always do; a step in the PTS (a reconnection, lost
-//! audio) is a break, not drift ([`AudioInputView::drift_resets`]). A video
-//! source's embedded audio is never resampled, and drift of the video
-//! itself is not corrected.
+//! on the engine's clock always do. A step in the PTS is not drift: lost
+//! audio up to the pacer's slack is made up with silence as soon as the
+//! audio after it comes, and a larger step (a reconnection) is a break
+//! that restarts the measurement ([`AudioInputView::drift_resets`]). A
+//! video source's embedded audio is never resampled, and drift of the
+//! video itself is not corrected.
 //!
 //! # Ownership and threads
 //!
@@ -135,7 +137,7 @@ pub struct AudioInputView {
     /// rate: below zero while samples are taken out (its clock runs fast),
     /// zero while blocks pass through as they are.
     pub correction_ppm: f64,
-    /// Breaks in its PTS (reconnections, lost audio) and format changes
+    /// Breaks in its PTS (reconnections, long losses) and format changes
     /// that restarted the drift measurement.
     pub drift_resets: u64,
 }

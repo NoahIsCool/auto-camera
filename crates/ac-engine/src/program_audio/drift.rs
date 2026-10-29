@@ -21,15 +21,21 @@
 //! (video-side drift) and locking devices to a house clock (genlock) are
 //! not what this corrects.
 //!
-//! # Breaks and settings
+//! # Steps, breaks and settings
 //!
-//! The corrector takes a step in the PTS larger than the pacer's slack
-//! ([`AUDIO_SLACK`]) for a break, not drift: a reconnection (whose new
-//! connection is stamped from when it opened), a stall whose audio was
-//! lost. The pacer fills such a gap with silence; the corrector starts
-//! measuring again from zero and counts the reset. A smaller step, which
-//! the pacer leaves alone, is timing error the corrector takes up slowly.
-//! A stall whose audio arrives late keeps its PTS and is not a break.
+//! A step in the PTS is never taken for drift. One larger than the pacer's
+//! slack ([`AUDIO_SLACK`]) is a break: a reconnection (whose new
+//! connection is stamped from when it opened), a long stall whose audio
+//! was lost. The pacer's slack runs out before the audio after such a gap
+//! comes, so the pacer fills it with silence; the corrector starts
+//! measuring again from zero and counts the reset. A smaller step (audio
+//! a full ring dropped, a short loss) is made up by the corrector as soon
+//! as its block comes: that much silence ahead of the block, or for a step
+//! back that much cut. A loss close to the slack can run the pacer out of
+//! slack too; then the pacer's silence comes first, and the corrector's
+//! comes after it as late audio, which the pacer cuts against the silence
+//! it owes, so the gap is made up once either way. A stall whose audio
+//! arrives late keeps its PTS and is not a step.
 //!
 //! A change of format (a reconnection at another rate) starts a new
 //! corrector, counted as a reset too; the few frames the old one held back
@@ -41,10 +47,11 @@
 //!   (its samples shared, not copied), so a file input played on the
 //!   engine's clock, whose PTS count its samples and so measure no drift,
 //!   reaches the pacer bit for bit.
-//! * A block that was resampled keeps its source, sequence number, rate
-//!   and channels; its PTS moves back by the frames the resampler held
-//!   back (half a millisecond at 48 kHz). One that came out empty is not
-//!   passed on.
+//! * A block that was resampled, or had silence put ahead of it or its
+//!   start cut for a step, keeps its source, sequence number, rate and
+//!   channels; its PTS moves back by the frames the resampler held back
+//!   (half a millisecond at 48 kHz) and the silence, and on by the cut.
+//!   One that came out empty is not passed on.
 //! * Pure: blocks in, blocks out, time from PTS and sample counts only.
 
 use std::time::Duration;
@@ -55,7 +62,7 @@ use ac_media::AudioBlock;
 use crate::output::AUDIO_SLACK;
 
 /// The settings program audio's drift is corrected with: the defaults,
-/// with a break where the pacer would fill a gap; see the module docs.
+/// with a break where the pacer surely fills a gap; see the module docs.
 pub(crate) fn settings() -> DriftSettings {
     DriftSettings {
         discontinuity: AUDIO_SLACK,
@@ -94,9 +101,14 @@ impl InputDrift {
             Corrected::Unchanged => Some(block),
             Corrected::Resampled(r) if r.samples.is_empty() => None,
             Corrected::Resampled(r) => {
-                let back = Duration::from_secs_f64(r.behind / f64::from(block.sample_rate));
+                let by = Duration::from_secs_f64(r.behind.abs() / f64::from(block.sample_rate));
+                let pts = if r.behind >= 0.0 {
+                    block.pts.saturating_sub(by)
+                } else {
+                    block.pts.saturating_add(by)
+                };
                 Some(AudioBlock {
-                    pts: block.pts.saturating_sub(back),
+                    pts,
                     samples: r.samples.into(),
                     ..block
                 })

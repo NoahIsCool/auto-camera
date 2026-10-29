@@ -497,16 +497,20 @@ timestamps against their sample counts and resamples the input by that
 much, before the pacing above, with a band-limited (windowed-sinc)
 resampler whose ratio changes smoothly, up to 1000 ppm. In simulation a
 board 100 ppm off stays within 20 ms of the video for three hours with no
-silence inserted and nothing cut. What is not corrected: blocks within a
-dead band of 2 ppm pass through bit for bit, as a file input on the
-engine's clock always does; a step in the timestamps (a reconnection,
-audio lost in a stall) is a break, not drift, so the gap is filled with
-silence and the measurement starts again; a source's embedded audio is
-never resampled, and drift of the video itself (a camera against the
+silence inserted and nothing cut. A step in the timestamps is never taken
+for drift: up to 100 ms (audio a full ring dropped, a short loss) it is
+made up as soon as the audio after it comes, with that much silence (or,
+for timestamps that step back, that much cut), and the drift measurement
+carries on; beyond 100 ms (a reconnection, a long loss) it is a break: the
+pacing above fills the gap and the measurement starts again. What is not
+corrected: blocks within a dead band of 2 ppm pass through bit for bit, as
+a file input on the engine's clock always does; a source's embedded audio
+is never resampled, and drift of the video itself (a camera against the
 engine) is not corrected; drift beyond 1000 ppm is left to the fills and
 cuts. The window's output panel shows the program input's correction and
 its resets, and a headless summary reports them for every input
-(`audio_inputs`: `correction_ppm`, `drift_resets`).
+(`audio_inputs`: `id`, `name`, `program`, `correction_ppm`,
+`drift_resets`).
 
 A source's embedded audio is mixed to stereo by ffmpeg as it is decoded,
 with the matrix the encoder used on it before: a stereo track as it is, a

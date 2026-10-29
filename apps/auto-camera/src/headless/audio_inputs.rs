@@ -1,12 +1,13 @@
-//! The audio inputs in the summary: each one's health and counters at the
-//! end of the run, and what drift correction made of it (spec C.3, A/V
-//! sync drift-free over a show): the correction it ended on, in ppm to one
-//! decimal (below zero for a board whose clock runs fast, zero while its
-//! blocks pass as they are), and how often a break in its timestamps (a
-//! reconnection, lost audio) or a new format restarted the measurement.
-//! Over a long run with a board as program audio, a correction that
-//! settles near the board's drift with no resets, and an output that
-//! counted no inserted silence, say that the board was kept in sync. A
+//! The audio inputs in the summary, and what drift correction made of each
+//! at the end of the run (spec C.3, A/V sync drift-free over a show): the
+//! correction it ended on, in ppm to one decimal (below zero for a board
+//! whose clock runs fast, zero while its blocks pass as they are), and how
+//! often a break in its timestamps (a reconnection, a long loss) or a new
+//! format restarted the measurement. Over a long run with a board as
+//! program audio, a correction that settles near the board's drift with no
+//! resets, and an output that counted no inserted silence, say that the
+//! board was kept in sync. An input is named by its id and name, and
+//! marked when it is program audio; nothing else of its health is here. A
 //! studio without audio inputs has an empty list.
 
 use ac_engine::{AudioInputView, EngineSnapshot};
@@ -21,22 +22,8 @@ pub struct AudioInputSummary {
     pub id: String,
     /// Operator-facing name.
     pub name: String,
-    /// `starting`, `running`, `offline`, `reconnecting` or `stopped`.
-    pub state: String,
-    /// Why it was offline, while it was.
-    pub error: Option<String>,
-    /// Sample rate of its newest connection, once one opened.
-    pub sample_rate: Option<u32>,
-    /// Channels of its newest connection, once one opened.
-    pub channels: Option<u16>,
     /// It was the program audio's origin.
     pub program: bool,
-    /// Blocks drained from it.
-    pub blocks: u64,
-    /// Blocks its ring dropped because they were not drained in time.
-    pub dropped: u64,
-    /// Program blocks dropped because they lacked the picked channels.
-    pub unusable: u64,
     /// Drift correction at the end, in ppm to one decimal.
     pub correction_ppm: f64,
     /// Breaks and format changes that restarted the drift measurement.
@@ -48,14 +35,7 @@ impl From<&AudioInputView> for AudioInputSummary {
         Self {
             id: v.id.0.clone(),
             name: v.name.clone(),
-            state: format!("{:?}", v.state).to_lowercase(),
-            error: v.error.clone(),
-            sample_rate: v.format.map(|(rate, _)| rate),
-            channels: v.format.map(|(_, channels)| channels),
             program: v.program,
-            blocks: v.blocks,
-            dropped: v.dropped,
-            unusable: v.unusable,
             correction_ppm: round(v.correction_ppm, 1),
             drift_resets: v.drift_resets,
         }
@@ -125,28 +105,35 @@ mod tests {
         let summary = audio_input_summaries(Some(&snap));
         assert_eq!(summary.len(), 1);
         let s = &summary[0];
-        assert_eq!((s.id.as_str(), s.state.as_str()), ("board", "running"));
-        assert_eq!((s.sample_rate, s.channels), (Some(48_000), Some(16)));
-        assert_eq!((s.correction_ppm, s.drift_resets), (-37.3, 1));
-        assert_eq!((s.blocks, s.dropped, s.program), (1_080_000, 2, true));
+        assert_eq!((s.id.as_str(), s.name.as_str()), ("board", "Soundboard"));
+        assert_eq!(
+            (s.program, s.correction_ppm, s.drift_resets),
+            (true, -37.3, 1)
+        );
+        // Only the drift correction, by the input's id and name.
         let json = serde_json::to_value(s).unwrap();
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["correction_ppm", "drift_resets", "id", "name", "program"]
+        );
         assert_eq!(json["correction_ppm"], -37.3);
         assert_eq!(json["drift_resets"], 1);
     }
 
     #[test]
-    fn an_input_not_connected_yet_has_no_format_and_no_correction() {
+    fn an_input_not_connected_yet_has_no_correction() {
         let mut snap = snapshot();
         snap.audio_inputs = vec![AudioInputView {
             state: SourceState::Offline,
             error: Some("board.wav does not exist".into()),
             format: None,
+            program: false,
             ..board(0.0, 0)
         }];
         let s = &audio_input_summaries(Some(&snap))[0];
-        assert_eq!((s.sample_rate, s.channels), (None, None));
-        assert_eq!(s.state, "offline");
-        assert_eq!(s.error.as_deref(), Some("board.wav does not exist"));
+        assert!(!s.program);
         assert_eq!((s.correction_ppm, s.drift_resets), (0.0, 0));
     }
 

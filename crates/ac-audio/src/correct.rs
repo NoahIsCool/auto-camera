@@ -11,47 +11,67 @@
 //! frame, with the correction
 //!
 //! ```text
-//! c = −v̂ − E / τₛ        E = û + Δ / rate
+//! c = −v̂ − E / τₛ        E = û + (Δ + s) / rate
 //! ```
 //!
 //! held within ±[`DriftSettings::max_correction_ppm`] and changed by at
 //! most [`DriftSettings::max_slew_ppm_per_s`] per second of audio. `Δ` is
 //! the time the resampling has added so far, in frames
-//! ([`Resampler::stretch`]), so `E` is the timing error of what comes *out*.
-//! The first term cancels the drift (`1 − v̂` is the ratio that does); the
-//! second takes up the timing error that is left, over
-//! `τₛ` = [`DriftSettings::settle`] (60 s): with the drift cancelled,
-//! `dE/dx = −E/τₛ`. Over a show the output therefore keeps the timing it
-//! had when the epoch began, and the pacer's lead stays within block
-//! jitter. Between blocks the ratio ramps, so it never jumps; at a 100 ppm
-//! drift it settles within a minute, the timing error peaking at a couple
-//! of milliseconds on the way.
+//! ([`Resampler::stretch`]), and `s` the frames of silence put in for
+//! steps less the frames cut for them (see below), so `E` is the timing
+//! error of what comes *out*, against the epoch's timing reference (its
+//! first second, [`crate::drift`]). The first term cancels the drift
+//! (`1 − v̂` is the ratio that does); the second takes up the timing error
+//! that is left, over `τₛ` = [`DriftSettings::settle`] (60 s): with the
+//! drift cancelled, `dE/dx = −E/τₛ`. Over a show the output therefore
+//! keeps the timing it had a second into the epoch, and the pacer's lead
+//! stays within block jitter. Between blocks the ratio ramps, so it never
+//! jumps; at a 100 ppm drift it settles within a minute, the timing error
+//! peaking at a couple of milliseconds on the way.
 //!
 //! # Dead band
 //!
-//! While the measured drift is within ±[`DriftSettings::dead_band_ppm`],
-//! or not yet [`CONFIDENCE`] standard errors clear of it
+//! Until the estimator has its timing reference, and then while the
+//! measured drift is within ±[`DriftSettings::dead_band_ppm`], or not yet
+//! [`CONFIDENCE`] standard errors clear of it
 //! ([`DriftEstimator::drift_uncertainty_ppm`]: early in an epoch, or while
-//! the PTS's jitter could account for it), and the timing error is within
-//! ±[`DriftSettings::dead_band_error`], blocks are not touched
-//! ([`Corrected::Unchanged`]): the caller passes on the very block it had,
-//! bit for bit. A file played on the master clock, which counts its PTS
-//! from its samples, measures exactly zero and is never resampled; nor is
-//! an input on the master clock whose PTS merely jitter. Meanwhile the corrector keeps the last frames it passed on;
-//! once either measure leaves its band, the resampler starts from them, so
-//! its first output is the frame after the last one passed on and the
-//! stream carries on without a seam (it holds back about
+//! the PTS's jitter could account for it), and the timing error `E` is
+//! within ±[`DriftSettings::dead_band_error`], blocks are not resampled. A
+//! block nothing is done to is [`Corrected::Unchanged`]: the caller passes
+//! on the very block it had, bit for bit. A file played on the master
+//! clock, which counts its PTS from its samples, measures exactly zero and
+//! is never resampled; nor is an input on the master clock whose PTS
+//! merely jitter. Meanwhile the corrector keeps the last frames it passed
+//! on; once either measure leaves its band, the resampler starts from
+//! them, so its first output is the frame after the last one passed on and
+//! the stream carries on without a seam (it holds back about
 //! [`crate::resample::HALF_TAPS`] frames from then on). It stays on until
 //! the epoch ends: going back to passing blocks through in the middle of
 //! one would move the stream by a fraction of a sample.
 //!
+//! # Steps
+//!
+//! A step in the PTS within the discontinuity ([`Observation::Step`]) is
+//! made up at once, not taken up slowly: for audio lost (a step forward
+//! by `g`) the corrector puts `g` of silence ahead of the block, through
+//! the resampler while it is on, and for a step back it cuts as much from
+//! the start of the blocks that follow. Both count in `s`, so the step
+//! leaves `E` where it was and moves nothing else; the estimator keeps it
+//! out of the drift. Making up lost audio here, as soon as the PTS show
+//! it, is what keeps it from being made up twice. The program pacer fills
+//! a gap only when its slack runs out before the audio after it comes,
+//! which a loss close to the slack can do as well; its silence then comes
+//! first, and the corrector's arrives after it like the late backlog of a
+//! stall, which the pacer cuts against the silence it owes.
+//!
 //! # Breaks
 //!
-//! A discontinuity ([`Observation::Discontinuity`]: a reconnection, a stall
-//! whose audio was lost) ends the epoch. The frames the resampler held are
-//! let go as they are, ahead of the block, the correction returns to zero,
-//! and the new epoch passes through until its own drift leaves the dead
-//! band. The step is never taken for drift: the pacer fills the gap.
+//! A discontinuity ([`Observation::Discontinuity`]: a reconnection, a long
+//! stall whose audio was lost) ends the epoch. The frames the resampler
+//! held are let go as they are, ahead of the block, the correction and `s`
+//! return to zero, and the new epoch passes through until its own drift
+//! leaves the dead band. The step is never taken for drift: the pacer,
+//! whose slack such a gap is beyond, fills it.
 //!
 //! # Invariants
 //!
@@ -60,6 +80,7 @@
 //! * [`Corrected::Unchanged`] is returned only for a block the corrector did
 //!   not change in any way; a block that is empty or not whole frames is
 //!   left unchanged and not measured.
+//! * A step moves the output by the step and leaves `E` where it was.
 //! * The correction is finite, within its limit, and moves by at most its
 //!   slew.
 
@@ -88,7 +109,9 @@ pub struct Resampled {
     pub samples: Vec<f32>,
     /// The first of them stands for the input this many frames before the
     /// block's first frame: the frames the resampler held, or let go at a
-    /// break. The samples' PTS is the block's less this many frames.
+    /// break, and the silence put in ahead of the block for a step; below
+    /// zero when the start of the block was cut for a step back. The
+    /// samples' PTS is the block's less this many frames.
     pub behind: f64,
 }
 
@@ -104,6 +127,8 @@ pub struct DriftStats {
     pub correction_ppm: f64,
     /// Breaks that reset the measurement.
     pub resets: u64,
+    /// Steps made up with silence or a cut.
+    pub steps: u64,
     /// The input is being resampled.
     pub resampling: bool,
 }
@@ -126,6 +151,11 @@ pub struct DriftCorrector {
     history: Vec<f32>,
     /// The correction `c` applied now.
     correction: f64,
+    /// `s`: frames of silence put in for steps less frames cut for them,
+    /// this epoch.
+    shifted: i64,
+    /// Frames of a step back still to cut from the blocks to come.
+    cut: u64,
 }
 
 impl DriftCorrector {
@@ -144,6 +174,8 @@ impl DriftCorrector {
             resampler: None,
             history: Vec::with_capacity((HALF_TAPS - 1) * usize::from(channels)),
             correction: 0.0,
+            shifted: 0,
+            cut: 0,
         })
     }
 
@@ -158,6 +190,7 @@ impl DriftCorrector {
             drift_ppm: self.estimator.drift_ppm(),
             correction_ppm: self.correction * 1e6,
             resets: self.estimator.resets(),
+            steps: self.estimator.steps(),
             resampling: self.resampler.is_some(),
         }
     }
@@ -170,54 +203,85 @@ impl DriftCorrector {
             return Corrected::Unchanged;
         }
         let frames = samples.len() / ch;
+        let rate = f64::from(self.rate);
         let mut out = Vec::new();
-        let mut released = false;
-        if self.estimator.observe(pts, frames as u64) == Observation::Discontinuity {
-            if let Some(resampler) = self.resampler.take() {
-                resampler.release(&mut out);
-                released = true;
+        // Frames of silence to put ahead of the block, for audio lost.
+        let mut fill = 0;
+        match self.estimator.observe(pts, frames as u64) {
+            Observation::Discontinuity => {
+                if let Some(resampler) = self.resampler.take() {
+                    resampler.release(&mut out);
+                }
+                (self.correction, self.shifted, self.cut) = (0.0, 0, 0);
             }
-            self.correction = 0.0;
+            Observation::Step(by) => {
+                // Within the discontinuity: 4,800 frames at 48 kHz by default.
+                let n = (by.abs() * rate).round() as u64;
+                if by < 0.0 {
+                    fill = n as usize;
+                    self.shifted += n as i64;
+                } else {
+                    self.cut += n;
+                    self.shifted -= n as i64;
+                }
+            }
+            Observation::Start | Observation::Tracked => {}
         }
+        let released = out.len() / ch;
+        let skip = frames.min(usize::try_from(self.cut).unwrap_or(usize::MAX));
+        self.cut -= skip as u64;
+        let kept = &samples[skip * ch..];
         if self.resampler.is_none() && self.outside_dead_band() {
             self.resampler = Some(Resampler::with_history(self.channels, &self.history, 1.0));
         }
-        let rate = f64::from(self.rate);
+        let error = self.timing_error();
         if let Some(resampler) = &mut self.resampler {
-            let behind = (out.len() / ch) as f64 + resampler.waiting();
-            let error = self.estimator.error() + resampler.stretch() / rate;
+            let behind = (released + fill) as f64 + resampler.waiting() - skip as f64;
             let max = self.settings.max_correction_ppm * 1e-6;
             let target = (-self.estimator.slope() - error / self.settings.settle.as_secs_f64())
                 .clamp(-max, max);
             let slew = self.settings.max_slew_ppm_per_s * 1e-6 * frames as f64 / rate;
             self.correction += (target - self.correction).clamp(-slew, slew);
-            out.reserve(samples.len() + ch);
-            resampler.process(samples, 1.0 / (1.0 + self.correction), &mut out);
+            let step = 1.0 / (1.0 + self.correction);
+            out.reserve((fill + 1) * ch + kept.len());
+            if fill > 0 {
+                resampler.process(&vec![0.0; fill * ch], step, &mut out);
+            }
+            resampler.process(kept, step, &mut out);
             return Corrected::Resampled(Resampled {
                 samples: out,
                 behind,
             });
         }
-        if !released {
+        if released + fill + skip == 0 {
             self.remember(samples);
             return Corrected::Unchanged;
         }
-        let behind = (out.len() / ch) as f64;
+        out.resize(out.len() + fill * ch, 0.0);
+        out.extend_from_slice(kept);
         self.remember(&out);
-        self.remember(samples);
-        out.extend_from_slice(samples);
         Corrected::Resampled(Resampled {
             samples: out,
-            behind,
+            behind: (released + fill) as f64 - skip as f64,
         })
     }
 
-    /// True when the measured drift (less [`CONFIDENCE`] standard errors)
-    /// or the timing error is outside its dead band.
+    /// The timing error `E` of what comes out, in seconds: the input's,
+    /// with the time the resampling added and the silence put in for steps
+    /// less what was cut for them; see the module docs.
+    fn timing_error(&self) -> f64 {
+        let stretch = self.resampler.as_ref().map_or(0.0, Resampler::stretch);
+        self.estimator.error() + (stretch + self.shifted as f64) / f64::from(self.rate)
+    }
+
+    /// True once the estimator has its timing reference and the measured
+    /// drift (less [`CONFIDENCE`] standard errors) or the timing error `E`
+    /// is outside its dead band.
     fn outside_dead_band(&self) -> bool {
         let sure = CONFIDENCE * self.estimator.drift_uncertainty_ppm();
-        self.estimator.drift_ppm().abs() - sure > self.settings.dead_band_ppm
-            || self.estimator.error().abs() > self.settings.dead_band_error.as_secs_f64()
+        self.estimator.has_reference()
+            && (self.estimator.drift_ppm().abs() - sure > self.settings.dead_band_ppm
+                || self.timing_error().abs() > self.settings.dead_band_error.as_secs_f64())
     }
 
     /// Keeps the last `HALF_TAPS − 1` frames of what was passed on, ending

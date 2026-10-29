@@ -222,3 +222,143 @@ fn bad_formats_are_refused() {
             .contains("1 to 8 channels")
     );
 }
+
+/// A fixed sequence of jitter in `-amount..amount` seconds.
+fn jitter(amount: f64) -> impl FnMut() -> f64 {
+    let mut state = 0x2545_f491_u32;
+    move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        (f64::from(state) / f64::from(u32::MAX) * 2.0 - 1.0) * amount
+    }
+}
+
+/// Plays two minutes of 10 ms blocks of an input `ppm` fast whose PTS
+/// jitter by up to half a millisecond and step by `step` seconds at one
+/// minute (below zero: audio lost); returns the corrector and the output's
+/// worst distance, from a tenth of a second after the step, from where the
+/// PTS put it, in frames.
+fn step_at_a_minute(ppm: f64, step: f64) -> (DriftCorrector, f64) {
+    let mut c = corrector();
+    let mut noise = jitter(0.000_5);
+    let (mut out, mut worst) = (0usize, 0f64);
+    let rate = f64::from(RATE);
+    for k in 0..12_000 {
+        let moved = if k >= 6_000 { -step } else { 0.0 };
+        let block = sparse(k);
+        let at = pts(k * BLOCK, ppm).as_secs_f64() + moved;
+        let outcome = c.process(Duration::from_secs_f64(at + 1.0 + noise()), &block);
+        out += frames(&outcome, &block);
+        if k > 6_010 {
+            // Where the PTS put the end of this block, once a cut (whole
+            // blocks while it lasts) is done.
+            let due = (pts((k + 1) * BLOCK, ppm).as_secs_f64() + moved) * rate;
+            let held = if c.stats().resampling {
+                HALF_TAPS as f64
+            } else {
+                0.0
+            };
+            worst = worst.max((out as f64 + held - due).abs());
+        }
+    }
+    (c, worst)
+}
+
+#[test]
+fn a_step_in_the_pts_is_made_up_at_once_and_not_taken_for_drift() {
+    // 20 or 50 ms lost (the PTS step forward) is filled with that much
+    // silence; a PTS that steps back 30 ms has that much cut. Neither is
+    // read as drift: a drift-free input is not resampled, and one 100 ppm
+    // fast is resampled as before, the silence through the resampler.
+    for ppm in [0.0, 100.0] {
+        for step in [-0.02, -0.05, 0.03] {
+            let (c, worst) = step_at_a_minute(ppm, step);
+            let stats = c.stats();
+            assert!(
+                (stats.drift_ppm - ppm).abs() < 3.0,
+                "{ppm}, {step}: {stats:?}"
+            );
+            assert_eq!(stats.resampling, ppm != 0.0, "{ppm}, {step}: {stats:?}");
+            assert_eq!((stats.steps, stats.resets), (1, 0), "{ppm}, {step}");
+            if ppm != 0.0 {
+                // Less what is left of the step's own jitter being taken
+                // up: half a millisecond over the minute's settling.
+                let cancels = (stats.correction_ppm + ppm).abs();
+                assert!(cancels < 5.0, "{ppm}, {step}: {stats:?}");
+            }
+            // Within the PTS's jitter.
+            let frames_off = 0.001 * f64::from(RATE);
+            assert!(worst < frames_off, "{ppm}, {step}: {worst} frames off");
+        }
+    }
+}
+#[test]
+fn a_first_block_stamped_off_does_not_move_the_stream() {
+    // Ten minutes of a drift-free input with exact PTS but for the first
+    // block's, tens of milliseconds off: what comes out keeps the input's
+    // own timing, within a couple of milliseconds.
+    for off in [0.015, 0.03, -0.03, 0.06] {
+        let mut c = corrector();
+        let mut out = 0usize;
+        let rate = f64::from(RATE);
+        for k in 0..60_000 {
+            let t = 1.0 + (k * BLOCK) as f64 / rate + if k == 0 { off } else { 0.0 };
+            let block = sparse(k);
+            out += frames(&c.process(Duration::from_secs_f64(t), &block), &block);
+        }
+        let held = if c.stats().resampling { HALF_TAPS } else { 0 };
+        let lead = (out + held) as f64 - (60_000 * BLOCK) as f64;
+        assert!(
+            lead.abs() < 0.002 * rate,
+            "{off}: {lead} frames, {:?}",
+            c.stats()
+        );
+    }
+}
+
+#[test]
+fn a_fill_and_a_cut_are_placed_exactly() {
+    // Exact PTS, so the steps are exactly 25 ms (1200 frames): two seconds
+    // in, the PTS step forward, and the block comes after that much
+    // silence; a second later they step back, and as much is cut from the
+    // blocks that follow, two and a half of them.
+    let mut c = corrector();
+    let at = |frame: usize| Duration::from_nanos(frame as u64 * 1_000_000_000 / u64::from(RATE));
+    let mut frame = 0;
+    for k in 0..200 {
+        assert_eq!(c.process(at(frame), &samples(k)), Corrected::Unchanged);
+        frame += BLOCK;
+    }
+    let block = samples(200);
+    let Corrected::Resampled(r) = c.process(at(frame + 1_200), &block) else {
+        panic!("the silence comes first");
+    };
+    assert_eq!(r.behind, 1_200.0);
+    assert_eq!(r.samples.len(), (1_200 + BLOCK) * 2);
+    assert!(r.samples[..2_400].iter().all(|&v| v == 0.0));
+    assert_eq!(r.samples[2_400..], block[..]);
+    frame += BLOCK;
+    for k in 201..300 {
+        assert_eq!(
+            c.process(at(frame + 1_200), &samples(k)),
+            Corrected::Unchanged
+        );
+        frame += BLOCK;
+    }
+    for (k, behind) in [(300, -480.0), (301, -480.0), (302, -240.0)] {
+        let block = samples(k);
+        let Corrected::Resampled(r) = c.process(at(frame), &block) else {
+            panic!("block {k} is cut");
+        };
+        assert_eq!(r.behind, behind, "block {k}");
+        assert!(
+            r.samples[..] == block[(-behind) as usize * 2..],
+            "block {k}"
+        );
+        frame += BLOCK;
+    }
+    assert_eq!(c.process(at(frame), &samples(303)), Corrected::Unchanged);
+    let stats = c.stats();
+    assert_eq!((stats.steps, stats.resets, stats.resampling), (2, 0, false));
+}
