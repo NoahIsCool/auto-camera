@@ -526,10 +526,11 @@ fn invalid_message(e: ConfigError) -> String {
 
 /// What the opener of `input` would refuse before looking at any file: a
 /// synthetic pattern's size, rate and subject count, against the limits
-/// [`SyntheticPattern::new`] applies, and a file's `max_width`, by
+/// [`SyntheticPattern::new`] applies, a file's `max_width`, by
 /// [`ac_sources::output_size`] itself, and its segment, by
-/// [`Segment::from_seconds`]. So a load and `--check` catch them, not only
-/// a start. Whether the file is there is the readiness check's question.
+/// [`Segment::from_seconds`], and a capture request (`sources`). So a load
+/// and `--check` catch them, not only a start. Whether the file is there is
+/// the readiness check's question.
 fn input_problems(input: &SourceConfig) -> Vec<String> {
     let mut out = Vec::new();
     let why = |e: MediaError| match e {
@@ -577,6 +578,7 @@ fn input_problems(input: &SourceConfig) -> Vec<String> {
                 ));
             }
         }
+        SourceConfig::Capture { .. } => out.extend(sources::capture_problems(input)),
     }
     out
 }

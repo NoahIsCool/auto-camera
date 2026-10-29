@@ -298,16 +298,19 @@ it. It lists the problems in the config's values, all of them rather than
 the first (the `lexicon`, `tracker`, `framing`, `subjects` and `director`
 tables, which the crates that use them check, give their first problem
 each), and looks at everything the config names: each file source's video,
-the ffmpeg tools (`-version` of the output's ffmpeg, and of the ffmpeg and
-ffprobe file sources decode with), the detector's model files (and that an
-OWL detector is in the build), the sidecar's program, its venv (a python
-link that points nowhere, a base Python that is gone) and the paths in its
-command, and that `output.record_path` does not exist yet, in a folder that
-takes new files. It opens no camera, source or model, starts no sidecar and
-contacts no RTMP server: it runs nothing but the ffmpeg tools' `-version`,
-and writes nothing but an empty probe file in the recording folder, removed
-at once. Each finding starts a line of its own (a longer message, such as a
-parse error's excerpt of the file, goes on indented under it):
+the ffmpeg tools (`-version` of the output's ffmpeg, of the ffmpeg and
+ffprobe file sources decode with, and of that ffmpeg when capture sources
+list and capture their cameras with it), the detector's model files (and
+that an OWL detector is in the build), the sidecar's program, its venv (a
+python link that points nowhere, a base Python that is gone) and the paths
+in its command, and that `output.record_path` does not exist yet, in a
+folder that takes new files. Whether a camera is connected is not checked,
+since it can be plugged in later. It opens no camera, source or model,
+starts no sidecar and contacts no RTMP server: it runs nothing but the
+ffmpeg tools' `-version`, and writes nothing but an empty probe file in the
+recording folder, removed at once. Each finding starts a line of its own
+(a longer message, such as a parse error's excerpt of the file, goes on
+indented under it):
 
 ```text
 Checking config/sam3-sidecar.example.toml
@@ -376,7 +379,8 @@ schema = 1
 [[sources]]
 id = "cam-1"
 name = "Rehearsal"
-kind = "file"                # or "synthetic" with width, height, fps, subjects
+kind = "file"                # or "synthetic" (width, height, fps, subjects), or
+                             # "capture" (a camera; see "Cameras and capture devices")
 path = "../media/rehearsal.mp4"
 loop_playback = true
 max_width = 1280
@@ -452,7 +456,49 @@ once its input appears. A source that loses its input while running (its
 ffmpeg killed or crashed) is reopened the same way. If it is the
 `audio_source`, an output started after it came on air carries its audio.
 Only a source setting no retry can fix (a synthetic pattern that cannot be
-made, a `max_width` below 2) stops the start.
+made, a `max_width` below 2, a capture request no camera could deliver)
+stops the start.
+
+### Cameras and capture devices
+
+On macOS a source can be a USB/UVC webcam or an HDMI-to-USB capture
+dongle, read through ffmpeg's avfoundation input
+([`config/capture.example.toml`](config/capture.example.toml)):
+
+```toml
+[[sources]]
+id = "cam-1"
+kind = "capture"
+unique_id = "0x14200000046d085e"  # system_profiler SPCameraDataType: "Unique ID"
+width = 1280                      # the mode to ask the camera for
+height = 720
+fps = 30
+# pixel_format = "nv12"           # optional; uyvy422 otherwise
+```
+
+A camera is named by its unique ID, never by ffmpeg's device number, which
+changes whenever cameras are plugged or unplugged: before every open and
+every reconnect the source lists the cameras (`system_profiler
+SPCameraDataType -json` and `ffmpeg -f avfoundation -list_devices true -i
+""`) and finds the number the ID has now. Two cameras of one model have the
+same name in both lists and are told apart by their order, which the two
+lists are assumed to share. A camera that is not connected, or cannot be
+told apart, leaves the source offline with an error listing the connected
+cameras and their IDs; another camera is never opened in its place. macOS
+builds a USB camera's ID from the port it is plugged into, so plug it back
+into the same port.
+
+The size and rate are required and, with the unique ID and the pixel
+format if one is given, checked when the file loads, so a request no camera
+could deliver (an empty ID, a size over 8192, a pixel format ffmpeg's
+avfoundation input does not know) stops the start. Without a pixel format
+the source asks for uyvy422, which macOS offers for webcams and capture
+dongles, rather than leaving it to ffmpeg, whose own default (yuv420p) they
+refuse. A mode the camera does not offer fails the source at once, with
+ffmpeg's answer as its error: the reason, then the modes the camera has (up
+to 64 lines of them; the error is in the log too). A camera whose ffmpeg
+exits, or that sends no picture for 3 s (10 s after opening), is reopened
+like any failed source. Camera audio is not captured yet.
 
 ## Shows
 
@@ -683,7 +729,7 @@ the program is silent. A headless run reports the session's values in
 | `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
 | `ac-media` | Frames, audio blocks and the source trait, with latest-frame mailboxes |
 | `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak |
-| `ac-sources` | File (ffmpeg) and synthetic sources, file segments, a frame-by-frame clip reader for offline tools; injectable clocks |
+| `ac-sources` | File (ffmpeg), synthetic and capture (avfoundation, by unique ID) sources, file segments, a frame-by-frame clip reader for offline tools; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector, replay of recorded detections |
 | `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
@@ -731,10 +777,11 @@ records three seconds of the headless demo, and checks the supply chain.
 cargo-deny holds every crate to [`deny.toml`](deny.toml): RustSec
 advisories, and licences, where AGPL, GPL and LGPL crates are denied (a
 probe package that depends on an AGPL crate must fail). The parts that are
-not crates (ffmpeg, macOS's `caffeinate`, ONNX Runtime, model weights, the
-sidecar's interpreter and Python packages) have their licences in
-[`docs/licence-manifest.md`](docs/licence-manifest.md), and a
-standard-library script fails when one the repository uses has no entry:
+not crates (ffmpeg, macOS's `caffeinate` and `system_profiler`, ONNX
+Runtime, model weights, the sidecar's interpreter and Python packages) have
+their licences in [`docs/licence-manifest.md`](docs/licence-manifest.md),
+and a standard-library script fails when one the repository uses has no
+entry:
 
 ```sh
 python3 -B scripts/licence_manifest.py       # lists any component without an entry

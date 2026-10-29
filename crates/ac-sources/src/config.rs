@@ -8,7 +8,13 @@
 //! {"kind": "file", "path": "rehearsal.mp4", "loop_playback": true, "max_width": 1920}
 //! {"kind": "file", "path": "service.mp4", "start_s": 1800, "duration_s": 240}
 //! {"kind": "synthetic", "width": 1280, "height": 720, "fps": 30}
+//! {"kind": "capture", "unique_id": "0x14200000046d085e", "width": 1920, "height": 1080, "fps": 30}
 //! ```
+//!
+//! A capture source is a camera or capture device named by its unique ID
+//! and asked for one mode ([`crate::capture`]); its optional
+//! `pixel_format` is one of [`crate::capture::PIXEL_FORMATS`], uyvy422
+//! when not given.
 //!
 //! A file's `start_s` and `duration_s` play a segment of it, as if it were a
 //! clip of its own: its first frame is the first at or after `start_s`, with
@@ -24,6 +30,9 @@ use ac_core::SourceId;
 use ac_media::{MediaError, VideoSource};
 use serde::{Deserialize, Serialize};
 
+use crate::capture::{
+    CaptureFormat, CaptureOptions, CaptureSource, SystemInventory, request_problems,
+};
 use crate::clock::{Clock, WallClock};
 use crate::ffmpeg::check_max_width;
 use crate::file::{FileOptions, FileSource};
@@ -79,14 +88,33 @@ pub enum SourceConfig {
         #[serde(default = "default_subjects")]
         subjects: u32,
     },
+    /// A camera or capture device through ffmpeg's avfoundation input
+    /// (macOS), found by unique ID before every open ([`crate::capture`]).
+    Capture {
+        /// The device's unique ID, as `system_profiler SPCameraDataType`
+        /// shows it.
+        unique_id: String,
+        /// Requested picture width in pixels.
+        width: u32,
+        /// Requested picture height in pixels.
+        height: u32,
+        /// Requested frames per second.
+        fps: f64,
+        /// Requested pixel format (default:
+        /// [`DEFAULT_PIXEL_FORMAT`](crate::capture::DEFAULT_PIXEL_FORMAT),
+        /// uyvy422).
+        #[serde(default)]
+        pixel_format: Option<String>,
+    },
 }
 
 impl SourceConfig {
     /// Checks what can be checked before the source is opened, the mistakes
     /// no reopening can mend: a synthetic pattern's parameters, a file's
     /// `max_width` ([`check_max_width`]) and its segment
-    /// ([`Segment::from_seconds`]). A file is not looked for, since it may
-    /// appear later and a supervised source then picks it up
+    /// ([`Segment::from_seconds`]), a capture request
+    /// ([`request_problems`]). A file or a camera is not looked for, since
+    /// it may appear later and a supervised source then picks it up
     /// ([`crate::supervisor`]).
     pub fn validate(&self) -> Result<(), MediaError> {
         match self {
@@ -105,6 +133,19 @@ impl SourceConfig {
                 fps,
                 subjects,
             } => SyntheticPattern::check(*width, *height, *fps, *subjects).map(|_| ()),
+            SourceConfig::Capture {
+                unique_id,
+                width,
+                height,
+                fps,
+                pixel_format,
+            } => match request_problems(unique_id, *width, *height, *fps, pixel_format.as_deref())
+                .into_iter()
+                .next()
+            {
+                Some(first) => Err(MediaError::Open(first)),
+                None => Ok(()),
+            },
         }
     }
 }
@@ -152,6 +193,22 @@ pub fn open_source_with_clock(
             let pattern = SyntheticPattern::new(*width, *height, *fps, *subjects)?;
             Ok(Box::new(SyntheticSource::start_with_clock(
                 id, pattern, clock,
+            )?))
+        }
+        // A camera runs in real time: it is not paced by `clock`.
+        SourceConfig::Capture {
+            unique_id,
+            width,
+            height,
+            fps,
+            pixel_format,
+        } => {
+            config.validate()?;
+            let format = CaptureFormat::new(*width, *height, *fps, pixel_format.as_deref())?;
+            let options = CaptureOptions::default();
+            let inventory = SystemInventory::new(&options.tools);
+            Ok(Box::new(CaptureSource::open(
+                id, unique_id, &format, &inventory, options,
             )?))
         }
     }

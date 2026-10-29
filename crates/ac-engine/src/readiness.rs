@@ -15,10 +15,12 @@
 //!   the engine's own tables and of each source, the first of each table
 //!   another crate checks);
 //! * **sources**: each file source's video is a readable file;
-//! * **ffmpeg**: `output.ffmpeg -version` runs, and with file sources so do
-//!   the ffmpeg and ffprobe they decode with (`AC_FFMPEG`, `AC_FFPROBE`).
-//!   Like the program itself, the check runs a tool as named: a bare name
-//!   from `PATH`, a relative path from the working folder;
+//! * **ffmpeg**: `output.ffmpeg -version` runs, with file sources so do
+//!   the ffmpeg and ffprobe they decode with (`AC_FFMPEG`, `AC_FFPROBE`),
+//!   and with capture sources the ffmpeg that lists and captures their
+//!   cameras (the same `AC_FFMPEG`; they need no ffprobe). Like the program
+//!   itself, the check runs a tool as named: a bare name from `PATH`, a
+//!   relative path from the working folder;
 //! * **the detector's files**: OWL's model, text encoder and tokenizer are
 //!   readable files, in a build with the `onnx` feature; a sidecar's
 //!   program is found and executable (in a venv, a link that still points
@@ -165,7 +167,8 @@ pub trait Inspect {
     fn find_program(&self, name: &str) -> Option<PathBuf>;
     /// The text of a small file (a venv's `pyvenv.cfg`).
     fn read_text(&self, path: &Path) -> Result<String, String>;
-    /// The tools file sources decode with.
+    /// The tools file sources decode with, whose ffmpeg capture sources
+    /// also run.
     fn decoder_tools(&self) -> FfmpegTools;
 }
 
@@ -205,14 +208,18 @@ fn check_build(config: &StudioConfig, inspector: &dyn Inspect, onnx: bool) -> Re
         out: Readiness::default(),
     };
     c.config(config);
-    let mut file_sources = false;
+    let (mut file_sources, mut capture_sources) = (false, false);
     for s in &config.sources {
-        if let SourceConfig::File { path, .. } = &s.input {
-            file_sources = true;
-            c.file(&format!("source {:?}", s.id), path);
+        match &s.input {
+            SourceConfig::File { path, .. } => {
+                file_sources = true;
+                c.file(&format!("source {:?}", s.id), path);
+            }
+            SourceConfig::Capture { .. } => capture_sources = true,
+            SourceConfig::Synthetic { .. } => {}
         }
     }
-    c.tools(config, file_sources);
+    c.tools(config, file_sources, capture_sources);
     match &config.detector {
         DetectorSettings::Owl {
             model,
@@ -326,23 +333,31 @@ impl Checker<'_> {
         self.problem(message);
     }
 
-    /// The ffmpeg tools: the output's, and the decoders when there are
-    /// file sources; a tool named twice is run once.
-    fn tools(&mut self, config: &StudioConfig, file_sources: bool) {
+    /// The ffmpeg tools: the output's, the decoders' ffmpeg when there are
+    /// file or capture sources, and their ffprobe when there are file
+    /// sources; a tool named twice is run once.
+    fn tools(&mut self, config: &StudioConfig, file_sources: bool, capture_sources: bool) {
         // (what it is, where, how to name another one)
         let mut tools: Vec<(String, PathBuf, &str)> = Vec::new();
-        if file_sources {
+        if file_sources || capture_sources {
             let decoders = self.inspector.decoder_tools();
+            let users = match (file_sources, capture_sources) {
+                (true, true) => "file and capture sources'",
+                (true, false) => "file sources'",
+                (false, _) => "capture sources'",
+            };
             tools.push((
-                "file sources' ffmpeg (AC_FFMPEG)".into(),
+                format!("{users} ffmpeg (AC_FFMPEG)"),
                 decoders.ffmpeg,
                 "AC_FFMPEG",
             ));
-            tools.push((
-                "file sources' ffprobe (AC_FFPROBE)".into(),
-                decoders.ffprobe,
-                "AC_FFPROBE",
-            ));
+            if file_sources {
+                tools.push((
+                    "file sources' ffprobe (AC_FFPROBE)".into(),
+                    decoders.ffprobe,
+                    "AC_FFPROBE",
+                ));
+            }
         }
         let output = &config.output.ffmpeg;
         match tools.iter_mut().find(|(_, path, _)| path == output) {

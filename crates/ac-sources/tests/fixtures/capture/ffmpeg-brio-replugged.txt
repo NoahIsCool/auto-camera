@@ -1,0 +1,12 @@
+[AVFoundation indev @ 0x14c7046a0] AVFoundation video devices:
+[AVFoundation indev @ 0x14c7046a0] [0] FaceTime HD Camera
+[AVFoundation indev @ 0x14c7046a0] [1] Cam Link 4K
+[AVFoundation indev @ 0x14c7046a0] [2] Logitech BRIO
+[AVFoundation indev @ 0x14c7046a0] [3] Capture screen 0
+[AVFoundation indev @ 0x14c7046a0] AVFoundation audio devices:
+[AVFoundation indev @ 0x14c7046a0] [0] MacBook Pro Microphone
+[AVFoundation indev @ 0x14c7046a0] [1] Cam Link 4K
+[AVFoundation indev @ 0x14c7046a0] [2] Logitech BRIO
+[in#0 @ 0x600002a1c000] Error opening input: Input/output error
+Error opening input file .
+Error opening input files: Input/output error

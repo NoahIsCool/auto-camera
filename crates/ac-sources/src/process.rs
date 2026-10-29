@@ -26,9 +26,10 @@
 
 use std::io::{self, Read};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::logs::StderrTail;
 use crate::status::lock;
 
 /// How long a child that closed its stdout may take to exit before it is
@@ -81,6 +82,16 @@ impl Children {
     /// the log, and registers it. `Ok(None)` when the registry is closed,
     /// in which case no process is left running.
     pub(crate) fn spawn(&self, command: &mut Command) -> io::Result<Option<Spawned>> {
+        self.spawn_keeping(command, None)
+    }
+
+    /// [`Children::spawn`], also keeping the child's first and last stderr
+    /// lines in `tail` ([`crate::logs::StderrTail`]).
+    pub(crate) fn spawn_keeping(
+        &self,
+        command: &mut Command,
+        tail: Option<Arc<StderrTail>>,
+    ) -> io::Result<Option<Spawned>> {
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -90,7 +101,7 @@ impl Children {
             reap(child);
             return Err(io::Error::other("child has no stdout pipe"));
         };
-        if let Err(e) = crate::logs::forward(&mut child, command) {
+        if let Err(e) = crate::logs::forward(&mut child, command, tail) {
             reap(child);
             return Err(e);
         }

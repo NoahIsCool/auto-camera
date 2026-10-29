@@ -74,19 +74,24 @@ pub(crate) fn color_matrix(video: &VideoStreamInfo) -> &'static str {
         Some("fcc") => "fcc",
         Some("smpte240m") => "smpte240m",
         Some("bt2020nc" | "bt2020c") => "bt2020",
-        _ => {
-            let (w, h) = video.display_size();
-            if w >= 1280 || h >= 720 {
-                "bt709"
-            } else {
-                "bt601"
-            }
-        }
+        _ => untagged_matrix(video.display_size()),
     }
 }
 
-/// Options shared by both decoders: quiet, never reading the terminal.
-const COMMON: [&str; 4] = ["-nostdin", "-hide_banner", "-loglevel", "error"];
+/// The swscale `in_color_matrix` name for an untagged picture of `size`
+/// (width, height): BT.709 for HD and larger, BT.601 below; see the module
+/// docs. Capture devices tag nothing, so they always take this rule
+/// ([`crate::capture`]).
+pub(crate) fn untagged_matrix((w, h): (u32, u32)) -> &'static str {
+    if w >= 1280 || h >= 720 {
+        "bt709"
+    } else {
+        "bt601"
+    }
+}
+
+/// Options shared by every decoder: quiet, never reading the terminal.
+pub(crate) const COMMON: [&str; 4] = ["-nostdin", "-hide_banner", "-loglevel", "error"];
 
 /// Arguments that decode `video` from `path`, cut to `cut`, to raw RGBA
 /// frames of `size` at `rate` on stdout.

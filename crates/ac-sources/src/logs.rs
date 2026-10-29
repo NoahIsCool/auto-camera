@@ -20,6 +20,13 @@
 //! how many like it were held back meanwhile, and what is still held back
 //! when the decoder ends is counted then.
 //!
+//! A source can also keep a child's first and last lines ([`StderrTail`],
+//! given to [`forward`]), because ffmpeg says why it refused an input
+//! only there: a capture device's "Selected framerate is not supported" and
+//! its list of supported modes ([`crate::capture`]). The source still takes
+//! no decision from them; they only explain, in its error, a failure its
+//! decoder's output and exit already showed.
+//!
 //! # Invariants
 //!
 //! * The thread owns the pipe and ends at its end of file, which the
@@ -32,10 +39,16 @@
 //! * Every line is either logged or counted in a later line; none is lost
 //!   without a trace.
 //! * Empty lines are not logged; line endings are trimmed.
+//! * A tail is bounded and ends with its drain (see [`tail`]).
 
 use std::io::{self, BufRead, BufReader, Read};
 use std::process::{Child, Command};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+mod tail;
+
+pub(crate) use tail::{StderrTail, TAIL_FIRST, TAIL_OPENING, strip_context};
 
 /// The target of decoder stderr lines in the app's log.
 pub(crate) const TARGET: &str = "ac_sources::ffmpeg";
@@ -55,11 +68,20 @@ pub(crate) const QUIET: Duration = Duration::from_secs(60);
 pub(crate) const SHAPES: usize = 8;
 
 /// Starts the thread that sends `child`'s stderr to the log, if `child`
-/// has a stderr pipe; `command` is what started it. Fails only when the
-/// thread cannot be spawned (the caller then kills the child, whose
-/// writes would otherwise hit a closed pipe).
-pub(crate) fn forward(child: &mut Child, command: &Command) -> io::Result<()> {
+/// has a stderr pipe; `command` is what started it. Every line is also
+/// offered to `tail`, if given, which is ended when the pipe ends (at once
+/// when there is no pipe). Fails only when the thread cannot be spawned
+/// (the caller then kills the child, whose writes would otherwise hit a
+/// closed pipe).
+pub(crate) fn forward(
+    child: &mut Child,
+    command: &Command,
+    tail: Option<Arc<StderrTail>>,
+) -> io::Result<()> {
     let Some(stderr) = child.stderr.take() else {
+        if let Some(tail) = tail {
+            tail.end();
+        }
         return Ok(());
     };
     let (pid, input) = (child.id(), input_of(command));
@@ -72,9 +94,15 @@ pub(crate) fn forward(child: &mut Child, command: &Command) -> io::Result<()> {
                 tracing::warn!(target: TARGET, pid, input = %input, "{text}");
             };
             drain(BufReader::new(stderr), |line| {
+                if let Some(tail) = &tail {
+                    tail.push(line);
+                }
                 repeats.offer(line, started.elapsed(), &mut log);
             });
             repeats.finish(&mut log);
+            if let Some(tail) = &tail {
+                tail.end();
+            }
         })?;
     Ok(())
 }
@@ -352,6 +380,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_kept_tail_ends_with_its_child() {
+        use std::process::Stdio;
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo '[x @ 0x1] refused' >&2"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let tail = Arc::new(StderrTail::new());
+        forward(&mut child, &cmd, Some(tail.clone())).unwrap();
+        assert!(child.wait().unwrap().success());
+        let got = tail.summary(Duration::from_secs(10), TAIL_FIRST);
+        assert_eq!(got.as_deref(), Some("refused"));
+        // Without a stderr pipe the tail ends at once, empty.
+        let mut quiet = Command::new("true");
+        let mut child = quiet.stderr(Stdio::null()).spawn().unwrap();
+        let tail = Arc::new(StderrTail::new());
+        forward(&mut child, &quiet, Some(tail.clone())).unwrap();
+        child.wait().unwrap();
+        assert_eq!(tail.summary(Duration::from_secs(10), TAIL_FIRST), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_childs_stderr_is_drained_until_it_exits() {
         use std::process::Stdio;
         let mut cmd = Command::new("sh");
@@ -359,13 +410,13 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn().unwrap();
-        forward(&mut child, &cmd).unwrap();
+        forward(&mut child, &cmd, None).unwrap();
         assert!(child.stderr.is_none(), "the drain owns the pipe");
         assert!(child.wait().unwrap().success());
         // Without a stderr pipe there is nothing to forward.
         let mut quiet = Command::new("true");
         let mut child = quiet.stderr(Stdio::null()).spawn().unwrap();
-        forward(&mut child, &quiet).unwrap();
+        forward(&mut child, &quiet, None).unwrap();
         child.wait().unwrap();
     }
 }

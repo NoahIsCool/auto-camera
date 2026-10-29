@@ -362,7 +362,7 @@ fn relative_paths_are_taken_from_the_show_file_folder() {
         .flatten()
         .map(|s| match &s.input {
             SourceConfig::File { path, .. } => path.clone(),
-            SourceConfig::Synthetic { .. } => PathBuf::new(),
+            SourceConfig::Synthetic { .. } | SourceConfig::Capture { .. } => PathBuf::new(),
         })
         .collect();
     assert_eq!(

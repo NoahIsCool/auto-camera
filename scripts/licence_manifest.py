@@ -3,12 +3,12 @@
 
 cargo-deny (`deny.toml`) checks the licence of every crate. It cannot see
 the parts the app runs, links or loads that do not come from crates.io: the
-ffmpeg programs, macOS's `caffeinate`, the ONNX Runtime library that `ort`
-links in, model weights, and the detector sidecar's interpreter and Python
-packages. Their licences are in `docs/licence-manifest.md`, and this check
-keeps that file complete: it finds each such component from what the
-repository itself declares, and every one must have a valid row in the
-manifest's table.
+ffmpeg programs, macOS's `caffeinate` and `system_profiler`, the ONNX
+Runtime library that `ort` links in, model weights, and the detector
+sidecar's interpreter and Python packages. Their licences are in
+`docs/licence-manifest.md`, and this check keeps that file complete: it
+finds each such component from what the repository itself declares, and
+every one must have a valid row in the manifest's table.
 
 A component is found, and named by an id, by these rules:
 
@@ -39,12 +39,16 @@ A component is found, and named by an id, by these rules:
   `"/usr/bin/caffeinate"` in a Rust source under `crates/*/src` or
   `apps/*/src` (macOS's tool, which keeps the system awake, is run by its
   path).
+* `native:system_profiler`: the string literal `"system_profiler"` or
+  `"/usr/sbin/system_profiler"` in a Rust source under `crates/*/src` or
+  `apps/*/src` (macOS's tool, which lists the connected cameras for a
+  capture source, is run by its path).
 
 The first three rules find new components by themselves: every project
 pip would install from a sidecar's requirements is found or reported, and
 the check may find more than pip installs (pip reads only the first
 requirement, editable or include of a line, the check all of them). The
-last three cover the one native library the app links and the two
+last four cover the one native library the app links and the three
 programs it runs under a fixed name today (`FIXED_PROGRAMS`); a new one
 needs a rule here.
 
@@ -124,6 +128,7 @@ PYTHON = re.compile(r"python[0-9.]*")
 FIXED_PROGRAMS = (
     ("native:ffmpeg", re.compile(r'"(?:ffmpeg|ffprobe)"')),
     ("native:caffeinate", re.compile(r'"(?:/usr/bin/)?caffeinate"')),
+    ("native:system_profiler", re.compile(r'"(?:/usr/sbin/)?system_profiler"')),
 )
 #: An id in backquotes in the Id column; group 1 is the id.
 ID_IN_CELL = re.compile(r"`([^`]*)`")
