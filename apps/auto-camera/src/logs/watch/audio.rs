@@ -182,6 +182,9 @@ mod tests {
             dropped: 0,
             unusable: 0,
             unheard: false,
+            correction_ppm: 0.0,
+            drift_resets: 0,
+            drift_steps: 0,
         }
     }
 

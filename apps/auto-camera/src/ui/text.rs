@@ -16,6 +16,10 @@ use ac_engine::{
 use ac_media::SourceState;
 use ac_output::{EncoderStats, StreamHealth, StreamState};
 
+mod audio;
+
+pub use audio::drift_line;
+
 /// Shown for a value that is not known.
 pub const NONE: &str = "–";
 

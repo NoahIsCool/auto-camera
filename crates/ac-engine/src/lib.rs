@@ -33,7 +33,8 @@
 //! * [`program_audio`] is where program audio comes from: a video source's
 //!   embedded audio, which its decoder mixes to stereo, or an audio input
 //!   (an audio-only feed such as a soundboard's, [`AudioInputEntry`]), cut
-//!   to the stereo pair the config picks before it reaches the encoder.
+//!   to the stereo pair the config picks and corrected for its sample
+//!   clock's drift before it reaches the encoder.
 //! * [`StudioConfig`] describes a studio (sources, queries, detector,
 //!   output, director, framing) as TOML or JSON, in a layout named by its
 //!   `schema` key ([`SCHEMA_VERSION`]).

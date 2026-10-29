@@ -59,6 +59,7 @@ opt-level = 3
 opt-level = 3
 
 # The program loudness meter filters every sample of program audio (two
-# biquads and a 48-tap interpolator per channel).
+# biquads and a 48-tap interpolator per channel), and the drift corrector
+# resamples audio inputs on their own clock (a 48-tap windowed sinc).
 [profile.dev.package.ac-audio]
 opt-level = 3

@@ -1,5 +1,8 @@
 //! Program loudness and peak metering after ITU-R BS.1770-4 and EBU R 128,
-//! with the meter behaviour of EBU Tech 3341 (spec M12, "peak/LUFS meter").
+//! with the meter behaviour of EBU Tech 3341 (spec M12, "peak/LUFS meter"),
+//! and drift correction for audio inputs on their own sample clock (spec
+//! C.3, A/V sync drift-free over a show; see [Drift
+//! correction](#drift-correction)).
 //!
 //! # What is measured
 //!
@@ -53,20 +56,43 @@
 //! * Memory is fixed for a show of any length: integrated loudness keeps a
 //!   histogram of block loudness ([`gating::GatedLoudness`]), not every
 //!   block.
+//!
+//! # Drift correction
+//!
+//! A soundboard's USB interface samples on its own crystal, a few tens of
+//! parts per million off the clock the engine runs on: over three hours,
+//! 100 ppm is a second. [`drift`] measures that drift from the blocks' PTS
+//! (master-clock times) against their sample counts, filtering the PTS's
+//! jitter and never taking a step in them for drift: a small one (audio
+//! lost) is timing error, a large one (a reconnection) a break, and a
+//! timestamp that strays for a block or a few and comes back is neither.
+//! [`correct`] cancels the drift by resampling the input a few ppm with
+//! [`resample`]'s band-limited windowed-sinc resampler, whose ratio ramps
+//! and never jumps, makes up a small step with silence or a cut once the
+//! blocks after it confirm it, and leaves the blocks bit for bit as they
+//! are while the drift is within a dead band, as it always is for a file
+//! played on the engine's clock. Like the meter, all of it is pure:
+//! samples, PTS and sample counts in, samples and estimates out.
 
+pub mod correct;
+pub mod drift;
 pub mod gating;
 pub mod kweighting;
 pub mod meter;
+pub mod resample;
 pub mod true_peak;
 
 #[cfg(test)]
 mod signals;
 
+pub use correct::{Corrected, DriftCorrector, DriftStats, Resampled};
+pub use drift::{DriftError, DriftEstimator, DriftSettings, Observation};
 pub use gating::GatedLoudness;
 pub use kweighting::KWeighting;
 pub use meter::{
     LoudnessMeter, LoudnessReading, MAX_CHANNELS, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE, MeterError,
 };
+pub use resample::Resampler;
 pub use true_peak::TruePeak;
 
 /// BS.1770's offset from `10·log10` of the weighted mean square to LUFS.

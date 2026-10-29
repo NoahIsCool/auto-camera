@@ -689,3 +689,149 @@ fn live_queries_show_what_the_detector_is_asked_for() {
     assert!(!reordered.shot_words_overridden());
     assert!(query_hover(&query("drummer wide", false, None)).contains("\nNote: \"wide\""));
 }
+
+/// The program input's line in `snap`, without its tone.
+fn line(snap: &EngineSnapshot) -> Option<String> {
+    drift_line(snap).map(|(line, _)| line)
+}
+
+/// A board as program audio, running with `correction_ppm`.
+fn board(correction_ppm: f64) -> ac_engine::AudioInputView {
+    ac_engine::AudioInputView {
+        id: ac_core::SourceId("board".into()),
+        name: "Soundboard".into(),
+        state: SourceState::Running,
+        error: None,
+        format: Some((48_000, 2)),
+        pick: None,
+        program: true,
+        blocks: 100,
+        dropped: 0,
+        unusable: 0,
+        unheard: false,
+        correction_ppm,
+        drift_resets: 0,
+        drift_steps: 0,
+    }
+}
+
+#[test]
+fn the_program_inputs_drift_correction_is_shown() {
+    let mut snap = snapshot();
+    assert_eq!(line(&snap), None, "no audio input");
+    let listed = ac_engine::AudioInputView {
+        program: false,
+        ..board(-37.26)
+    };
+    snap.audio_inputs = vec![listed.clone()];
+    assert_eq!(line(&snap), None, "not program audio");
+    snap.audio_inputs[0].program = true;
+    assert_eq!(
+        drift_line(&snap),
+        Some(("Soundboard drift correction -37.3 ppm".into(), Tone::Plain))
+    );
+    snap.audio_inputs[0].drift_resets = 1;
+    assert!(line(&snap).unwrap().ends_with(" · 1 reset"));
+    snap.audio_inputs[0].drift_steps = 1;
+    assert!(
+        line(&snap)
+            .unwrap()
+            .ends_with(" · 1 reset · 1 step made up")
+    );
+    snap.audio_inputs[0] = ac_engine::AudioInputView {
+        correction_ppm: 0.0,
+        drift_resets: 3,
+        drift_steps: 2,
+        ..listed
+    };
+    snap.audio_inputs[0].program = true;
+    assert_eq!(
+        line(&snap).as_deref(),
+        Some("Soundboard drift correction 0.0 ppm · 3 resets · 2 steps made up")
+    );
+    snap.audio_inputs[0].drift_resets = 0;
+    assert_eq!(
+        line(&snap).as_deref(),
+        Some("Soundboard drift correction 0.0 ppm · 2 steps made up")
+    );
+}
+
+#[test]
+fn a_program_input_that_is_not_running_shows_why_not_a_stale_correction() {
+    // Unplugged mid-show: the correction it had is not being applied, so
+    // the line says the board is offline and why, in amber.
+    let mut snap = snapshot();
+    let gone = "audio device \"SQ\" went away: Device disconnected";
+    snap.audio_inputs = vec![ac_engine::AudioInputView {
+        state: SourceState::Offline,
+        error: Some(gone.into()),
+        ..board(-101.1)
+    }];
+    let expected = format!("Soundboard offline: {gone}");
+    assert_eq!(drift_line(&snap), Some((expected, Tone::Warning)));
+    // Being opened again, with the reason it went.
+    snap.audio_inputs[0].state = SourceState::Reconnecting;
+    let (text, tone) = drift_line(&snap).unwrap();
+    assert!(
+        text.starts_with("Soundboard reconnecting: audio device"),
+        "{text}"
+    );
+    assert_eq!(tone, Tone::Warning);
+    // Never connected (not plugged in at start, or a build without the
+    // device backend): no "0.0 ppm" as if its blocks passed as they are.
+    let missing = "no audio device with UID \"AppleUSBAudioEngine:SQ\"";
+    snap.audio_inputs[0] = ac_engine::AudioInputView {
+        state: SourceState::Offline,
+        error: Some(missing.into()),
+        format: None,
+        blocks: 0,
+        ..board(0.0)
+    };
+    let (text, tone) = drift_line(&snap).unwrap();
+    assert_eq!(text, format!("Soundboard offline: {missing}"));
+    assert_eq!(tone, Tone::Warning);
+    // Starting is weak; stopped (a recording that ended) is amber.
+    snap.audio_inputs[0] = ac_engine::AudioInputView {
+        state: SourceState::Starting,
+        ..board(0.0)
+    };
+    let starting = Some(("Soundboard starting".to_owned(), Tone::Weak));
+    assert_eq!(drift_line(&snap), starting);
+    snap.audio_inputs[0].state = SourceState::Stopped;
+    let stopped = Some(("Soundboard stopped".to_owned(), Tone::Warning));
+    assert_eq!(drift_line(&snap), stopped);
+    // Running with an error (a discontinuity it reported): the error.
+    snap.audio_inputs[0].state = SourceState::Running;
+    snap.audio_inputs[0].error = Some("audio discontinuity (1 so far)".into());
+    let running = "Soundboard: audio discontinuity (1 so far)".to_owned();
+    assert_eq!(drift_line(&snap), Some((running, Tone::Warning)));
+}
+
+#[test]
+fn a_program_input_not_heard_for_its_rate_shows_why_alone() {
+    // Plugged in at 96 kHz after the output started on the 48 kHz stand-in:
+    // it runs, but the pacer drops its blocks, so its correction would
+    // mislead. Its error names it, so the line is the error alone, amber.
+    let mut snap = snapshot();
+    let why = ac_engine::program_audio::unheard("Soundboard", 96_000, 48_000);
+    snap.audio_inputs = vec![ac_engine::AudioInputView {
+        error: Some(why.clone()),
+        format: Some((96_000, 2)),
+        unheard: true,
+        drift_steps: 1,
+        ..board(-12.0)
+    }];
+    assert_eq!(drift_line(&snap), Some((why, Tone::Warning)));
+    // Without the error (a view built by hand) it still says so.
+    snap.audio_inputs[0].error = None;
+    let bare = "Soundboard is not heard at its rate".to_owned();
+    assert_eq!(drift_line(&snap), Some((bare, Tone::Warning)));
+    // Heard again after a restart: the correction is back.
+    snap.audio_inputs[0].unheard = false;
+    let (text, tone) = drift_line(&snap).unwrap();
+    assert_eq!(
+        text,
+        "Soundboard drift correction -12.0 ppm · 1 step made up"
+    );
+    assert_eq!(tone, Tone::Plain);
+}
