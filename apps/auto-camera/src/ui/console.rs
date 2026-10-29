@@ -19,6 +19,8 @@
 //! is answered when it is queued, so its drop is only in the snapshots) and
 //! one for a suggestion the director held back for the operator's shot,
 //! and clears a notice that has been shown long enough, by egui's clock.
+//! The app can raise one as the window opens, before any frame
+//! ([`Console::raise_on_open`]), for the config's load warnings.
 //!
 //! # What the operator saw
 //!
@@ -142,6 +144,13 @@ impl Console {
     /// a failure.
     pub fn notice(&self, snap: &EngineSnapshot) -> Option<(String, bool)> {
         self.notices.shown(snap)
+    }
+
+    /// Raises `text`, a failure when `error`, as the window opens (the
+    /// config's load warnings): at egui time 0, since egui's clock counts
+    /// from the app's start, so it shows for as long as any other notice.
+    pub fn raise_on_open(&mut self, text: String, error: bool) {
+        self.notices.raise(text, error, 0.0);
     }
 
     /// Tells the console that the engine has answered every command it

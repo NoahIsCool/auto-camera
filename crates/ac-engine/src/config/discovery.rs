@@ -40,10 +40,17 @@ impl Default for DiscoverySettings {
 }
 
 impl DiscoverySettings {
-    /// Checks the rate and the ages.
+    /// Checks the rate and the ages, failing on the first of
+    /// [`Self::problems`].
     pub fn validate(&self) -> Result<(), String> {
+        self.problems().into_iter().next().map_or(Ok(()), Err)
+    }
+
+    /// Every key out of range, each message naming it.
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
         if !(self.rate_hz > 0.0 && self.rate_hz <= 30.0) {
-            return Err(format!(
+            out.push(format!(
                 "discovery.rate_hz {} must be in (0, 30]",
                 self.rate_hz
             ));
@@ -54,10 +61,10 @@ impl DiscoverySettings {
             ("max_undetected_s", self.max_undetected_s),
         ] {
             if !(v > 0.0 && v <= 3600.0) {
-                return Err(format!("discovery.{name} {v} must be in (0, 3600]"));
+                out.push(format!("discovery.{name} {v} must be in (0, 3600]"));
             }
         }
-        Ok(())
+        out
     }
 
     /// Interval between requests.

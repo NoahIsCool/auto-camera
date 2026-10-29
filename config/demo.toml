@@ -4,8 +4,12 @@
 #
 #   cargo run -p auto-camera                         # operator window
 #   cargo run -p auto-camera -- --headless --seconds 5 --record /tmp/demo.mp4
+#   cargo run -p auto-camera -- --check                # is it ready? (no start)
 #
 # Relative paths in this file are resolved against this file's directory.
+
+# The layout this file is written in (README, "Studio configuration").
+schema = 1
 
 [[sources]]
 id = "stage"
