@@ -1,6 +1,7 @@
 //! Audio inputs through the engine runtime (spec M12, "one stereo input"):
 //! a soundboard recording, played as an audio-only input, is program
-//! audio, picked to the stereo pair its config names before the encoder.
+//! audio, picked to the stereo pair its config names before the encoder,
+//! while a source's own mono track keeps the level it always had.
 //!
 //! The encoder's ffmpeg is a wrapper that runs the real one with one more
 //! output: the program audio exactly as the engine sent it (raw `f32`,
@@ -8,6 +9,13 @@
 //! the WAV was written with ([`fake_sample`]). The WAV files are made by
 //! the tests; none is kept in the repository. Skipped when ffmpeg is not
 //! installed (unless `AC_REQUIRE_FFMPEG` is set).
+//!
+//! These engines run in real time ([`start_real_time`]), not on the
+//! sped-up clock of the other engine tests: a looping file input starts
+//! the decoder of its next pass one pass ahead, and four times real time
+//! leaves ffmpeg a quarter of that to start, which a loaded machine misses
+//! for a short file; the silence the pacer then inserts would read here as
+//! lost audio.
 
 #![cfg(unix)]
 
@@ -19,17 +27,23 @@ use std::process::Command;
 
 use ac_core::ShotId;
 use ac_engine::{
-    AudioInputEntry, DetectorSettings, EngineCommand, EngineHandle, OutputState, StudioConfig,
+    AudioInputEntry, DetectorSettings, Engine, EngineCommand, EngineHandle, EngineOptions,
+    OutputState, StudioConfig,
 };
 use ac_media::{ChannelPick, SourceState};
-use ac_sources::{AudioInputConfig, WavEncoding, fake_sample, write_fake_wav};
+use ac_sources::{AudioInputConfig, SourceConfig, WavEncoding, fake_sample, write_fake_wav};
 
-use common::{WAIT, have, start, studio, temp_path};
+use common::{WAIT, have, studio, temp_path};
 
 /// Sample frames per block of a 48 kHz file input: blocks are cut (and
 /// dropped by the pacer) whole, so a jump in the program audio can only be
 /// at a multiple of this.
 const BLOCK: u64 = 480;
+
+/// Starts `config` paced by the wall clock; see the module docs.
+fn start_real_time(config: StudioConfig) -> Engine {
+    Engine::start_with(config, EngineOptions::default()).expect("engine starts")
+}
 
 /// A fresh folder for one test.
 fn folder(name: &str) -> PathBuf {
@@ -79,16 +93,18 @@ fn board(path: &Path, channels: Option<Vec<u16>>, channel_count: Option<u16>) ->
     }
 }
 
-/// Records `seconds` of program to `record` once the source and the audio
-/// input deliver, then stops the output; returns the last snapshot's
-/// loudness sample peak.
+/// Records `seconds` of program to `record` once the source and every
+/// audio input deliver, then stops the output; returns the last
+/// snapshot's loudness sample peak.
 fn record_program(h: &EngineHandle, record: &Path, seconds: u64) -> f64 {
     let wide = ShotId("stage/wide".into());
     h.wait_until(WAIT, |s| {
         s.shot(&wide).is_some_and(|v| v.available)
-            && s.audio_inputs[0].state == SourceState::Running
+            && s.audio_inputs
+                .iter()
+                .all(|a| a.state == SourceState::Running)
     })
-    .expect("the source and the audio input deliver");
+    .expect("the source and the audio inputs deliver");
     h.send(EngineCommand::StartOutput {
         rtmp_url: None,
         record_path: Some(record.into()),
@@ -219,7 +235,7 @@ fn a_sixteen_channel_board_reaches_the_encoder_as_its_picked_pair() {
     write_fake_wav(&wav, 48_000, 16, frames, WavEncoding::Pcm16, false).unwrap();
     let (ffmpeg, capture) = capturing_ffmpeg(&dir);
     let entry = board(&wav, Some(vec![3, 4]), Some(16));
-    let engine = start(board_studio(entry, ffmpeg));
+    let engine = start_real_time(board_studio(entry, ffmpeg));
     let record = dir.join("program.mp4");
     let peak = record_program(&engine.handle(), &record, 3);
     let report = engine.shutdown().unwrap();
@@ -255,7 +271,7 @@ fn a_mono_input_is_on_both_sides_of_the_program() {
     let (frames, wav) = (60 * BLOCK, dir.join("mono.wav"));
     write_fake_wav(&wav, 48_000, 1, frames, WavEncoding::Pcm16, false).unwrap();
     let (ffmpeg, capture) = capturing_ffmpeg(&dir);
-    let engine = start(board_studio(board(&wav, None, None), ffmpeg));
+    let engine = start_real_time(board_studio(board(&wav, None, None), ffmpeg));
     let record = dir.join("program.mp4");
     record_program(&engine.handle(), &record, 3);
     let report = engine.shutdown().unwrap();
@@ -263,6 +279,68 @@ fn a_mono_input_is_on_both_sides_of_the_program() {
     assert_eq!((view.format, view.pick), (Some((48_000, 1)), None));
     let audio = check_program(&read_capture(&capture), 0, 0, frames);
     assert!(audio >= 2 * 48_000, "only {audio} frames of audio");
+    assert_eq!(recorded_channels(&record), "48000,2");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Writes, in `dir`, a 1 s 320x180 30 fps clip whose embedded audio is
+/// ffmpeg's 48 kHz 440 Hz `sine` tone (crest 1/8) on one channel.
+fn mono_clip(dir: &Path) -> PathBuf {
+    let path = dir.join("mono.mkv");
+    let status = Command::new("ffmpeg")
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-f", "lavfi", "-i"])
+        .arg("testsrc=size=320x180:rate=30:duration=1")
+        .args(["-f", "lavfi", "-i"])
+        .arg("sine=frequency=440:sample_rate=48000:duration=1")
+        .args(["-ac", "1", "-c:a", "pcm_s16le"])
+        .args(["-c:v", "mpeg4", "-q:v", "4"])
+        .arg(&path)
+        .status()
+        .expect("ffmpeg runs");
+    assert!(status.success(), "ffmpeg could not make the clip");
+    path
+}
+
+/// A source's mono track as program audio is on both sides at −3 dB, as
+/// the encoder spread it when it was given the source's own channel
+/// count: a config without audio inputs sounds and meters as it did.
+#[test]
+fn a_sources_mono_track_keeps_its_level_in_the_program() {
+    if !have("ffmpeg") || !have("ffprobe") {
+        eprintln!("skipped: ffmpeg is not installed");
+        return;
+    }
+    let dir = folder("embedded");
+    let (ffmpeg, capture) = capturing_ffmpeg(&dir);
+    let mut config = studio(1);
+    config.sources[0].input = SourceConfig::File {
+        path: mono_clip(&dir),
+        loop_playback: true,
+        max_width: None,
+        audio: true,
+        start_s: None,
+        duration_s: None,
+    };
+    config.detector = DetectorSettings::None;
+    config.queries.clear();
+    config.output.audio_source = Some("stage".into());
+    config.output.ffmpeg = ffmpeg;
+    let engine = start_real_time(config);
+    let record = dir.join("program.mp4");
+    let peak = record_program(&engine.handle(), &record, 2);
+    engine.shutdown().unwrap();
+
+    let mut loudest = 0f32;
+    for (i, (l, r)) in read_capture(&capture).into_iter().enumerate() {
+        assert_eq!(l.to_bits(), r.to_bits(), "frame {i}: both sides alike");
+        loudest = loudest.max(l.abs());
+    }
+    let want = 0.125 * std::f64::consts::FRAC_1_SQRT_2;
+    let got = f64::from(loudest);
+    assert!((got - want).abs() < 1e-4, "peak {got}, want {want} (−3 dB)");
+    let want = 20.0 * want.log10();
+    assert!((peak - want).abs() < 0.05, "meter {peak} dBFS, want {want}");
     assert_eq!(recorded_channels(&record), "48000,2");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -279,7 +357,7 @@ fn an_input_without_the_picked_channels_stays_offline_with_the_reason() {
     let dir = folder("refused");
     let wav = dir.join("stereo.wav");
     write_fake_wav(&wav, 48_000, 2, 4_800, WavEncoding::Pcm16, false).unwrap();
-    let engine = start(board_studio(
+    let engine = start_real_time(board_studio(
         board(&wav, Some(vec![3, 4]), None),
         "ffmpeg".into(),
     ));

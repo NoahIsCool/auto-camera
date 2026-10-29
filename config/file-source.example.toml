@@ -147,9 +147,9 @@ profile = "music"
 width = 1280
 height = 720
 fps = 30
-# Program audio comes from this source's embedded audio track (as stereo:
-# its first two channels, or a mono track on both sides), or from an audio
-# input's id (above).
+# Program audio comes from this source's embedded audio track (mixed to
+# stereo as it is decoded: a mono track on both sides at -3 dB), or from an
+# audio input's id (above).
 audio_source = "cam-1"
 # rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
 # Unlike the paths above, a relative recording path is taken from the

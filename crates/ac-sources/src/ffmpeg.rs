@@ -13,6 +13,15 @@
 //! frames of variable-rate input), which is what lets PTS be derived from the
 //! frame number.
 //!
+//! A video file's audio is decoded at its own rate, always as stereo
+//! ([`PROGRAM_CHANNELS`]), the channel count of program audio. ffmpeg mixes
+//! it with its standard matrix for the stream's own layout: a stereo stream
+//! passes as it is, a mono one goes on both sides at −3 dB, and a 5.1 one
+//! folds its centre and surrounds into the front pair at −3 dB and leaves
+//! out its LFE. That is the mix the encoder applied when it was handed the
+//! stream's own channels, so program audio from a video source keeps the
+//! level it had then, and the engine takes the blocks as they are.
+//!
 //! An audio-only input ([`crate::audio_input`]) decodes its stream with no
 //! rate or channel option at all: ffmpeg then neither resamples nor remixes
 //! it (asking for the stream's own channel count can still remix a layout
@@ -32,7 +41,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use ac_media::MediaError;
+use ac_media::{MediaError, PROGRAM_CHANNELS};
 
 use crate::frame_rate::FrameRate;
 use crate::probe::{AudioStreamInfo, FfmpegTools, VideoStreamInfo, file_url};
@@ -135,8 +144,8 @@ pub(crate) fn video_args(
 }
 
 /// Arguments that decode `audio` from `path`, cut to `cut`, to interleaved
-/// little-endian `f32` samples at the stream's own rate and channel count on
-/// stdout.
+/// little-endian `f32` samples at the stream's own rate, mixed to stereo
+/// (see the module docs), on stdout.
 pub(crate) fn audio_args(path: &Path, audio: &AudioStreamInfo, cut: &Cut) -> Vec<OsString> {
     let mut args: Vec<OsString> = COMMON.iter().map(OsString::from).collect();
     args.extend(cut.input_args());
@@ -154,7 +163,7 @@ pub(crate) fn audio_args(path: &Path, audio: &AudioStreamInfo, cut: &Cut) -> Vec
         "-ar".into(),
         audio.sample_rate.to_string(),
         "-ac".into(),
-        audio.channels.to_string(),
+        PROGRAM_CHANNELS.to_string(),
         "pipe:1".into(),
     ] {
         args.push(a.into());
@@ -261,19 +270,21 @@ mod tests {
     }
 
     #[test]
-    fn audio_command_keeps_source_rate_and_channels() {
-        let a = AudioStreamInfo {
-            index: 1,
-            sample_rate: 44_100,
-            channels: 6,
-        };
-        let joined = strings(&audio_args(Path::new("/a.mkv"), &a, &Cut::Whole));
-        let at = |flag: &str| &joined[joined.iter().position(|a| a == flag).unwrap() + 1];
-        assert_eq!(at("-map"), "0:1");
-        assert_eq!(at("-f"), "f32le");
-        assert_eq!(at("-ar"), "44100");
-        assert_eq!(at("-ac"), "6");
-        assert!(!joined.contains(&"-af".to_string()));
+    fn audio_command_keeps_the_source_rate_and_mixes_to_stereo() {
+        for channels in [1, 2, 6] {
+            let a = AudioStreamInfo {
+                index: 1,
+                sample_rate: 44_100,
+                channels,
+            };
+            let joined = strings(&audio_args(Path::new("/a.mkv"), &a, &Cut::Whole));
+            let at = |flag: &str| &joined[joined.iter().position(|a| a == flag).unwrap() + 1];
+            assert_eq!(at("-map"), "0:1");
+            assert_eq!(at("-f"), "f32le");
+            assert_eq!(at("-ar"), "44100");
+            assert_eq!(at("-ac"), "2", "{channels} channels");
+            assert!(!joined.contains(&"-af".to_string()));
+        }
     }
 
     #[test]

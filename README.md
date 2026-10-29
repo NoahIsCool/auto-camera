@@ -475,15 +475,23 @@ audio_source = "board"
 
 The picked channels are copied as they are; nothing is mixed. Without
 `channels` the program takes channels 1 and 2, or a mono input's one on
-both sides, and so does a source's embedded audio. A pick beyond
-`channel_count` fails the load; an input that opens without the picked
-channels, or with another count than `channel_count`, stays offline with
-the reason and is retried, like a source. Nothing resamples: an output
-runs at its input's rate, or at 48 kHz when it starts before the input has
-connected. The engine never waits on an input: a stall is filled with
-silence and the late audio after it cut, and a sample clock that drifts
-from the engine's is kept in step the same way, so the program stays in
-sync. A config without `[[audio_inputs]]` works as before.
+both sides at full level. A pick beyond `channel_count` fails the load; an
+input that opens without the picked channels, or with another count than
+`channel_count`, stays offline with the reason and is retried, like a
+source. The engine does not resample: program audio reaches the encoder at
+the input's own rate (48 kHz while the input has not connected), and the
+encoder converts it to 48 kHz AAC. The engine never waits on an input: a
+stall is filled with silence and the late audio after it cut, and a sample
+clock that drifts from the engine's is kept in step the same way, so the
+program stays in sync.
+
+A source's embedded audio is mixed to stereo by ffmpeg as it is decoded,
+with the matrix the encoder used on it before: a stereo track as it is, a
+mono one on both sides at −3 dB, a 5.1 one with its centre and surrounds
+folded into left and right at −3 dB and its LFE left out. A config
+without `[[audio_inputs]]` therefore sounds as before. One reading
+changes: for a track of more than two channels the loudness meter now
+reads the stereo mix the encoder is given, not the track's own channels.
 
 ## Shows
 
@@ -694,8 +702,8 @@ than for a show; choosing a model per query comes later.
 
 ## Program loudness
 
-While the output runs with program audio (`output.audio_source`, a
-source's or an audio input's), the paced audio the encoder gets is also metered after ITU-R BS.1770-4 and
+While the output runs with program audio (`output.audio_source`), the
+paced audio the encoder gets is also metered after ITU-R BS.1770-4 and
 EBU R 128 (`crates/ac-audio`): momentary (400 ms) and short-term (3 s)
 loudness, integrated loudness over the session (gated at −70 LUFS and
 10 LU below the programme, so silence and pauses do not count), and the

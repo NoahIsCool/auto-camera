@@ -10,23 +10,31 @@
 //! # Channels
 //!
 //! The encoder is always opened for [`PROGRAM_CHANNELS`] (two) channels.
-//! Every block of the origin is cut down to two before it reaches the pacer
+//! A video source's audio is stereo already: its decoder mixes the stream
+//! with ffmpeg's standard matrix ([`ac_sources::FileSource`]), the mix the
+//! encoder applied when it was handed the stream's own channels, so a mono
+//! track is on both sides at −3 dB and a 5.1 track keeps its centre. Its
+//! blocks are taken as they are; one of another channel count is dropped by
+//! the pacer (its `mismatched_blocks`) rather than mixed here.
+//!
+//! An audio input's blocks are cut down to two before they reach the pacer
 //! ([`ChannelPick::select`]): the samples of the picked channels are copied
-//! bit for bit, nothing is mixed. An audio input takes its configured
-//! `channels` (a pair, or one channel on both sides); otherwise, and for a
-//! video source's audio always, the first two channels are taken, or a mono
-//! block's one on both sides ([`ChannelPick::first_of`]). A stereo block
-//! with the default pick passes through as it is. A block that lacks the
-//! picked channels (an input that changed its layout under its supervisor)
-//! is dropped and counted ([`AudioInputView::unusable`]), and the pacer
-//! fills the gap with silence, so the program never gets the wrong
-//! channels.
+//! bit for bit, nothing is mixed. The input takes its configured `channels`
+//! (a pair, or one channel on both sides), or else its first two, a mono
+//! input's one on both sides at full level ([`ChannelPick::first_of`]). A
+//! stereo block with the default pick passes through as it is. A block
+//! that lacks the picked channels (an input that changed its layout under
+//! its supervisor) is dropped and counted ([`AudioInputView::unusable`]),
+//! and the pacer fills the gap with silence, so the program never gets the
+//! wrong channels.
 //!
 //! # Rate
 //!
-//! Nothing resamples: an output's sample rate is the origin's, as its newest
-//! connection describes it when the output starts ([`ProgramAudio::format`]).
-//! A video source that has described no audio gives the output none. An
+//! The engine does not resample: program audio reaches the encoder at the
+//! origin's own rate, as its newest connection describes it when the output
+//! starts ([`ProgramAudio::format`]), and the encoder converts it to 48 kHz
+//! AAC, so the recording and the stream are 48 kHz whatever that rate. A
+//! video source that has described no audio gives the output none. An
 //! audio input that has not connected yet is taken to run at
 //! [`STAND_IN_RATE`], the rate a soundboard runs at, so the recording still
 //! has its audio track and the input is heard as soon as it connects at that
@@ -219,14 +227,14 @@ impl ProgramAudio {
     }
 
     /// Drains the audio of every one of `sources` and every input, and
-    /// returns the origin's, oldest first, picked to stereo; see the
-    /// module docs.
+    /// returns the origin's, oldest first: a video source's as it is, an
+    /// input's picked to stereo; see the module docs.
     pub fn take(&mut self, sources: &[Box<dyn VideoSource>]) -> Vec<AudioBlock> {
         let mut program = Vec::new();
         for (i, s) in sources.iter().enumerate() {
             let blocks = s.drain_audio();
             if self.origin == Some(Origin::Source(i)) {
-                program.extend(blocks.iter().filter_map(|b| stereo(None, b)));
+                program = blocks;
             }
         }
         for (i, slot) in self.inputs.iter_mut().enumerate() {
@@ -276,8 +284,8 @@ impl ProgramAudio {
     }
 }
 
-/// `block` picked to stereo by `pick`, or by default when `None` (see the
-/// module docs); `None` when it lacks the channels.
+/// `block` of an audio input picked to stereo by `pick`, or by default
+/// when `None` (see the module docs); `None` when it lacks the channels.
 fn stereo(pick: Option<ChannelPick>, block: &AudioBlock) -> Option<AudioBlock> {
     pick.or_else(|| ChannelPick::first_of(block.channels))?
         .select(block)

@@ -1,6 +1,7 @@
-//! Tests of program audio: the pick to stereo (bit for bit), the origin's
-//! format and phase reference, draining every input, and a drifting,
-//! stalling input kept in step with video by the output's pacer.
+//! Tests of program audio: an input's pick to stereo (bit for bit), a
+//! video source's audio taken as it is, the origin's format and phase
+//! reference, draining every input, and a drifting, stalling input kept in
+//! step with video by the output's pacer.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -296,28 +297,33 @@ fn every_input_and_source_is_drained_and_only_the_origin_kept() {
 }
 
 #[test]
-fn a_video_sources_audio_is_picked_to_stereo_too() {
-    let (mono, mono_audio) = camera("mono", Some((44_100, 1)));
-    let (surround, surround_audio) = camera("surround", Some((48_000, 6)));
-    let sources = vec![mono, surround];
-    let mut from_mono = ProgramAudio::with_inputs(Some(Origin::Source(0)), Vec::new());
-    mono_audio.push([block("mono", 0, 1, 441)]);
-    surround_audio.push([block("surround", 0, 6, 480)]);
-    let out = from_mono.take(&sources);
-    assert_eq!(out.len(), 1);
-    for (n, (l, r)) in frames_of(&out).into_iter().enumerate() {
-        assert_eq!((l, r), (fake_sample(0, n as u64), fake_sample(0, n as u64)));
-    }
-    let mut from_surround = ProgramAudio::with_inputs(Some(Origin::Source(1)), Vec::new());
-    surround_audio.push([block("surround", 1, 6, 480)]);
-    let out = from_surround.take(&sources);
-    assert_eq!(out.iter().map(|b| b.seq).collect::<Vec<_>>(), [1]);
-    for (n, (l, r)) in frames_of(&out).into_iter().enumerate() {
-        let n = 480 + n as u64;
-        assert_eq!((l, r), (fake_sample(0, n), fake_sample(1, n)), "front pair");
-    }
-    assert_eq!(from_surround.phase_reference(), 1);
-    assert!(from_surround.views().is_empty());
+fn a_video_sources_audio_is_taken_as_it_is() {
+    // Its decoder mixes it to stereo (`ac_sources::FileSource`), so the
+    // engine neither picks nor mixes it: a stereo block passes as it is,
+    // and a block of another count is not put on both sides but left for
+    // the pacer to drop as another format than the encoder's.
+    let (cam, cam_audio) = camera("cam", Some((48_000, 2)));
+    let sources = vec![cam];
+    let mut audio = ProgramAudio::with_inputs(Some(Origin::Source(0)), Vec::new());
+    let stereo = block("cam", 0, 2, 480);
+    cam_audio.push([stereo.clone(), block("cam", 1, 1, 480)]);
+    let out = audio.take(&sources);
+    assert_eq!(out.len(), 2);
+    assert!(Arc::ptr_eq(&out[0].samples, &stereo.samples));
+    assert_eq!(
+        (out[1].seq, out[1].channels),
+        (1, 1),
+        "not picked to stereo"
+    );
+    let format = audio.format(&sources).unwrap();
+    let mut pacer = AudioPacer::new(format.sample_rate, 2, 30, AUDIO_SLACK, AUDIO_MAX_LEAD);
+    pacer.plan(1, out);
+    assert_eq!(
+        (pacer.stats().pushed, pacer.stats().mismatched_blocks),
+        (480, 1)
+    );
+    assert_eq!(audio.phase_reference(), 0);
+    assert!(audio.views().is_empty());
 }
 
 #[test]
@@ -328,7 +334,7 @@ fn the_output_format_is_stereo_at_the_origins_rate() {
             channels: 2,
         })
     };
-    let (cam, _) = camera("cam", Some((44_100, 6)));
+    let (cam, _) = camera("cam", Some((44_100, 2)));
     let (silent, _) = camera("silent", None);
     let sources = vec![cam, silent];
     let of = |origin, inputs| ProgramAudio::with_inputs(origin, inputs).format(&sources);

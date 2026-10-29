@@ -234,7 +234,9 @@ pub trait VideoSource: Send {
     /// number `after` (any frame when `None`) and returns the newest frame,
     /// or `None` when no newer one arrived in time.
     fn wait_newer(&self, after: Option<u64>, timeout: Duration) -> Option<VideoFrame>;
-    /// Audio decoded since the previous call, oldest first.
+    /// Audio decoded since the previous call, oldest first. Program audio
+    /// takes a video source's blocks as they are, so a source mixes its
+    /// audio to stereo ([`PROGRAM_CHANNELS`]) before it delivers it.
     fn drain_audio(&self) -> Vec<AudioBlock>;
     /// The error behind the current state, if an error is the reason: what
     /// stopped the source, or what keeps a supervised source offline.
