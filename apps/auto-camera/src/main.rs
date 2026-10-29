@@ -27,13 +27,20 @@
 //! starts offline and is retried), so a run with a missing source file
 //! ticks and, like every run that ticked, keeps its trace.
 //!
+//! On macOS the system is kept awake while output runs in the window, and
+//! for the whole of a headless run ([`awake`]); elsewhere a note on stderr
+//! says it is not.
+//!
 //! Exit status: 0 on success, 1 when the engine, the output or the trace
 //! failed, 2 for usage and configuration errors, 130 after a termination
 //! signal.
 
+mod awake;
 mod cli;
 mod headless;
 mod signals;
+#[cfg(test)]
+mod testing;
 mod trace;
 mod ui;
 

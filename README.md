@@ -156,6 +156,24 @@ starts offline and is retried, see "Studio configuration"), so a run with a
 missing file ticks and, like every run that ticked, keeps its trace: move
 or remove it before running the same command again.
 
+## Staying awake while live
+
+On macOS the app keeps the Mac from sleeping while program goes out: it
+runs `caffeinate -i -m -s -w <its pid>` (no idle, disk or system sleep)
+while an output session runs in the window, with `-d` added because the
+window's monitors show program, and for the whole of a headless run, from
+before the detector loads until the recording is final. `caffeinate` is a
+supervised child like ffmpeg: it is killed and reaped when the session or
+run ends, and `-w` ends it if the app dies. Other platforms have no
+`caffeinate`; the app says so on stderr and runs on, as it does when
+`caffeinate` cannot start or ends early (the window when an output session
+turns out not to be held, a headless run at its start or its end). The
+engine's output view (`keep_awake`) says whether a live session is held,
+by the engine's own `caffeinate` or by the headless run's, and if not,
+why. This does not stop App Nap from throttling a minimized window: that
+takes `LSAppNapIsDisabled` in an app bundle's `Info.plist`, and the
+repository builds no bundle yet.
+
 ## Studio configuration
 
 A studio is one TOML file (or JSON, by extension). Every section but
@@ -380,7 +398,7 @@ than for a show; choosing a model per query comes later.
 | `ac-director` | Shot scoring, suggestions and opt-in auto-takes |
 | `ac-switcher` | Preview/program, cut/auto/T-bar transitions, the take queued during one |
 | `ac-compositor` | CPU program compositor |
-| `ac-output` | One ffmpeg encode to RTMP and fragmented MP4 |
+| `ac-output` | One ffmpeg encode to RTMP and fragmented MP4; `caffeinate` while live |
 | `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), framing-quality metrics, and the per-tick trace schema (`TraceRecord`) the engine emits and they score |
 | `ac-engine` | The runtime that wires them together (ADR 0002) |
 | `apps/auto-camera` | Operator window and headless runner |

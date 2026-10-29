@@ -34,6 +34,7 @@ channels, and the operator sees it only through immutable snapshots.
 | `ac-output-start`, `ac-output-finish` | `OutputController` | Start ffmpeg (probing encoders) and finish it (flushing the recording) off the engine thread, since both can take seconds. |
 | `ac-output-video/-audio/-progress/-stderr` and the `ffmpeg` child | `ProgramEncoder` | Feed and watch the single program encode (RTMP and MP4 from one encode, ADR 0001). |
 | `ac-trace`, with `--trace` | `apps/auto-camera` `TraceFile` | Writes the engine's per-tick trace records to the trace file as JSON Lines; nothing else writes to that file. |
+| the `caffeinate` child (macOS) | `KeepAwake`, held by the `OutputController` while a session is live, or by the headless runner for the whole run | Keeps the system (and, when the monitors show program, the display) awake; killed and reaped when the session or run ends, and tied to the app by `-w`. |
 | rayon pool | process | Data-parallel per-pixel kernels (tracker pyramid, compositor) *inside* a tick; holds no state. |
 
 ### Mailboxes and channels
@@ -131,8 +132,9 @@ started from then on carries its audio.
 engine thread stop the discovery workers (joining them after a pass in
 progress; a worker still loading its model is detached and exits when the
 load ends), shut the output down (finishing a running recording
-synchronously, joining every helper, reaping ffmpeg), stop the sources
-(joining their workers) and publish a final snapshot with `running = false`.
+synchronously, joining every helper, reaping ffmpeg and `caffeinate`), stop
+the sources (joining their workers) and publish a final snapshot with
+`running = false`.
 `Engine::shutdown` then joins the engine thread and reports the ticks run and
 threads joined. A Linux test checks that no `ac-*` thread and no child
 process remain.
