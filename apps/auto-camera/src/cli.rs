@@ -3,13 +3,17 @@
 //! ```text
 //! auto-camera [--config PATH] [--trace PATH]                    # operator window
 //! auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
+//! auto-camera [--config PATH] --check                           # readiness check
 //! ```
 //!
-//! Either mode also takes `--record-detections PATH`.
+//! The window and headless runs take `--log-dir PATH`, the folder for the
+//! log and crash reports (the per-user log folder when absent; see the
+//! `logs` module), and `--record-detections PATH`.
 //!
 //! The headless options are only accepted together with `--headless`, so a
-//! typo cannot silently open a window that records nothing. `--trace`
-//! works in both modes: it writes the engine's per-tick trace as JSON Lines
+//! typo cannot silently open a window that records nothing, and `--check`
+//! is accepted only on its own, since it starts nothing. `--trace` works in
+//! both other modes: it writes the engine's per-tick trace as JSON Lines
 //! ([`crate::trace`]). So does `--record-detections`: it writes every
 //! detector pass the engine applied, for the eval runner to replay
 //! ([`crate::detections`]). The config path defaults to the demo studio
@@ -61,6 +65,26 @@ pub struct Cli {
     /// scores) to this file as JSON lines, for replay; it must not exist.
     #[arg(long, value_name = "PATH")]
     pub record_detections: Option<PathBuf>,
+    /// Check the studio without starting it: list the problems with the
+    /// config and the files, tools and folders it names, then exit 0 when
+    /// there is none and 2 otherwise.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "headless",
+            "seconds",
+            "record",
+            "trace",
+            "record_detections",
+            "log_dir",
+        ]
+    )]
+    pub check: bool,
+    /// Folder for the log and crash reports [default:
+    /// ~/Library/Logs/auto-camera on macOS, $XDG_STATE_HOME/auto-camera or
+    /// ~/.local/state/auto-camera on Linux].
+    #[arg(long, value_name = "PATH")]
+    pub log_dir: Option<PathBuf>,
 }
 
 /// Parses a positive, finite number of seconds up to one day.
@@ -90,8 +114,10 @@ mod tests {
         let cli = parse(&[]).unwrap();
         assert_eq!(cli.config, PathBuf::from(DEFAULT_CONFIG));
         assert!(!cli.headless);
+        assert!(!cli.check);
         assert_eq!(cli.record, None);
         assert_eq!(cli.trace, None);
+        assert_eq!(cli.log_dir, None);
     }
 
     #[test]
@@ -119,6 +145,36 @@ mod tests {
             parse(&["--record-detections"]).is_err(),
             "a path is required"
         );
+    }
+
+    #[test]
+    fn check_runs_alone() {
+        let cli = parse(&["--check", "--config", "show.toml"]).unwrap();
+        assert!(cli.check && !cli.headless);
+        assert_eq!(cli.config, PathBuf::from("show.toml"));
+        assert!(parse(&["--check"]).unwrap().check);
+        assert!(parse(&["--check", "--headless"]).is_err());
+        assert!(parse(&["--check", "--record", "x.mp4"]).is_err());
+        assert!(parse(&["--check", "--seconds", "3"]).is_err());
+    }
+
+    #[test]
+    fn check_takes_no_trace_or_log() {
+        // A check starts no engine, so there is no trace or detection log to
+        // write.
+        assert!(parse(&["--check", "--trace", "t.jsonl"]).is_err());
+        assert!(parse(&["--check", "--record-detections", "d.jsonl"]).is_err());
+        // Nor does it keep the app's log.
+        assert!(parse(&["--check", "--log-dir", "logs"]).is_err());
+    }
+
+    #[test]
+    fn both_modes_take_a_log_folder() {
+        let window = parse(&["--log-dir", "/tmp/logs"]).unwrap();
+        assert_eq!(window.log_dir, Some(PathBuf::from("/tmp/logs")));
+        let headless = parse(&["--headless", "--log-dir", "logs"]).unwrap();
+        assert_eq!(headless.log_dir, Some(PathBuf::from("logs")));
+        assert!(parse(&["--log-dir"]).is_err(), "the folder is required");
     }
 
     #[test]

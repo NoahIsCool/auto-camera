@@ -12,7 +12,7 @@ use std::net::TcpListener;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ac_output::{AudioFormat, Encoder, EncoderChoice, OutputConfig, OutputError};
+use ac_output::{AudioFormat, Encoder, EncoderChoice, OutputConfig, OutputError, StreamState};
 
 /// A small 30 fps libx264 config recording to `path`.
 fn small(path: std::path::PathBuf) -> OutputConfig {
@@ -68,6 +68,7 @@ fn encodes_frames_and_sine_to_a_playable_fragmented_mp4() {
     assert!(stats.audio_connected);
     assert!(!stats.ffmpeg_alive);
     assert_eq!(stats.exit_code, Some(0));
+    assert_eq!(stats.stream, None, "the encode only records");
     assert!(stats.progress.ended, "{stats:?}");
     assert_eq!(stats.progress.frame, 60);
     assert!(
@@ -265,6 +266,10 @@ fn unreachable_rtmp_does_not_stop_the_recording() {
     assert_eq!(stats.frames_written, 45);
     let err = stats.last_error.expect("the RTMP failure is reported");
     assert!(!err.contains("test-stream-key"), "key leaked: {err}");
+    let stream = stats.stream.expect("the encode streamed");
+    assert_eq!(stream.state, StreamState::Down, "ffmpeg has exited");
+    assert!(stream.outages >= 1, "{stream:?}");
+    assert_eq!(stream.reconnects, 0, "{stream:?}");
 
     let video = common::probe(
         &path,

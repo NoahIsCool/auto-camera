@@ -4,6 +4,10 @@
 //! ([`Detectors::build`]; a sidecar detector starts its one shared process
 //! here), and spawns:
 //!
+//! * one **supervisor** per source (`ac-supervise-<source>`, see
+//!   `ac_sources::supervisor`), which owns the source's current connection
+//!   and opens it again, with a backoff of 0.5 s doubling to 8 s, whenever
+//!   it fails;
 //! * the **engine thread** (`ac-engine`), which owns the [`EngineCore`],
 //!   the sources, the discovery workers' inboxes, the sidecar service (if
 //!   any) and the [`OutputController`], and runs the master clock: one tick
@@ -11,9 +15,22 @@
 //!   ([`TickSchedule`](crate::schedule::TickSchedule));
 //! * one **discovery worker** per source with a detector
 //!   (`ac-discovery-<source>`);
-//! * whatever the sources, the sidecar service and the encoder spawn
+//! * whatever the sources, the sidecar service and the output spawn
 //!   internally (decoders, the sidecar process and its `ac-sam-*` threads,
-//!   ffmpeg pipes), owned by those objects.
+//!   ffmpeg pipes, and on macOS `caffeinate` while output runs), owned by
+//!   those objects.
+//!
+//! A source that cannot be opened at start (a file that is not there yet)
+//! does not stop the engine: it starts offline, described by its
+//! placeholder ([`crate::config::SourceEntry::placeholder_info`]), its
+//! snapshot says why ([`crate::SourceView::error`]), and its supervisor
+//! keeps trying, so it goes on air once the input appears. The other
+//! sources run meanwhile. Once it delivers, its description is the input's
+//! own (`VideoSource::current_info`): the core takes its size and rate,
+//! and an output started from then on carries its audio when it is the
+//! program audio source (an output already running keeps the format it
+//! started with). Only a configuration mistake that no retry can mend
+//! fails the start ([`StudioConfig::validate`]).
 //!
 //! Communication is by message passing only:
 //!
@@ -33,7 +50,8 @@
 //! is held across I/O. [`Engine::shutdown`] (or dropping the [`Engine`])
 //! sends [`EngineCommand::Shutdown`]; the engine thread then stops the
 //! sidecar (interrupting a pass or a load in progress, so the workers end
-//! at once; see [`crate::detectors`]), stops and joins the workers,
+//! at once; see [`crate::detectors`]; its final status stays readable for
+//! the final snapshot), stops and joins the workers,
 //! finishes the encoder (the recording is finalized), stops every source,
 //! publishes a final snapshot with `running == false` and exits, and
 //! `shutdown` joins it. No thread or child process outlives the engine.
@@ -60,9 +78,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use ac_media::{SourceInfo, VideoSource};
-use ac_output::AudioFormat;
+use ac_output::{AwakeMode, Caffeinate};
 use ac_sidecar::SidecarService;
-use ac_sources::{Clock, WallClock, open_source_with_clock};
+use ac_sources::{Backoff, Clock, WallClock, open_supervised};
 use thiserror::Error;
 
 use crate::command::{CommandError, CommandReply, EngineCommand};
@@ -93,7 +111,8 @@ pub enum EngineError {
     /// The configuration is invalid.
     #[error(transparent)]
     Config(#[from] ConfigError),
-    /// A source could not be opened.
+    /// A source's supervisor could not be started (a source that cannot be
+    /// opened yet starts offline instead).
     #[error("source {id}: {message}")]
     Source {
         /// The source id.
@@ -142,16 +161,25 @@ pub struct EngineOptions {
     /// Where the engine thread sends every discovery pass it applied
     /// ([`crate::detection_log`]); `None` for no log. Owned like `trace`.
     pub detections: Option<PassSender>,
+    /// How the machine is held awake while output runs (the display too
+    /// when the monitors show program): the system's `caffeinate` on macOS
+    /// ([`Caffeinate::system`]), a stand-in in tests, or [`Caffeinate::Off`]
+    /// when the caller holds it awake itself, as a headless run does for
+    /// the whole run (the output view then says
+    /// [`KeepAwakeState::HeldByCaller`](crate::KeepAwakeState::HeldByCaller)).
+    pub keep_awake: Caffeinate,
 }
 
 impl Default for EngineOptions {
-    /// Real time, a one-second lag limit, no trace and no detection log.
+    /// Real time, a one-second lag limit, no trace, no detection log and
+    /// the system's `caffeinate` while output runs.
     fn default() -> Self {
         Self {
             clock: Arc::new(WallClock::new()),
             max_lag: Duration::from_secs(1),
             trace: None,
             detections: None,
+            keep_awake: Caffeinate::system(),
         }
     }
 }
@@ -162,6 +190,7 @@ impl std::fmt::Debug for EngineOptions {
             .field("max_lag", &self.max_lag)
             .field("trace", &self.trace.is_some())
             .field("detections", &self.detections.is_some())
+            .field("keep_awake", &self.keep_awake)
             .finish_non_exhaustive()
     }
 }
@@ -197,7 +226,7 @@ impl std::fmt::Debug for Engine {
 struct Runtime {
     /// The deterministic core.
     core: EngineCore,
-    /// Sources, in config order.
+    /// Sources, in config order, each under its supervisor.
     sources: Vec<Box<dyn VideoSource>>,
     /// The detector sidecar the workers share, if any. Declared before the
     /// workers so that, when a panic unwinds the thread, it is dropped
@@ -213,10 +242,9 @@ struct Runtime {
     snapshots: Arc<Latest<Arc<EngineSnapshot>>>,
     /// Program output.
     output: OutputController,
-    /// Source whose audio is program audio.
+    /// Source whose audio is program audio; its format is read when an
+    /// output starts (`Runtime::program_audio_format`).
     audio_source: Option<usize>,
-    /// Format of that audio.
-    audio_format: Option<AudioFormat>,
     /// Master clock.
     clock: Arc<dyn Clock>,
     /// Tick interval.
@@ -245,14 +273,18 @@ impl Engine {
     pub fn start_with(config: StudioConfig, options: EngineOptions) -> Result<Self, EngineError> {
         config.validate()?;
         let mut sources: Vec<Box<dyn VideoSource>> = Vec::new();
+        let program_size = (config.output.width, config.output.height);
         for entry in &config.sources {
+            let offline = entry.placeholder_info(program_size);
+            let clock = options.clock.clone();
             let src =
-                open_source_with_clock(&entry.input, entry.source_id(), options.clock.clone())
-                    .map_err(|e| EngineError::Source {
+                open_supervised(&entry.input, offline, clock, Backoff::default()).map_err(|e| {
+                    EngineError::Source {
                         id: entry.id.clone(),
                         message: e.to_string(),
-                    })?;
-            sources.push(src);
+                    }
+                })?;
+            sources.push(Box::new(src));
         }
         let Detectors {
             loaders: detectors,
@@ -260,7 +292,7 @@ impl Engine {
         } = Detectors::build(&config)?;
         let infos: Vec<SourceInfo> = sources.iter().map(|s| s.info().clone()).collect();
         let enabled: Vec<bool> = detectors.iter().map(Option::is_some).collect();
-        let core = EngineCore::new(&config, infos.clone(), &enabled).map_err(EngineError::Setup)?;
+        let core = EngineCore::new(&config, infos, &enabled).map_err(EngineError::Setup)?;
         let (results_tx, results) = channel();
         let mut workers = Vec::new();
         for ((entry, detector), i) in config.sources.iter().zip(detectors).zip(0..) {
@@ -274,22 +306,17 @@ impl Engine {
             .audio_source
             .as_ref()
             .and_then(|id| config.sources.iter().position(|s| &s.id == id));
-        let audio_format =
-            audio_source
-                .and_then(|i| infos[i].audio)
-                .map(|(sample_rate, channels)| AudioFormat {
-                    sample_rate,
-                    channels,
-                });
         let snapshots = Arc::new(Latest::new());
-        let initial = Arc::new(core.snapshot(
+        let mut first = core.snapshot(
             OutputView::default(),
             TimingView {
                 budget_ms: config.frame_period().as_secs_f64() * 1e3,
                 ..TimingView::default()
             },
             true,
-        ));
+        );
+        first.sidecar = sidecar.as_ref().map(|s| s.status());
+        let initial = Arc::new(first);
         snapshots.publish(initial.clone());
         let (tx, commands) = channel();
         let runtime = Runtime {
@@ -300,9 +327,11 @@ impl Engine {
             results,
             commands,
             snapshots: snapshots.clone(),
-            output: OutputController::new(config.output.clone()),
+            output: OutputController::new(config.output.clone()).with_keep_awake(
+                options.keep_awake,
+                AwakeMode::for_display(config.monitors.feeds_display()),
+            ),
             audio_source,
-            audio_format,
             clock: options.clock,
             period: config.frame_period(),
             max_lag: options.max_lag,

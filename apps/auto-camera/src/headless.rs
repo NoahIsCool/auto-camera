@@ -6,10 +6,19 @@
 //!
 //! 1. **Start** the engine on the wall clock with monitors and multiview
 //!    tiles off (nobody is watching), and with `--trace` its trace writer
-//!    first, so that the trace has every tick from the first.
+//!    first, so that the trace has every tick from the first. From here
+//!    until the engine has shut down, the run holds the system awake (macOS
+//!    `caffeinate`, see [`crate::awake`]), the detector load and the
+//!    recording included; while it holds, the engine's own hold for the
+//!    output is turned off. Elsewhere, or when `caffeinate` cannot start,
+//!    the hold is skipped with a note on stderr.
 //! 2. **Signal**: wait for a wide shot to become available. A headless run
 //!    has no operator, so unless the director is in Auto mode (which
-//!    establishes a shot by itself) the first wide is cut to program.
+//!    establishes a shot by itself) the first wide is cut to program. A
+//!    source that cannot be opened (a file that is not there) does not stop
+//!    the engine, which keeps retrying it, so this phase waits for it like
+//!    for any source and, when none delivers, says what keeps each offline
+//!    ([`no_picture`]).
 //! 3. **Detector**: when a source has discovery, wait until no source's
 //!    detector is preparing, for at most [`DETECTOR_TIMEOUT`] (a cold
 //!    CoreML compile of OWLv2 takes two to three minutes, and every new
@@ -24,9 +33,14 @@
 //!    ffmpeg runs. The output also streams when the config sets an RTMP URL.
 //! 5. **Run** for the requested time, sampling snapshots to log program
 //!    changes, the largest subject count and each shot's crop size range.
-//! 6. **Stop** the output and wait for the recording to be finalized, then
-//!    shut the engine down, which joins every thread and reaps ffmpeg, and
-//!    wait for the trace writer to write the last record.
+//! 6. **Stop** the output and wait for the recording to be finalized, check
+//!    that every source delivered a picture at some point, then shut the
+//!    engine down, which joins every thread and reaps ffmpeg, wait for the
+//!    trace writer to write the last record, and end the hold, which reaps
+//!    `caffeinate` (and notes one that had ended early). Nobody watches a
+//!    headless run, so a source that stayed off the air throughout (a file
+//!    that never appeared) fails it, with what kept it offline
+//!    ([`never_delivered`]), instead of passing unseen.
 //!
 //! A termination signal (Ctrl-C, `SIGTERM`, `SIGHUP`) ends whichever phase
 //! is running; the engine is then shut down as after a normal run (which
@@ -48,7 +62,9 @@
 //! tick, so it equals `ticks` unless the writer fell behind (`missing`);
 //! a trace that cannot be created or written fails the run. A run whose
 //! engine does not start removes its empty trace file and reports no
-//! `trace`, so that the path is free when the command is run again.
+//! `trace`, so that the path is free when the command is run again. A run
+//! whose source never delivered a picture did start, so it reports and
+//! keeps its trace, as every run that ticked does.
 //!
 //! `--record-detections` works the same way ([`crate::detections`]): the
 //! summary's `detections` gives the passes written, one per pass the
@@ -64,6 +80,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::awake;
 use crate::detections;
 use crate::signals::QuitSignal;
 use crate::trace::{self, TraceFile};
@@ -73,15 +90,18 @@ use ac_engine::{
     DetectorSettings, Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot,
     MonitorSettings, OutputState, StudioConfig,
 };
+use ac_output::AwakeMode;
 
 mod flags;
 mod report;
+mod sidecar;
 mod summary;
 
 pub use flags::HeadlessOptions;
 pub use summary::{
-    DetectionsSummary, DirectorSummary, MatchSummary, OutputSummary, ProgramSummary, QuerySummary,
-    ShotSummary, SourceSummary, SubjectSummary, Summary, TimingSummary, TraceSummary,
+    DetectionsSummary, DirectorSummary, LoudnessSummary, MatchSummary, OutputSummary,
+    ProgramSummary, QuerySummary, ShotSummary, SourceSummary, StreamSummary, SubjectSummary,
+    Summary, TimingSummary, TraceSummary,
 };
 
 use report::{Totals, failed_to_start, summarize};
@@ -106,26 +126,38 @@ pub fn run(
     options: &HeadlessOptions,
     quit: &QuitSignal,
 ) -> Summary {
-    run_with(config, path, options, EngineOptions::default(), quit)
+    run_with(
+        config,
+        path,
+        options,
+        EngineOptions::default(),
+        quit,
+        awake::log,
+    )
 }
 
-/// [`run`] with explicit engine options (tests use a faster clock).
+/// [`run`] with explicit engine options (tests use a faster clock or a
+/// stand-in `caffeinate`, which the run holds instead of the engine), and
+/// with the run's notes passed to `log` instead of stderr.
 pub fn run_with(
     mut config: StudioConfig,
     path: &Path,
     options: &HeadlessOptions,
-    engine_options: EngineOptions,
+    mut engine_options: EngineOptions,
     quit: &QuitSignal,
+    mut log: impl FnMut(&str),
 ) -> Summary {
     let started = Instant::now();
     config.monitors = MonitorSettings::disabled();
+    let mode = AwakeMode::for_display(config.monitors.feeds_display());
+    let awake = awake::hold_for_run(&mut engine_options.keep_awake, mode, &mut log);
     let limit = detector_limit(&config.detector);
     let (trace, engine_options) = match trace::attach(options.trace.as_deref(), engine_options) {
         Ok(t) => t,
         Err(e) => return failed_to_start(path, options, started, e),
     };
-    let log = options.record_detections.as_deref();
-    let (detections, engine_options) = match detections::attach(log, engine_options) {
+    let passes = options.record_detections.as_deref();
+    let (detections, engine_options) = match detections::attach(passes, engine_options) {
         Ok(d) => d,
         Err(e) => {
             // The trace's sender went with the options: its file is empty.
@@ -149,6 +181,7 @@ pub fn run_with(
             return failed_to_start(path, options, started, error);
         }
     };
+    let _watch = crate::logs::watch(engine.handle());
     let mut sampler = Sampler::default();
     let error = drive(&engine, options, limit, &mut sampler, quit).err();
     let (ticks, threads_joined, final_snapshot, error) = match engine.shutdown() {
@@ -157,6 +190,7 @@ pub fn run_with(
     };
     let (trace, error) = finish_trace(trace, ticks, error);
     let (detections, error) = finish_detections(detections, final_snapshot.as_deref(), error);
+    awake::end_of_run(awake, &mut log);
     let last = sampler.last.clone().or(final_snapshot.clone());
     summarize(
         path,
@@ -237,6 +271,35 @@ fn failure_in(snap: &EngineSnapshot, why: &str) -> String {
     }
 }
 
+/// Why phase 2 failed in `snap`: no source delivered a picture in time,
+/// with the error of each source that has one (what keeps it offline).
+fn no_picture(snap: &EngineSnapshot) -> String {
+    let mut why = String::from("no source delivered a picture in time");
+    for s in &snap.sources {
+        if let Some(error) = &s.error {
+            why.push_str(&format!("; source {}: {error}", s.id.0));
+        }
+    }
+    why
+}
+
+/// Why a run failed in which a source of `snap` (the run's newest
+/// snapshot) never delivered a picture, naming each such source with the
+/// error that kept it offline, when it has one; `None` when every source
+/// delivered.
+fn never_delivered(snap: &EngineSnapshot) -> Option<String> {
+    let silent: Vec<String> = snap
+        .sources
+        .iter()
+        .filter(|s| s.frames == 0)
+        .map(|s| match &s.error {
+            Some(error) => format!("source {} never delivered a picture: {error}", s.id.0),
+            None => format!("source {} never delivered a picture", s.id.0),
+        })
+        .collect();
+    (!silent.is_empty()).then(|| silent.join("; "))
+}
+
 /// Why a run that a termination signal cut short failed.
 pub const INTERRUPTED: &str = "interrupted by a termination signal";
 
@@ -270,15 +333,19 @@ fn drive(
         .wait_until(SIGNAL_TIMEOUT, |s| {
             quit.requested() || first_wide(s).is_some()
         })
-        .ok_or_else(|| failure(&h, "no source delivered a picture in time"))?;
+        .ok_or_else(|| failure(&h, &no_picture(&h.snapshot())))?;
     if quit.requested() {
         return Err(INTERRUPTED.into());
     }
     sampler.record(&snap);
     if snap.director.mode != DirectorMode::Auto && snap.switcher.program.is_none() {
         let wide = first_wide(&snap).expect("checked above");
-        h.send(EngineCommand::SetPreview { shot: wide })
-            .and_then(|_| h.send(EngineCommand::Cut))
+        h.send(EngineCommand::SetPreview { shot: wide.clone() })
+            .and_then(|_| {
+                h.send(EngineCommand::Cut {
+                    preview: Some(wide),
+                })
+            })
             .map_err(|e| format!("cannot put a wide on program: {e}"))?;
     }
     await_detectors(|| h.snapshot(), sampler, detector_limit, quit)?;
@@ -331,7 +398,7 @@ fn drive(
             return Err(format!("the output failed: {:?}", snap.output.state));
         }
     }
-    Ok(())
+    never_delivered(&h.snapshot()).map_or(Ok(()), Err)
 }
 
 /// Phase 3: samples `snapshot` until no source's detector is preparing,
@@ -384,6 +451,9 @@ struct Sampler {
     log: Vec<(f64, String)>,
     /// Crop size range of every shot seen, by shot id.
     crops: HashMap<String, CropRange>,
+    /// The stream's health in the newest snapshot whose output was running
+    /// (once ffmpeg has exited the stream is down by definition).
+    stream: Option<ac_output::StreamHealth>,
 }
 
 impl Sampler {
@@ -403,6 +473,11 @@ impl Sampler {
                 .entry(shot.id.0.clone())
                 .and_modify(|r| r.widen(shot.crop))
                 .or_insert_with(|| CropRange::new(shot.crop));
+        }
+        if snap.output.state == OutputState::Running
+            && let Some(stream) = snap.output.stats.as_ref().and_then(|s| s.stream)
+        {
+            self.stream = Some(stream);
         }
         self.last = Some(snap.clone());
     }

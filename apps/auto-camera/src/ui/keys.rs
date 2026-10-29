@@ -5,12 +5,27 @@
 //! | 1–9   | stage multiview tile 1–9 on preview            |
 //! | Space | cut: preview and program swap at once          |
 //! | Enter | auto: run the selected transition to preview   |
+//! | Esc   | give the keyboard back to the shortcuts        |
+//!
+//! During a transition the number keys stage the next shot for its end,
+//! Space cuts the transition short (the shot it brings in, which the
+//! preview monitor shows, lands on program at once) and Enter queues a take
+//! of the next shot; the switcher has the rules ([`ac_switcher`]). While
+//! the T-bar holds a transition, Space is refused with a notice.
+//!
+//! Space and Enter carry the preview the operator saw ([`command`]), so
+//! the engine refuses them when the director restaged preview in between
+//! (the window shows the refusal as a notice), and never takes a shot the
+//! operator did not look at.
 //!
 //! Shortcuts must never fire by accident during a show, so they are ignored
-//! while a text field has keyboard focus (typing a prompt must not cut),
-//! on key repeat (holding Space must not cut back and forth), and while
-//! Ctrl, Alt or Cmd is held (those combinations belong to the system). Only
-//! key presses count, not releases.
+//! while a widget has keyboard focus (typing a prompt must not cut, Enter
+//! ending a number must not run a transition; the window says
+//! [`PAUSED`]), on key repeat (holding Space must not cut back and forth),
+//! and while Ctrl, Alt or Cmd is held (those combinations belong to the
+//! system). Only key presses count, not releases. Escape is the way out of
+//! a focused widget, so it works while the others are paused
+//! ([`drops_focus`]).
 //!
 //! [`actions`] turns egui input events into [`Action`]s and [`command`]
 //! turns an action into an engine command; neither needs a window.
@@ -18,6 +33,14 @@
 use ac_core::ShotId;
 use ac_engine::EngineCommand;
 use eframe::egui::{Event, Key, Modifiers};
+
+/// What the status bar says while the shortcuts are paused.
+pub const PAUSED: &str = "shortcuts paused · Esc resumes";
+
+/// The hover text of [`PAUSED`].
+pub const PAUSED_HOVER: &str = "A field or control has the keyboard, so 1–9, Space and Enter \
+                                go to it. Press Esc, or click anywhere else, to give them \
+                                back to the switcher.";
 
 /// What a shortcut asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,15 +98,37 @@ pub fn actions(events: &[Event], typing: bool) -> Vec<Action> {
         .collect()
 }
 
+/// True when `events` press Escape, with or without modifiers: the window
+/// then drops the keyboard focus, whichever widget holds it. (egui drops
+/// it too on a plain Escape, unless the focused widget claims the key; the
+/// window does not leave the way out to each widget.)
+pub fn drops_focus(events: &[Event]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            Event::Key {
+                key: Key::Escape,
+                pressed: true,
+                ..
+            }
+        )
+    })
+}
+
 /// The engine command for `action`, given the multiview's shots in tile
-/// order; `None` when the tile does not exist.
-pub fn command(action: Action, shots: &[ShotId]) -> Option<EngineCommand> {
+/// order and the preview the operator saw (`seen`, which Cut and Auto
+/// carry); `None` when the tile does not exist.
+pub fn command(action: Action, shots: &[ShotId], seen: &Option<ShotId>) -> Option<EngineCommand> {
     match action {
         Action::Preview(i) => shots
             .get(i)
             .map(|shot| EngineCommand::SetPreview { shot: shot.clone() }),
-        Action::Cut => Some(EngineCommand::Cut),
-        Action::Auto => Some(EngineCommand::Auto),
+        Action::Cut => Some(EngineCommand::Cut {
+            preview: seen.clone(),
+        }),
+        Action::Auto => Some(EngineCommand::Auto {
+            preview: seen.clone(),
+        }),
     }
 }
 
@@ -169,18 +214,50 @@ mod tests {
     }
 
     #[test]
+    fn escape_drops_focus_and_is_no_shortcut() {
+        let ctrl_escape = Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::CTRL,
+        };
+        assert!(drops_focus(&[press(Key::Num1), press(Key::Escape)]));
+        assert!(drops_focus(&[ctrl_escape]));
+        assert!(!drops_focus(&[press(Key::Space)]));
+        assert!(!drops_focus(&[]));
+        let release = Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        assert!(!drops_focus(&[release]));
+        assert_eq!(action_for(Key::Escape), None);
+        assert!(actions(&[press(Key::Escape)], false).is_empty());
+    }
+
+    #[test]
     fn actions_map_to_commands_for_existing_tiles() {
         let list = shots(3);
+        let seen = Some(ShotId("s1".into()));
         assert_eq!(
-            command(Action::Preview(2), &list),
+            command(Action::Preview(2), &list, &seen),
             Some(EngineCommand::SetPreview {
                 shot: ShotId("s2".into())
             })
         );
-        assert_eq!(command(Action::Preview(3), &list), None);
-        assert_eq!(command(Action::Preview(0), &[]), None);
-        assert_eq!(command(Action::Cut, &[]), Some(EngineCommand::Cut));
-        assert_eq!(command(Action::Auto, &list), Some(EngineCommand::Auto));
+        assert_eq!(command(Action::Preview(3), &list, &seen), None);
+        assert_eq!(command(Action::Preview(0), &[], &None), None);
+        assert_eq!(
+            command(Action::Cut, &[], &None),
+            Some(EngineCommand::Cut { preview: None })
+        );
+        assert_eq!(
+            command(Action::Auto, &list, &seen),
+            Some(EngineCommand::Auto { preview: seen })
+        );
     }
 
     #[test]

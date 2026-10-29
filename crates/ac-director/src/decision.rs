@@ -7,10 +7,15 @@
 //! * `reason`: one [`Reason`] for the operator UI, with a [`Display`] text.
 //!
 //! Invariants upheld by the director: a `take` names the same shot as
-//! `suggestion`; there is never a `take` outside Auto mode or during a
-//! transition; in Off mode both are `None` and the reason is [`Reason::Off`];
-//! and `suggestion` is `None` only with [`Reason::Off`] or
+//! `suggestion`; there is never a `take` outside Auto mode, during a
+//! transition or while the operator's switching pauses auto-takes
+//! ([`Reason::Paused`]); in Off mode both are `None` and the reason is
+//! [`Reason::Off`]; and `suggestion` is `None` only with [`Reason::Off`] or
 //! [`Reason::NoCandidate`].
+//!
+//! A [`Handover`] is the other thing the director tells the engine: what an
+//! operator's manual action did to a director in Auto mode, so the operator
+//! can be told.
 //!
 //! [`Display`]: std::fmt::Display
 
@@ -78,6 +83,13 @@ pub enum Reason {
     AwaitingPreview,
     /// Auto: a transition is running, so no take is requested.
     TransitionInProgress,
+    /// Auto: the operator's own switching paused auto-takes
+    /// ([`Takeover::Pause`](crate::Takeover::Pause)); the suggestion is
+    /// still staged as in Suggest mode.
+    Paused {
+        /// Time until auto-takes resume, unless the operator switches again.
+        remaining: Duration,
+    },
     /// Auto take: the suggestion beat program by the margin for the hold time.
     Better,
     /// Auto take: program reached its maximum dwell.
@@ -106,8 +118,38 @@ impl fmt::Display for Reason {
             ),
             Reason::AwaitingPreview => f.write_str("take due: waiting for suggestion on preview"),
             Reason::TransitionInProgress => f.write_str("transition in progress"),
+            Reason::Paused { remaining } => write!(
+                f,
+                "auto-takes paused while you switch ({:.1} s left)",
+                remaining.as_secs_f64()
+            ),
             Reason::Better => f.write_str("taking: suggestion beats program"),
             Reason::MaxDwell => f.write_str("taking: program reached maximum dwell"),
+        }
+    }
+}
+
+/// What an operator's manual action did to a director in Auto mode, by its
+/// [`Takeover`](crate::Takeover) setting; see
+/// [`Director::take_over`](crate::Director::take_over).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Handover {
+    /// The director dropped from Auto to Suggest mode.
+    ToSuggest,
+    /// The director's takes are held for this long from the action.
+    Paused(Duration),
+}
+
+impl fmt::Display for Handover {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Handover::ToSuggest => f.write_str("the director dropped to Suggest"),
+            Handover::Paused(pause) => write!(
+                f,
+                "the director's takes are paused for {:.0} s",
+                pause.as_secs_f64()
+            ),
         }
     }
 }
@@ -155,6 +197,10 @@ mod tests {
             remaining: Duration::from_millis(1500),
         };
         assert!(dwell.to_string().contains("1.5 s"));
+        let paused = Reason::Paused {
+            remaining: Duration::from_millis(7200),
+        };
+        assert!(paused.to_string().contains("7.2 s left"), "{paused}");
         for r in [
             Reason::Off,
             Reason::NoCandidate,
@@ -168,5 +214,17 @@ mod tests {
         ] {
             assert!(!r.to_string().is_empty());
         }
+    }
+
+    #[test]
+    fn handovers_render_operator_text() {
+        assert_eq!(
+            Handover::ToSuggest.to_string(),
+            "the director dropped to Suggest"
+        );
+        assert_eq!(
+            Handover::Paused(Duration::from_secs(10)).to_string(),
+            "the director's takes are paused for 10 s"
+        );
     }
 }

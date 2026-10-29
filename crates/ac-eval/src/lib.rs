@@ -1,22 +1,40 @@
-//! Framing-quality metrics, and the per-tick trace they score.
+//! Evaluation: ground-truth labels, framing-quality metrics and the
+//! per-tick trace they score.
 //!
-//! The rebuild gates releases on measured framing quality, not just plumbing
-//! tests. These metrics score a crop path against ground-truth subject boxes
-//! sampled at a fixed frame interval. Annotated real footage plugs into the
-//! same functions once it exists.
+//! The rebuild gates releases on measured quality on an annotated
+//! evaluation set of real footage, not just plumbing tests (spec V9). This
+//! crate holds the parts of that harness that need no I/O:
 //!
-//! [`trace`] is the public schema of the engine's per-tick trace
-//! ([`TraceRecord`], one JSON line per tick), which `ac-engine` emits and
-//! the app's `--trace` writes: the subject boxes, targets and crops of a
-//! real run, for scoring offline. The schema lives here, below the engine,
-//! so that scorers read a trace without the runtime; this crate depends
-//! only on `ac-core`, `serde` and `serde_json` (a test checks it).
-
-pub mod trace;
-
-pub use trace::{TRACE_VERSION, TraceError, TraceRecord, parse_trace};
+//! * [`labels`]: the versioned label file for one clip (the video's
+//!   manifest, people boxed on keyframes with visibility, truncation and
+//!   body lines, roles over time and exclusion zones), its JSON form and
+//!   its validator, whose errors name fields by path.
+//! * [`mot`]: an importer for MOT Challenge ground truth.
+//! * [`trace`]: the public schema of the engine's per-tick trace
+//!   ([`TraceRecord`], one JSON line per tick), which `ac-engine` emits and
+//!   the app's `--trace` writes: the subject boxes, targets and crops of a
+//!   real run, for scoring offline.
+//! * The metrics below, which score a crop path against ground-truth
+//!   subject boxes sampled at a fixed frame interval.
+//!
+//! Everything here is a function of its arguments: files are parsed from
+//! strings, and reading them, hashing videos and running the engine over
+//! clips belong to the runner.
+//!
+//! The trace schema lives here, below the engine, so that scorers read a
+//! trace without the runtime; this crate depends only on `ac-core`,
+//! `serde`, `serde_json`, `serde_path_to_error` and `thiserror` (a test
+//! checks it).
 
 use ac_core::Rect;
+
+pub mod labels;
+pub mod mot;
+pub mod trace;
+
+pub use labels::{FieldError, FieldErrors, LabelFile, SCHEMA_VERSION};
+pub use mot::{MotError, import_mot};
+pub use trace::{TRACE_VERSION, TraceError, TraceRecord, parse_trace};
 
 /// Fraction of frames in which the subject box lies fully inside the crop.
 ///

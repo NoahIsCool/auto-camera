@@ -6,21 +6,25 @@
 //! queries, output and timing from the final one, published at shutdown
 //! (the last running one when there is none); the tick and thread counts
 //! from the engine's report and the trace from its writer ([`Totals`]); and
-//! the crop ranges, the program log and the largest subject count from the
-//! [`Sampler`], since no single snapshot has them. Measurements are rounded
-//! for reading ([`round`]). A run whose engine never started still gets a
-//! summary, with the error and no snapshots ([`failed_to_start`]).
+//! the crop ranges, the program log, the largest subject count and the
+//! stream's connection while the output ran from the [`Sampler`], since no
+//! single snapshot has them (the final one sees the stream down, as ffmpeg
+//! has exited). Measurements are rounded for reading ([`round`]). A run
+//! whose engine never started still gets a summary, with the error and no
+//! snapshots ([`failed_to_start`]).
 
 use std::path::Path;
 use std::time::Instant;
 
 use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::EngineSnapshot;
+use ac_output::{StreamHealth, StreamState};
 
+use super::sidecar::sidecar_summary;
 use super::{
-    CropRange, DetectionsSummary, DirectorSummary, HeadlessOptions, MatchSummary, OutputSummary,
-    ProgramSummary, QuerySummary, Sampler, ShotSummary, SourceSummary, SubjectSummary, Summary,
-    TimingSummary, TraceSummary,
+    CropRange, DetectionsSummary, DirectorSummary, HeadlessOptions, LoudnessSummary, MatchSummary,
+    OutputSummary, ProgramSummary, QuerySummary, Sampler, ShotSummary, SourceSummary,
+    StreamSummary, SubjectSummary, Summary, TimingSummary, TraceSummary,
 };
 
 /// Counters from the engine report and the trace writer.
@@ -82,6 +86,8 @@ pub(super) fn summarize(
                 .iter()
                 .map(|v| SourceSummary {
                     id: v.id.0.clone(),
+                    state: format!("{:?}", v.state).to_lowercase(),
+                    error: v.error.clone(),
                     size: [v.width, v.height],
                     fps: round(v.fps, 2),
                     frames: v.frames,
@@ -208,12 +214,14 @@ pub(super) fn summarize(
             frames_pushed: o.frames_pushed,
             frames_written: o.stats.as_ref().map_or(0, |st| st.frames_written),
             frames_dropped: o.stats.as_ref().map_or(0, |st| st.frames_dropped),
+            loudness: o.loudness.as_ref().map(loudness_summary),
             encoder: o
                 .stats
                 .as_ref()
                 .map(|st| st.encoder.ffmpeg_name().to_owned()),
             exit_code: o.stats.as_ref().and_then(|st| st.exit_code),
             last_error: o.stats.as_ref().and_then(|st| st.last_error.clone()),
+            stream: stream_summary(sampler.stream, o.stats.as_ref().and_then(|st| st.stream)),
         }
     });
     Summary {
@@ -251,11 +259,49 @@ pub(super) fn summarize(
         trace: totals.trace,
         detections: totals.detections,
         render_issues: end.map(|s| s.render_issues.clone()).unwrap_or_default(),
+        sidecar: sidecar_summary(last, end),
     }
+}
+
+/// The stream's summary from its health while the output last ran
+/// (`live`) and at the end (`end`): the connection, stall and bitrate as
+/// running saw them, and the counts from the end, which also take in an
+/// outage after the last sample. `None` when the session did not stream.
+fn stream_summary(live: Option<StreamHealth>, end: Option<StreamHealth>) -> Option<StreamSummary> {
+    let health = live.or(end)?;
+    let counts = end.unwrap_or(health);
+    let (state, attempt) = match health.state {
+        StreamState::Connecting => ("connecting", None),
+        StreamState::Connected => ("connected", None),
+        StreamState::Reconnecting { attempt } => ("reconnecting", Some(attempt)),
+        StreamState::Down => ("down", None),
+    };
+    Some(StreamSummary {
+        state: state.to_owned(),
+        attempt,
+        stalled: health.stalled,
+        outages: counts.outages,
+        reconnects: counts.reconnects,
+        bitrate_kbps: health.bitrate_kbps.map(|k| round(k, 1)),
+    })
 }
 
 /// Rounds `v` to `digits` decimals for a readable summary.
 pub(super) fn round(v: f64, digits: i32) -> f64 {
     let scale = 10f64.powi(digits);
     (v * scale).round() / scale
+}
+
+/// The summary of the program meter's `reading`, rounded to Tech 3341's
+/// 0.1 LU resolution.
+fn loudness_summary(reading: &ac_audio::LoudnessReading) -> LoudnessSummary {
+    let tenth = |v: Option<f64>| v.map(|v| round(v, 1));
+    LoudnessSummary {
+        integrated_lufs: tenth(reading.integrated),
+        momentary_lufs: tenth(reading.momentary),
+        short_term_lufs: tenth(reading.short_term),
+        sample_peak_dbfs: tenth(reading.sample_peak),
+        true_peak_dbtp: tenth(reading.true_peak),
+        seconds: round(reading.measured.as_secs_f64(), 2),
+    }
 }

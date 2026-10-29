@@ -29,6 +29,7 @@ fn studio(fps: f64) -> StudioConfig {
         prompt: "person".into(),
         presets: None,
         literal: false,
+        priority: None,
     });
     c.output.width = 160;
     c.output.height = 90;

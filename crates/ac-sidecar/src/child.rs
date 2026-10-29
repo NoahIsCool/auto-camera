@@ -12,7 +12,8 @@
 //! * the **reader** owns stdout. It decodes frames and forwards them as
 //!   [`Event`]s, and reports end of stream or a protocol error as its last
 //!   event;
-//! * the **log drain** owns stderr and feeds the [`LogRing`].
+//! * the **log drain** owns stderr and feeds the [`LogRing`] and the app's
+//!   log (see the `logs` module).
 //!
 //! Events reach the owner of the `Process` on one bounded channel, so a
 //! child that floods stdout blocks in its own write instead of growing the
@@ -232,10 +233,10 @@ impl Process {
         process
             .threads
             .push(spawn_named("ac-sam-read", move || read_loop(stdout, tx))?);
-        let ring = logs.clone();
-        process
-            .threads
-            .push(spawn_named("ac-sam-log", move || log_loop(stderr, ring))?);
+        let (ring, pid) = (logs.clone(), process.pid);
+        process.threads.push(spawn_named("ac-sam-log", move || {
+            log_loop(stderr, ring, pid)
+        })?);
         wake.install(Some(events_tx));
         Ok(process)
     }
@@ -393,7 +394,7 @@ fn read_loop(stdout: ChildStdout, events: SyncSender<Event>) {
     }
 }
 
-/// The log drain thread.
-fn log_loop(stderr: ChildStderr, logs: LogRing) {
-    logs.drain(BufReader::new(stderr));
+/// The log drain thread of child `pid`: into the ring and the app's log.
+fn log_loop(stderr: ChildStderr, logs: LogRing, pid: u32) {
+    logs.drain(BufReader::new(stderr), pid);
 }

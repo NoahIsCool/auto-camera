@@ -1,6 +1,6 @@
 [package]
 name = "ac-output"
-description = "Program encoder: one ffmpeg encode feeding an RTMP stream and a fragmented MP4 recording"
+description = "Program encoder: one ffmpeg encode feeding an RTMP stream and a fragmented MP4 recording, with the Mac kept awake while it runs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ac-media.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 ac-core.workspace = true

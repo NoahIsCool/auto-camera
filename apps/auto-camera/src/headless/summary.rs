@@ -2,9 +2,10 @@
 //! `summarize` in `report` from the run's snapshots.
 //!
 //! Every value is rounded for reading (milliseconds to one decimal,
-//! normalized coordinates to four, scores to two) and absent values are
-//! `null`, so a summary diffed between runs shows changes in behaviour, not
-//! in float noise.
+//! normalized coordinates to four, scores to two, the program loudness and
+//! peaks to 0.1 dB and the seconds they cover to two decimals) and absent
+//! values are `null` (for the loudness and peaks: no reading), so a summary
+//! diffed between runs shows changes in behaviour, not in float noise.
 //!
 //! Besides counters it carries what a run without a window needs to judge
 //! the pictures: how each query's prompt was read (what the detector was
@@ -17,7 +18,10 @@
 //! static performers), whether each shot is zoom-limited and which shot it
 //! then looks the same as, and the subjects at the end with the queries
 //! they answer, so duplicate subjects and their roles can be told apart
-//! without a contact sheet.
+//! without a contact sheet. An output that streams also reports how the
+//! stream's connection stood while the output last ran, and how often it
+//! was lost and opened again (spec M14). With audio it also carries the
+//! program's loudness and peaks (spec M12).
 
 use std::path::PathBuf;
 
@@ -25,6 +29,8 @@ use ac_core::{Basis, ShotSize, TrackState};
 use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::ShotStatus;
 use serde::Serialize;
+
+use super::sidecar::SidecarSummary;
 
 /// The JSON summary of a run.
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +76,9 @@ pub struct Summary {
     pub detections: Option<DetectionsSummary>,
     /// Shots that should have been on program but were drawn black.
     pub render_issues: Vec<String>,
+    /// The detector sidecar, when the studio has one: its state, process,
+    /// model and restarts (`sidecar` module).
+    pub sidecar: Option<SidecarSummary>,
 }
 
 /// One source in the summary.
@@ -77,6 +86,13 @@ pub struct Summary {
 pub struct SourceSummary {
     /// Source id.
     pub id: String,
+    /// Health at the run's last tick: `starting`, `running`, `offline` or
+    /// `reconnecting` (its input lost or not there yet, and retried), or
+    /// `stopped`.
+    pub state: String,
+    /// What kept the source from delivering at the run's last tick (a file
+    /// that is not there, a lost input); `null` while it delivered.
+    pub error: Option<String>,
     /// Picture size.
     pub size: [u32; 2],
     /// Frame rate measured over the last second.
@@ -242,6 +258,28 @@ pub struct TimingSummary {
     pub skipped_ticks: u64,
 }
 
+/// The program audio's loudness and peaks in the summary (spec M12), as
+/// the meter read them at the end of the session: integrated over the whole
+/// session, momentary and short-term over its last 400 ms and 3 s, peaks
+/// the session's largest. Values are to one decimal (Tech 3341's
+/// resolution) and `null` where the meter had no reading: a window not yet
+/// filled, digital silence, nothing above the gates.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LoudnessSummary {
+    /// Gated integrated loudness, in LUFS.
+    pub integrated_lufs: Option<f64>,
+    /// Momentary loudness, in LUFS.
+    pub momentary_lufs: Option<f64>,
+    /// Short-term loudness, in LUFS.
+    pub short_term_lufs: Option<f64>,
+    /// Largest sample, in dBFS.
+    pub sample_peak_dbfs: Option<f64>,
+    /// Largest 4× oversampled value, in dBTP.
+    pub true_peak_dbtp: Option<f64>,
+    /// Program audio measured, in seconds (inserted silence included).
+    pub seconds: f64,
+}
+
 /// The output session in the summary.
 #[derive(Debug, Clone, Serialize)]
 pub struct OutputSummary {
@@ -257,12 +295,35 @@ pub struct OutputSummary {
     pub frames_written: u64,
     /// Frames dropped because the encoder queue was full.
     pub frames_dropped: u64,
+    /// Program loudness and peaks, when the output carried audio.
+    pub loudness: Option<LoudnessSummary>,
     /// ffmpeg's encoder.
     pub encoder: Option<String>,
     /// ffmpeg's exit code.
     pub exit_code: Option<i32>,
     /// Newest ffmpeg error line.
     pub last_error: Option<String>,
+    /// The stream, when the session streamed.
+    pub stream: Option<StreamSummary>,
+}
+
+/// The stream in the summary: its connection as the output last saw it
+/// while running, and the session's counts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StreamSummary {
+    /// `connecting`, `connected`, `reconnecting` or `down`.
+    pub state: String,
+    /// The reconnection attempt under way, while reconnecting.
+    pub attempt: Option<u32>,
+    /// The ingest had stopped taking packets and they were being dropped.
+    pub stalled: bool,
+    /// Times the connection was lost over the session.
+    pub outages: u32,
+    /// Times it was opened again after a loss.
+    pub reconnects: u32,
+    /// What the ingest took over the newest two seconds of media, in
+    /// kbit/s to one decimal; `null` when this ffmpeg cannot tell.
+    pub bitrate_kbps: Option<f64>,
 }
 
 /// The per-tick trace in the summary.

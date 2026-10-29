@@ -1,5 +1,6 @@
 [package]
 name = "ac-eval"
+description = "Evaluation-set labels (schema, validator, MOT import), framing-quality metrics and the per-tick trace schema"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,9 +10,13 @@ repository.workspace = true
 [dependencies]
 ac-core.workspace = true
 serde.workspace = true
-# Exact float parsing: a trace line read and written again gives back the
-# same bytes, which default parsing can miss by one ULP.
+# Exact float parsing: a canonical label file or a trace line read and
+# written again must give back the same bytes, and pixel boxes divided by
+# picture sizes use all 17 significant digits, which default parsing can get
+# wrong by one ULP.
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
+serde_path_to_error = "0.1"
+thiserror.workspace = true
 
 [lints]
 workspace = true

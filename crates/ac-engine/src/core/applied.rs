@@ -94,6 +94,7 @@ mod tests {
             prompt: "person".into(),
             presets: None,
             literal: false,
+            priority: None,
         });
         c.output.width = 320;
         c.output.height = 180;

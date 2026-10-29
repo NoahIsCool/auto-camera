@@ -25,6 +25,7 @@ use ac_media::{MediaError, VideoSource};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{Clock, WallClock};
+use crate::ffmpeg::check_max_width;
 use crate::file::{FileOptions, FileSource};
 use crate::segment::Segment;
 use crate::synthetic::{SyntheticPattern, SyntheticSource};
@@ -78,6 +79,34 @@ pub enum SourceConfig {
         #[serde(default = "default_subjects")]
         subjects: u32,
     },
+}
+
+impl SourceConfig {
+    /// Checks what can be checked before the source is opened, the mistakes
+    /// no reopening can mend: a synthetic pattern's parameters, a file's
+    /// `max_width` ([`check_max_width`]) and its segment
+    /// ([`Segment::from_seconds`]). A file is not looked for, since it may
+    /// appear later and a supervised source then picks it up
+    /// ([`crate::supervisor`]).
+    pub fn validate(&self) -> Result<(), MediaError> {
+        match self {
+            SourceConfig::File {
+                max_width,
+                start_s,
+                duration_s,
+                ..
+            } => {
+                check_max_width(*max_width)?;
+                Segment::from_seconds(*start_s, *duration_s).map(|_| ())
+            }
+            SourceConfig::Synthetic {
+                width,
+                height,
+                fps,
+                subjects,
+            } => SyntheticPattern::check(*width, *height, *fps, *subjects).map(|_| ()),
+        }
+    }
 }
 
 /// Opens `config` as source `id`, paced in real time.
@@ -226,6 +255,7 @@ mod tests {
         let mut src = open_source_with_clock(&config, SourceId("s".into()), clock).unwrap();
         assert_eq!(src.info().id, SourceId("s".into()));
         assert_eq!(src.info().fps, 30.0);
+        assert_eq!(&src.current_info(), src.info(), "a plain source's is fixed");
         let deadline = Instant::now() + Duration::from_secs(10);
         while src.latest().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(2));
@@ -247,6 +277,65 @@ mod tests {
             open_source(&config, SourceId("s".into())),
             Err(MediaError::Open(_))
         ));
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("size 0x18"), "{err}");
+    }
+
+    #[test]
+    fn validation_checks_patterns_but_does_not_look_for_files() {
+        let pattern = SourceConfig::Synthetic {
+            width: 32,
+            height: 18,
+            fps: 30.0,
+            subjects: 1,
+        };
+        assert!(pattern.validate().is_ok());
+        let missing = SourceConfig::File {
+            path: "/nonexistent/auto-camera/clip.mp4".into(),
+            loop_playback: false,
+            max_width: None,
+            audio: true,
+            start_s: Some(2.0),
+            duration_s: Some(0.5),
+        };
+        assert!(missing.validate().is_ok(), "it may appear later");
+        // A width no picture can be scaled to fails before any file is
+        // looked for, and as opening it would.
+        for (max_width, ok) in [(Some(0), false), (Some(1), false), (Some(2), true)] {
+            let file = SourceConfig::File {
+                path: "/nonexistent/auto-camera/clip.mp4".into(),
+                loop_playback: false,
+                max_width,
+                audio: true,
+                start_s: None,
+                duration_s: None,
+            };
+            match file.validate() {
+                Ok(()) => assert!(ok, "{max_width:?} accepted"),
+                Err(e) => {
+                    assert!(!ok, "{max_width:?} rejected: {e}");
+                    let e = e.to_string();
+                    assert!(e.contains("max_width must be at least 2"), "{e}");
+                }
+            }
+        }
+        // So does a segment no file can have.
+        for (start_s, duration_s, key) in [
+            (Some(-1.0), None, "start_s"),
+            (Some(f64::NAN), None, "start_s"),
+            (None, Some(0.0), "duration_s"),
+        ] {
+            let file = SourceConfig::File {
+                path: "/nonexistent/auto-camera/clip.mp4".into(),
+                loop_playback: false,
+                max_width: None,
+                audio: true,
+                start_s,
+                duration_s,
+            };
+            let e = file.validate().unwrap_err().to_string();
+            assert!(e.contains(key), "{e}");
+        }
     }
 
     #[test]

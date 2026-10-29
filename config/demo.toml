@@ -4,8 +4,12 @@
 #
 #   cargo run -p auto-camera                         # operator window
 #   cargo run -p auto-camera -- --headless --seconds 5 --record /tmp/demo.mp4
+#   cargo run -p auto-camera -- --check                # is it ready? (no start)
 #
 # Relative paths in this file are resolved against this file's directory.
+
+# The layout this file is written in (README, "Studio configuration").
+schema = 1
 
 [[sources]]
 id = "stage"
@@ -39,8 +43,14 @@ rate_hz = 10.0
 # Suggest: the director stages its pick on preview and the operator takes
 # it. Auto-take is opt-in; choose "auto" in the window (or here) to let it
 # cut by itself. A headless run cuts the first wide to program either way.
+# In Auto mode your own switching drops it back to Suggest (takeover =
+# "suggest"); "pause" holds its takes for pause_s seconds instead, and
+# "director" lets it carry on. Skip leaves a suggestion out for skip_s.
 mode = "suggest"
 profile = "talk"
+takeover = "suggest"
+pause_s = 10
+skip_s = 30
 
 [switcher]
 transition = "mix"

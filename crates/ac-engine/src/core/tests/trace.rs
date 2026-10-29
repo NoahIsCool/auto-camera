@@ -20,7 +20,7 @@ fn scripted_trace() -> Vec<String> {
                     shot: shot("cam/1/medium"),
                 })
                 .unwrap();
-                rig.apply(EngineCommand::Auto).unwrap();
+                rig.auto().unwrap();
             }
             120 => {
                 rig.apply(EngineCommand::SetTransition {
@@ -34,7 +34,7 @@ fn scripted_trace() -> Vec<String> {
                     shot: shot("cam/2/close"),
                 })
                 .unwrap();
-                rig.apply(EngineCommand::Auto).unwrap();
+                rig.auto().unwrap();
             }
             _ => {}
         }
@@ -175,7 +175,7 @@ fn a_transition_shows_how_far_it_has_got() {
         shot: medium.clone(),
     })
     .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
+    rig.auto().unwrap();
     // The default mix: 0.8 s, 24 ticks.
     let mix = transitions(&mut rig, 30);
     let running: Vec<&TransitionTrace> = mix.iter().flatten().collect();
@@ -200,7 +200,7 @@ fn a_transition_shows_how_far_it_has_got() {
         },
     })
     .unwrap();
-    rig.apply(EngineCommand::Auto).unwrap();
+    rig.auto().unwrap();
     let dip = transitions(&mut rig, 24);
     let running: Vec<&TransitionTrace> = dip.iter().flatten().collect();
     assert!(running.iter().all(|t| t.overlay == 0.0));

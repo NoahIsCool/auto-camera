@@ -20,14 +20,19 @@
 //!   results and commands it computes subjects, shots, framing, switching,
 //!   the director's choices and the program picture. It has no threads and
 //!   reads no clock, so it is tested tick by tick.
-//! * [`Engine`] is the runtime around it: it opens the sources
-//!   ([`ac_sources::open_source_with_clock`]), runs the discovery workers,
+//! * [`Engine`] is the runtime around it: it opens the sources, each under
+//!   a supervisor that reopens it when its input is lost
+//!   ([`ac_sources::open_supervised`]), runs the discovery workers,
 //!   drives the core from a master clock on its own thread, owns the program
 //!   encoder, accepts [`EngineCommand`]s over a channel and publishes an
 //!   immutable [`EngineSnapshot`] every tick. See [`runtime`] for the
 //!   threads, channels and mailboxes.
 //! * [`StudioConfig`] describes a studio (sources, queries, detector,
-//!   output, director, framing) as TOML or JSON.
+//!   output, director, framing) as TOML or JSON, in a layout named by its
+//!   `schema` key ([`SCHEMA_VERSION`]).
+//! * [`readiness`] checks a studio before a show without starting it: the
+//!   problems in the config's values, and the files, tools and folders it
+//!   names (`auto-camera --check`).
 //! * [`trace`] carries one record per tick (subjects, shot targets and
 //!   crops, program and preview) from the engine thread to a writer, such
 //!   as the app's `--trace` file, for scoring with `ac_eval`.
@@ -62,6 +67,7 @@ pub mod discovery;
 pub mod mailbox;
 pub mod output;
 pub mod queries;
+pub mod readiness;
 pub mod runtime;
 pub mod schedule;
 pub mod snapshot;
@@ -71,15 +77,17 @@ pub mod vision;
 pub use catalog::{ShotStatus, subject_shot_id, wide_shot_id};
 pub use command::{CommandError, CommandReply, EngineCommand};
 pub use config::{
-    ConfigError, DetectorSettings, EncoderSetting, MonitorSettings, OutputSettings, PresetSpec,
-    QuerySettings, SidecarSettings, SourceEntry, StudioConfig, preset_for,
+    ConfigError, DetectorSettings, EncoderSetting, LoadedConfig, MonitorSettings, OutputSettings,
+    PresetSpec, QuerySettings, SCHEMA_VERSION, SidecarSettings, SourceEntry, StudioConfig,
+    preset_for,
 };
 pub use core::{EngineCore, SourceFeed, TickOutput};
 pub use detection_log::{PassRecord, PassSender};
 pub use queries::{PromptReader, build_query, default_presets, read_prompt, shot_presets};
+pub use readiness::{Readiness, SystemInspector};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};
 pub use snapshot::{
-    DirectorView, EngineSnapshot, MatchView, OutputState, OutputView, PassOutcome, QueryView,
-    ShotView, SourceView, SubjectView, SwitcherView, Tally, TimingView,
+    DirectorView, EngineSnapshot, KeepAwakeState, MatchView, OutputState, OutputView, PassOutcome,
+    QueryView, ShotView, SourceView, SubjectView, SwitcherView, Tally, TimingView,
 };
 pub use trace::{TraceRecord, TraceSender};

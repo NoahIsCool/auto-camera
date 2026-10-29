@@ -402,8 +402,12 @@ impl Runner {
             .map(|e| e.shot.id.clone());
         if let Some(shot) = wide {
             // The shot exists and is available, so neither can be refused.
-            let _ = self.core.apply(&EngineCommand::SetPreview { shot });
-            let _ = self.core.apply(&EngineCommand::Cut);
+            let _ = self
+                .core
+                .apply(&EngineCommand::SetPreview { shot: shot.clone() });
+            let _ = self.core.apply(&EngineCommand::Cut {
+                preview: Some(shot),
+            });
         }
     }
 }

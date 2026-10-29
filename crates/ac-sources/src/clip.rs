@@ -24,7 +24,9 @@
 //! successfully. A decoder that exits with a failure, or that decodes no
 //! frame in a pass, is an error. A partial frame at the very end is
 //! dropped. Dropping the reader kills and reaps its decoder, so no ffmpeg
-//! outlives it.
+//! outlives it; as everywhere in this crate, a decoder is killed or reaped
+//! before its pipe closes, so it never complains of a broken pipe in the
+//! log.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -79,7 +81,9 @@ pub struct ClipReader {
     args: Vec<OsString>,
     /// Whether to start a new pass at the end.
     looping: bool,
-    /// Every running decoder; closed on drop.
+    /// Every running decoder; closed on drop. Declared before `decoder`, so
+    /// that it drops first and every decoder is killed before its pipe
+    /// closes (see `crate::process`).
     children: Children,
     /// The decoder of the current pass; `None` once the clip has ended.
     decoder: Option<Spawned>,
@@ -185,9 +189,11 @@ impl ClipReader {
                 self.seq += 1;
                 return Ok(Some(frame));
             }
+            // The decoder is reaped before its pipe closes (see
+            // `crate::process`).
             let key = decoder.key;
-            self.decoder = None;
             let exit = self.children.finish(key);
+            self.decoder = None;
             if self.seq == self.pass_start {
                 let exit = exit.map_or("killed".to_string(), |s| s.to_string());
                 return Err(io::Error::other(format!("ffmpeg decoded no frames ({exit})")).into());

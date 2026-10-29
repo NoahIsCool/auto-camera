@@ -5,8 +5,11 @@
 //! a trace with nothing but the core types and the JSON schema. Of the
 //! workspace's crates it may use only `ac-core`, and its normal and build
 //! dependencies are exactly [`ALLOWED`]; adding one is a decision to make
-//! here, on purpose. Dev-dependencies are not part of the library and are
-//! not checked.
+//! here, on purpose. Besides the core types, `serde` and `serde_json` for
+//! the trace and label schemas, the label validator uses
+//! `serde_path_to_error` to name the field at fault and `thiserror` for its
+//! error types. Dev-dependencies are not part of the library and are not
+//! checked.
 //!
 //! `cargo metadata --no-deps --offline` reads only the workspace manifests,
 //! so the test needs no network and no registry.
@@ -14,7 +17,13 @@
 use std::process::Command;
 
 /// The crates `ac-eval` may depend on, sorted.
-const ALLOWED: [&str; 3] = ["ac-core", "serde", "serde_json"];
+const ALLOWED: [&str; 5] = [
+    "ac-core",
+    "serde",
+    "serde_json",
+    "serde_path_to_error",
+    "thiserror",
+];
 
 /// The workspace's metadata, without its dependencies' packages.
 fn metadata() -> serde_json::Value {

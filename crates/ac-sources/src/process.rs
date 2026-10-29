@@ -12,9 +12,17 @@
 //!   process can outlive the source.
 //! * Every child is waited on after it exits or is killed, so none is left as a
 //!   zombie.
-//! * The registry lock is held only to move `Child` handles in and out (and
-//!   for non-blocking `try_wait`); spawning, killing and blocking waits happen
-//!   outside it.
+//! * The registry lock is held only to move `Child` handles in and out, for
+//!   non-blocking `try_wait` and for the kill signals [`Children::close`]
+//!   sends; spawning, reaping and blocking waits happen outside it.
+//! * A child leaves the registry dead or dying: [`Children::kill`] reaps it,
+//!   and [`Children::close`] signals every child before any leaves. So a
+//!   worker that calls `kill` before it drops the child's stdout never closes
+//!   the pipe of a live decoder, even when `close` took the child first. A
+//!   decoder that finds its pipe closed says "Broken pipe" on stderr, which
+//!   the log would show as an error of the file's.
+//! * Every child's stderr goes to the app's log, through a drain thread
+//!   that ends with the child ([`crate::logs`]).
 
 use std::io::{self, Read};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
@@ -29,6 +37,12 @@ const EXIT_GRACE: Duration = Duration::from_secs(2);
 
 /// Poll interval while waiting for a child to exit.
 const EXIT_POLL: Duration = Duration::from_millis(5);
+
+/// How long a decoder whose output ended may take to exit before it is taken
+/// as finished. ffmpeg exits within a millisecond of closing its output; the
+/// wait is for its exit status, which tells end of input (success) from a
+/// decoder that was killed or crashed (the input was lost).
+pub(crate) const END_GRACE: Duration = Duration::from_millis(250);
 
 /// A child process started through [`Children::spawn`].
 #[derive(Debug)]
@@ -63,19 +77,23 @@ impl Children {
         Self::default()
     }
 
-    /// Starts `command` with stdin and stderr closed and stdout piped, and
-    /// registers it. `Ok(None)` when the registry is closed, in which case
-    /// no process is left running.
+    /// Starts `command` with stdin closed, stdout piped and stderr piped to
+    /// the log, and registers it. `Ok(None)` when the registry is closed,
+    /// in which case no process is left running.
     pub(crate) fn spawn(&self, command: &mut Command) -> io::Result<Option<Spawned>> {
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
         let Some(stdout) = child.stdout.take() else {
             reap(child);
             return Err(io::Error::other("child has no stdout pipe"));
         };
+        if let Err(e) = crate::logs::forward(&mut child, command) {
+            reap(child);
+            return Err(e);
+        }
         let mut reg = lock(&self.inner);
         if reg.closed {
             drop(reg);
@@ -92,7 +110,13 @@ impl Children {
     /// killing it after a grace period, and returns its exit status. `None`
     /// when the child was already taken by [`Children::close`] or killed.
     pub(crate) fn finish(&self, key: u64) -> Option<ExitStatus> {
-        let deadline = Instant::now() + EXIT_GRACE;
+        self.finish_within(key, EXIT_GRACE)
+    }
+
+    /// [`Children::finish`] with a grace period of `grace`; `None` also when
+    /// the child had not exited by then (it is killed and reaped).
+    pub(crate) fn finish_within(&self, key: u64, grace: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + grace;
         loop {
             {
                 let mut reg = lock(&self.inner);
@@ -123,11 +147,16 @@ impl Children {
     }
 
     /// Refuses further spawns, then kills and reaps every registered child.
-    /// Idempotent.
+    /// Every child is signalled before the lock is released (see the module
+    /// docs). Idempotent.
     pub(crate) fn close(&self) {
         let live = {
             let mut reg = lock(&self.inner);
             reg.closed = true;
+            for (_, child) in &mut reg.live {
+                // Sending a signal does not block; the waits come below.
+                let _ = child.kill();
+            }
             std::mem::take(&mut reg.live)
         };
         for (_, child) in live {
@@ -197,10 +226,11 @@ impl Respawner {
         Ok(current)
     }
 
-    /// Kills the warm decoder, if any.
+    /// Kills the warm decoder, if any, before its stdout is dropped.
     pub(crate) fn discard(&mut self, children: &Children) {
         if let Some(s) = self.next.take() {
             children.kill(s.key);
+            drop(s.stdout);
         }
     }
 }
@@ -312,6 +342,35 @@ mod tests {
         let mut out = s.stdout;
         assert_eq!(read_full(&mut out, &mut [0u8; 8]).unwrap(), 0);
         assert!(children.finish(s.key).unwrap().success());
+        assert!(children.pids().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_child_reports_the_signal_and_a_hung_one_is_killed() {
+        use std::os::unix::process::ExitStatusExt;
+        let children = Children::new();
+        let mut sleep = Command::new("sleep");
+        sleep.arg("30");
+        let victim = children.spawn(&mut sleep).unwrap().unwrap();
+        let pid = children.pids()[0];
+        let killed = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        let status = children.finish_within(victim.key, Duration::from_secs(10));
+        assert_eq!(status.and_then(|s| s.signal()), Some(9));
+        assert!(!alive(pid), "reaped");
+        let hung = children.spawn(&mut sleep).unwrap().unwrap();
+        let pid = children.pids()[0];
+        let started = Instant::now();
+        assert_eq!(
+            children.finish_within(hung.key, Duration::from_millis(30)),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!alive(pid), "killed and reaped after the grace");
         assert!(children.pids().is_empty());
     }
 

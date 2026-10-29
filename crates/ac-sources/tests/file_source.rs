@@ -5,73 +5,20 @@
 //! tool a failure. Clips come from ffmpeg's built-in `testsrc` and `sine`
 //! generators, so no media files live in the repository.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ac_core::SourceId;
-use ac_media::{AudioBlock, MediaError, SourceState, VideoFrame, VideoSource};
+use ac_media::{AudioBlock, MediaError, SourceInfo, SourceState, VideoFrame, VideoSource};
 use ac_sources::{
-    FfmpegTools, FileOptions, FileSource, FrameRate, SourceConfig, VirtualClock, open_source, probe,
+    Backoff, FileOptions, FileSource, FrameRate, SourceConfig, SupervisedSource, VirtualClock,
+    WallClock, open_source, probe,
 };
-
-/// The tools, or `None` (and a note) when ffmpeg is not installed; panics
-/// instead when `AC_REQUIRE_FFMPEG` is set.
-fn tools() -> Option<FfmpegTools> {
-    let tools = FfmpegTools::from_env();
-    if tools.is_available() {
-        Some(tools)
-    } else {
-        let required =
-            std::env::var_os("AC_REQUIRE_FFMPEG").is_some_and(|v| !v.is_empty() && v != "0");
-        assert!(!required, "ffmpeg/ffprobe are required (AC_REQUIRE_FFMPEG)");
-        eprintln!("skipping: ffmpeg/ffprobe not found");
-        None
-    }
-}
-
-/// A temporary directory removed on drop.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    /// A fresh directory unique to this process and `name`.
-    fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("ac-sources-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Writes a 160x120 30 fps `testsrc` clip of `video_secs`, with a stereo
-/// 48 kHz 440 Hz tone of `audio_secs` when given.
-fn make_clip(tools: &FfmpegTools, dir: &Path, video_secs: f64, audio_secs: Option<f64>) -> PathBuf {
-    let path = dir.join("clip.mkv");
-    let mut cmd = Command::new(&tools.ffmpeg);
-    cmd.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
-        .args(["-f", "lavfi", "-i"])
-        .arg(format!(
-            "testsrc=size=160x120:rate=30:duration={video_secs}"
-        ));
-    if let Some(a) = audio_secs {
-        cmd.args(["-f", "lavfi", "-i"])
-            .arg(format!("sine=frequency=440:sample_rate=48000:duration={a}"))
-            .args(["-ac", "2", "-c:a", "pcm_s16le"]);
-    }
-    cmd.args(["-c:v", "mpeg4", "-q:v", "4"]).arg(&path);
-    assert!(
-        cmd.status().unwrap().success(),
-        "ffmpeg could not make a clip"
-    );
-    path
-}
+use common::{TempDir, make_clip, poll, tools};
 
 /// Unpaced playback options.
 fn opts(loop_playback: bool) -> FileOptions {
@@ -90,20 +37,6 @@ fn open_unpaced(path: &Path, options: FileOptions) -> FileSource {
         Arc::new(VirtualClock::new()),
     )
     .unwrap()
-}
-
-/// Polls `step` every 2 ms until it returns true or `timeout` passes.
-fn poll(timeout: Duration, mut step: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if step() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
 }
 
 /// Records each newly seen frame of `src` into `frames`.
@@ -276,6 +209,89 @@ fn stop_and_drop_leave_no_child_processes() {
         for pid in pids {
             assert!(!alive(pid), "ffmpeg {pid} outlived its source");
         }
+    }
+}
+
+/// Kills process `pid` with `SIGKILL`.
+#[cfg(unix)]
+fn kill(pid: u32) {
+    let killed = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success(), "kill {pid}");
+}
+
+/// Spec C.3: when ffmpeg dies under a running file source (killed here,
+/// first the video decoder, then on the next connection the audio one), the
+/// source fails, its supervisor opens the file again under a new epoch, and
+/// every decoder is reaped: the killed ones at once, the rest on stop.
+#[cfg(unix)]
+#[test]
+fn a_file_source_whose_ffmpeg_is_killed_restarts_and_leaves_no_child_process() {
+    let Some(tools) = tools() else { return };
+    let dir = TempDir::new("killed");
+    let clip = make_clip(&tools, &dir.0, 4.0, Some(4.0));
+    let id = SourceId("file".into());
+    // The decoders of each connection, video first.
+    let decoders: Arc<Mutex<Vec<Vec<u32>>>> = Arc::default();
+    let (opened, path, file) = (decoders.clone(), clip.clone(), id.clone());
+    let opener = move || -> Result<Box<dyn VideoSource>, MediaError> {
+        let src = FileSource::open(file.clone(), &path, opts(false))?;
+        opened.lock().unwrap().push(src.child_pids());
+        Ok(Box::new(src))
+    };
+    let offline = SourceInfo {
+        id,
+        width: 160,
+        height: 120,
+        fps: 0.0,
+        audio: None,
+    };
+    let clock = Arc::new(WallClock::new());
+    let mut src = SupervisedSource::start(opener, offline, clock, Backoff::default()).unwrap();
+    assert_eq!(src.start_error(), None);
+    let connection = |n: usize| decoders.lock().unwrap().get(n).cloned();
+    let mut frames = Vec::new();
+    for (epoch, victim, what) in [(1, 0, "video"), (2, 1, "audio")] {
+        assert!(poll(Duration::from_secs(20), || {
+            record(&src, &mut frames);
+            frames.last().is_some_and(|f| f.epoch == epoch - 1)
+                && src.state() == SourceState::Running
+        }));
+        let pids = connection(epoch as usize - 1).unwrap();
+        assert_eq!(pids.len(), 2, "video and audio decoders: {pids:?}");
+        assert!(pids.iter().all(|&p| alive(p)));
+        kill(pids[victim]);
+        // The failure shows while the supervisor backs off (0.5 s, then 1 s).
+        let message = format!("the {what} decoder exited during playback");
+        assert!(poll(Duration::from_secs(20), || {
+            src.state() == SourceState::Offline && src.error().is_some_and(|e| e.contains(&message))
+        }));
+        for pid in &pids {
+            assert!(!alive(*pid), "{pid} of a failed connection was not reaped");
+        }
+        let started = Instant::now();
+        assert!(poll(Duration::from_secs(20), || {
+            record(&src, &mut frames);
+            frames.last().is_some_and(|f| f.epoch == epoch)
+        }));
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "within the backoff"
+        );
+        assert_eq!(src.error(), None);
+    }
+    assert!(
+        frames
+            .windows(2)
+            .all(|w| w[0].seq < w[1].seq && w[0].pts < w[1].pts)
+    );
+    src.stop();
+    let all: Vec<u32> = decoders.lock().unwrap().concat();
+    assert_eq!(all.len(), 6, "three connections");
+    for pid in all {
+        assert!(!alive(pid), "ffmpeg {pid} outlived its source");
     }
 }
 

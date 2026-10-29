@@ -142,6 +142,7 @@ mod tests {
             prompt: "person".into(),
             presets: None,
             literal: false,
+            priority: None,
         });
         config.output.width = 320;
         config.output.height = 180;

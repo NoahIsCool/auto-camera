@@ -1,10 +1,11 @@
 //! `--trace` end to end: the built binary runs the demo studio (synthetic,
 //! no camera, model or network) headless for 2 s and writes one JSON line
 //! per tick, as many as the summary's tick count; and a studio whose engine
-//! does not start, headless or in the window, leaves no trace behind.
-//! `--record-detections` likewise: the demo writes one line per applied
-//! pass, which a replay answers with the passes' boxes, and an engine that
-//! does not start leaves no log.
+//! does not start (a detector sidecar whose program is missing), headless
+//! or in the window, leaves no trace behind. `--record-detections`
+//! likewise: the demo writes one line per applied pass, which a replay
+//! answers with the passes' boxes, and an engine that does not start leaves
+//! no log.
 
 use std::ffi::OsStr;
 use std::io::Read;
@@ -50,11 +51,22 @@ fn run_demo(seconds: &str, trace: &Path) -> (ExitStatus, String, String) {
 }
 
 /// Runs the app with `args`, and returns its exit status, stdout and
-/// stderr. A run that takes longer than [`LIMIT`] is killed, so a hang
-/// fails the test instead of outliving it.
+/// stderr. Its log goes to a temporary folder, removed afterwards. A run
+/// that takes longer than [`LIMIT`] is killed, so a hang fails the test
+/// instead of outliving it.
 fn run_app(args: &[&OsStr]) -> (ExitStatus, String, String) {
+    let logs = temp_path("logs");
+    let result = run_logged(args, &logs);
+    let _ = std::fs::remove_dir_all(&logs);
+    result
+}
+
+/// [`run_app`] with its log in `logs`.
+fn run_logged(args: &[&OsStr], logs: &Path) -> (ExitStatus, String, String) {
     let mut child = Command::new(APP)
         .args(args)
+        .arg("--log-dir")
+        .arg(logs)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -127,14 +139,17 @@ fn an_existing_trace_file_is_refused() {
 
 #[test]
 fn an_engine_that_does_not_start_leaves_no_trace_to_refuse_the_next_run() {
-    // A file source whose file does not exist: the engine fails to open it
-    // when it starts, so the window mode exits before any window opens.
+    // A detector sidecar whose program does not exist: the engine refuses
+    // it when it starts, before its first tick, so the window mode exits
+    // before any window opens. A missing source file would not do: that
+    // source starts offline and is retried, so the engine starts and ticks.
     let studio = temp_path("unstartable.toml");
-    let missing = temp_path("missing.mp4");
+    let missing = temp_path("missing-python");
     std::fs::write(
         &studio,
         format!(
-            "[[sources]]\nid = \"stage\"\nkind = \"file\"\npath = {:?}\n\n[detector]\nkind = \"none\"\n",
+            "[[sources]]\nid = \"stage\"\nkind = \"synthetic\"\nwidth = 320\nheight = 180\n\
+             fps = 30\nsubjects = 1\n\n[detector]\nkind = \"sidecar\"\ncommand = [{:?}]\n",
             missing.display().to_string()
         ),
     )
@@ -170,7 +185,7 @@ fn an_engine_that_does_not_start_leaves_no_trace_to_refuse_the_next_run() {
         } else {
             log
         };
-        assert!(error.contains("cannot open"), "{case}: {error}");
+        assert!(error.contains("program not found"), "{case}: {error}");
         assert!(!error.contains("the trace"), "{case}: {error}");
         assert!(!leftover, "{case} left its empty trace");
     }
@@ -224,13 +239,16 @@ fn a_headless_demo_records_its_detections_for_replay() {
 
 #[test]
 fn an_engine_that_does_not_start_leaves_no_detection_log() {
-    // As for the trace: a file source whose file does not exist.
+    // As for the trace: a detector sidecar whose program does not exist (a
+    // missing source file only keeps its source offline, and the engine
+    // ticks).
     let studio = temp_path("unstartable-log.toml");
-    let missing = temp_path("missing-log.mp4");
+    let missing = temp_path("missing-log-python");
     std::fs::write(
         &studio,
         format!(
-            "[[sources]]\nid = \"stage\"\nkind = \"file\"\npath = {:?}\n\n[detector]\nkind = \"none\"\n",
+            "[[sources]]\nid = \"stage\"\nkind = \"synthetic\"\nwidth = 320\nheight = 180\n\
+             fps = 30\nsubjects = 1\n\n[detector]\nkind = \"sidecar\"\ncommand = [{:?}]\n",
             missing.display().to_string()
         ),
     )
@@ -247,14 +265,19 @@ fn an_engine_that_does_not_start_leaves_no_detection_log() {
             ]);
         }
         args.extend([OsStr::new("--record-detections"), log.as_os_str()]);
-        let (status, _, stderr) = run_app(&args);
+        let (status, summary, stderr) = run_app(&args);
         let leftover = log.exists();
         let _ = std::fs::remove_file(&log);
-        runs.push((headless, status, stderr, leftover));
+        runs.push((headless, status, summary, stderr, leftover));
     }
     std::fs::remove_file(&studio).unwrap();
-    for (headless, status, stderr, leftover) in runs {
+    for (headless, status, summary, stderr, leftover) in runs {
         assert_eq!(status.code(), Some(1), "headless {headless}: {stderr}");
+        let why = if headless { summary } else { stderr };
+        assert!(
+            why.contains("program not found"),
+            "headless {headless}: {why}"
+        );
         assert!(!leftover, "headless {headless} left its empty log");
     }
 }

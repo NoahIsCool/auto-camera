@@ -1,0 +1,8 @@
+# The dependency under test; CI rewrites the licence line below for its
+# control run, so keep it on one line exactly as it is.
+[package]
+name = "probe-dep"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
