@@ -74,7 +74,7 @@ fn first_snapshot(config: &StudioConfig) -> Arc<EngineSnapshot> {
 /// True when `tool -version` succeeds. When it does not and
 /// `AC_REQUIRE_FFMPEG` is set (CI), panics instead of letting the caller
 /// skip.
-fn have(tool: &str) -> bool {
+pub(crate) fn have(tool: &str) -> bool {
     let found = std::process::Command::new(tool)
         .arg("-version")
         .stdout(std::process::Stdio::null())
@@ -90,7 +90,7 @@ fn have(tool: &str) -> bool {
 }
 
 /// A fresh, unique path in the temp directory (not created).
-fn temp_path(name: &str) -> PathBuf {
+pub(crate) fn temp_path(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());

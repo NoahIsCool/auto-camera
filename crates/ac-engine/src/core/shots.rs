@@ -1,6 +1,7 @@
 //! Shots: on-air protection, the shot list and framing, once per tick.
 //!
-//! * **Protection.** The subjects of the program and preview shots are
+//! * **Protection.** The subjects of the program and preview shots, and
+//!   of a shot waiting to land on preview ([`ac_switcher::Queued`]), are
 //!   pushed to their stores before anything else can change them, so an
 //!   on-air subject is never retired, evicted or demoted.
 //! * **Catalog sync.** The shot list is re-derived from the stores and the
@@ -35,10 +36,11 @@ use crate::catalog::{
 };
 
 impl EngineCore {
-    /// Pushes the program and preview subjects to their stores.
+    /// Pushes the program, preview and queued subjects to their stores.
     pub(super) fn update_protection(&mut self) {
         let mut sets = vec![HashSet::new(); self.sources.len()];
-        for id in [self.switcher.program(), self.switcher.preview()]
+        let queued = self.switcher.queued().map(|q| &q.shot);
+        for id in [self.switcher.program(), self.switcher.preview(), queued]
             .into_iter()
             .flatten()
         {
