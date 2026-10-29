@@ -85,9 +85,23 @@ use ac_director::{DirectorInput, DirectorMode, ShotCandidate};
 use ac_switcher::TransitionKind;
 
 use super::EngineCore;
-use crate::catalog::ShotEntry;
+use crate::catalog::{ShotEntry, wide_shot_id};
 
 impl EngineCore {
+    /// Puts the first source's wide on program, as `switcher.start_on_wide`
+    /// asks, when the core is built: before the source has delivered, so
+    /// availability is not asked (the wide shows black until the first
+    /// frame). The director then starts from it, and the first tick books
+    /// it as the first program change.
+    pub(super) fn start_on_wide(&mut self) -> Result<(), String> {
+        let Some(first) = self.sources.first() else {
+            return Ok(());
+        };
+        self.switcher
+            .cut_to(wide_shot_id(&first.id), |_| true)
+            .map_err(|e| e.to_string())
+    }
+
     /// Book-keeps program changes: on-air time, last use and change count.
     pub(super) fn note_program(&mut self) {
         let current = self.switcher.program().cloned();

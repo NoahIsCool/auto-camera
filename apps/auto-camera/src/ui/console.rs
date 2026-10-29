@@ -1,7 +1,7 @@
 //! Everything the operator window draws and reads, one snapshot at a time.
 //!
 //! [`Console`] owns the window's own state (textures, the T-bar, the forms,
-//! the close guard, the status bar's notice). Given the newest snapshot it
+//! the close guard, the status bar's notice and alarms). Given a snapshot it
 //! draws one frame (status bar, side panels, monitors, multiview, and the
 //! guard's question when one is open) and returns the commands the operator
 //! asked for. It never talks to the engine: [`super::app::OperatorApp`]
@@ -21,6 +21,14 @@
 //! and clears a notice that has been shown long enough, by egui's clock.
 //! The app can raise one as the window opens, before any frame
 //! ([`Console::raise_on_open`]), for the config's load warnings.
+//!
+//! # Alarms
+//!
+//! Above the status line the console lists its alarms ([`super::alarms`]):
+//! what is wrong on air for as long as it lasts, read from every snapshot
+//! by the console's own [`Alarms`] model. Acknowledge marks one as seen in
+//! that model, which keeps it listed until its cause clears; no command
+//! goes to the engine.
 //!
 //! # What the operator saw
 //!
@@ -74,9 +82,10 @@
 //! `quitting`, and with it every close goes through.
 
 use ac_core::ShotId;
-use ac_engine::{EngineCommand, EngineSnapshot, PromptReader, StudioConfig};
+use ac_engine::{Alarms, EngineCommand, EngineSnapshot, PromptReader, StudioConfig};
 use eframe::egui::{self, Ui};
 
+use super::alarms;
 use super::close_guard::{self, CloseGuard, Question, Verdict};
 use super::keys;
 use super::multiview;
@@ -105,6 +114,8 @@ pub struct Console {
     guard: CloseGuard,
     /// The status bar's notice and the dropped takes already noticed.
     notices: Notices,
+    /// The status bar's alarms, and which the operator acknowledged.
+    alarms: Alarms,
     /// The preview the operator saw on the last frame (see the module
     /// docs).
     shown: Option<ShotId>,
@@ -133,6 +144,7 @@ impl Console {
             ),
             guard: CloseGuard::default(),
             notices: Notices::new(first),
+            alarms: Alarms::new(),
             shown: first.switcher.preview.clone(),
             staged: None,
             suggested: first.director.suggestion.clone(),
@@ -184,6 +196,7 @@ impl Console {
             self.notices.raise(text, error, now);
         }
         self.notices.observe(snap, now);
+        self.alarms.observe(snap);
         let notice = self.notice(snap);
         let events = ctx.input(|i| i.events.clone());
         if keys::drops_focus(&events) {
@@ -218,6 +231,9 @@ impl Console {
             commands.push(command);
         }
         egui::Panel::bottom("status").show(ui, |ui| {
+            for cause in alarms::show(ui, &self.alarms) {
+                self.alarms.acknowledge(&cause);
+            }
             let notice = notice.as_ref().map(|(text, error)| (text.as_str(), *error));
             panels::status_bar(ui, snap, paused, notice);
         });

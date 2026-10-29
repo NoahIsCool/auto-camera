@@ -51,6 +51,23 @@ and the monitors and the director's suggestion name it "Speaker 1 Close
 subject's shots (two sizes both drawn at the ceiling). The status bar shows
 source frame rates, tick timing and dropped frames.
 
+Above it, the status bar lists alarms (spec M14), one row each, for as long
+as their cause lasts: the program black for 2 s while the output runs, the
+program on a subject lost for half a second, the program's source sending
+no new frame for over half a second, encoder drops, a failed output, the
+stream reconnecting, stalled (the ingest takes no packets) or down, and a
+recording without audio (no audio track, or no source audio for 2 s). Most
+clear only once their cause has been gone for a while (a second for the
+picture and audio, five for drops and for a stream taking packets again),
+so they do not flicker; a failed output clears when the output starts
+again, and a stream that is down when the session ends. Acknowledge dims an alarm and removes its button,
+but it stays listed until its cause clears; one that comes back is new.
+With `start_on_wide = true` in the `[switcher]` table the first source's
+wide is on program from the start (it shows black until the source
+delivers), so a studio restarted after a crash goes out on a clean wide
+instead of black. Scoring a trace of such a run (`ac-eval`) counts that
+black as the start-up wait, not as a loss on program.
+
 | Input | Action |
 |---|---|
 | click a tile | stage it on preview |
@@ -398,9 +415,9 @@ added in the window joins the end of the list (or gets 3 when priorities
 are given), and a priority outside 1 to 5 is a configuration error.
 
 Further sections tune the `tracker`, `subjects` (limits and lost/retire
-times), `framing`, `switcher` (default transition), `monitors` (monitor
-and multiview tile sizes and rates) and `lexicon` (below); see
-`crates/ac-engine/src/config.rs`. Every value is checked when the file
+times), `framing`, `switcher` (default transition, `start_on_wide`),
+`monitors` (monitor and multiview tile sizes and rates) and `lexicon` (below);
+see `crates/ac-engine/src/config.rs`. Every value is checked when the file
 loads; the `output` table with the encoder's own ranges (even sizes up to
 7680x4320, 1–120 fps, `video_bitrate_kbps` 100–100000,
 `audio_bitrate_kbps` 32–512, `keyframe_seconds` 1–10, an `rtmp://` or

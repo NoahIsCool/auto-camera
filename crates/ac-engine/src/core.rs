@@ -266,6 +266,9 @@ pub struct EngineCore {
     next_thumbs_at: Duration,
     /// Shots drawn black on the newest program frame.
     render_issues: Vec<String>,
+    /// When the run of black program frames that ends with the newest
+    /// began ([`render`]).
+    program_black_since: Option<Duration>,
 }
 
 impl EngineCore {
@@ -360,10 +363,14 @@ impl EngineCore {
             next_monitor_at: Duration::ZERO,
             next_thumbs_at: Duration::ZERO,
             render_issues: Vec::new(),
+            program_black_since: None,
         };
         // Wide shots exist from the start, so they can be staged before the
         // first tick.
         core.sync_catalog();
+        if config.switcher.start_on_wide {
+            core.start_on_wide()?;
+        }
         Ok(core)
     }
 
