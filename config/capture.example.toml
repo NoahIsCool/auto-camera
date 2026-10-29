@@ -34,6 +34,27 @@ fps = 30
 # webcams and capture dongles; the picture is converted anyway.
 # pixel_format = "nv12"
 
+# Program audio from the soundboard: its USB audio interface (any CoreAudio
+# device: a Dante Virtual Soundcard, an AVB or MADI interface) named by its
+# CoreAudio UID, which stays the same when it is replugged. Needs a build
+# with the `coreaudio` feature; list the UIDs with
+#
+#   cargo run -p auto-camera --features coreaudio -- --list-audio-devices
+#
+# and paste the board's `uid` line here. A device that is not connected
+# leaves the input OFFLINE with the UIDs of the devices that are (the
+# default microphone is never opened instead), and it comes on air within
+# seconds of being plugged in. `channels` picks the stereo pair, counted
+# from 1; `channel_count`, optional, is what the device has. Then set
+# `audio_source = "board"` in [output].
+# [[audio_inputs]]
+# id = "board"
+# name = "Soundboard"
+# kind = "device"
+# uid = "AppleUSBAudioEngine:Allen&Heath:SQ:1A2B3C:1"
+# channels = [1, 2]
+# channel_count = 32
+
 [detector]
 kind = "none"
 

@@ -4,6 +4,7 @@
 //! auto-camera [--config PATH] [--trace PATH] [--save-show PATH]  # operator window
 //! auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
 //! auto-camera [--config PATH] --check                           # readiness check
+//! auto-camera --list-audio-devices                              # audio devices' UIDs
 //! ```
 //!
 //! The window and headless runs take `--log-dir PATH`, the folder for the
@@ -12,7 +13,8 @@
 //!
 //! The headless options are only accepted together with `--headless`, so a
 //! typo cannot silently open a window that records nothing, and `--check`
-//! is accepted only on its own, since it starts nothing. `--trace` works in
+//! is accepted only on its own, since it starts nothing; so is
+//! `--list-audio-devices`, which reads no config either. `--trace` works in
 //! both other modes: it writes the engine's per-tick trace as JSON Lines
 //! ([`crate::trace`]). So does `--record-detections`: it writes every
 //! detector pass the engine applied, for the eval runner to replay
@@ -90,6 +92,24 @@ pub struct Cli {
         ]
     )]
     pub check: bool,
+    /// List the audio input devices (CoreAudio, macOS) with the UIDs that
+    /// `kind = "device"` audio inputs name, then exit; needs a build with
+    /// `--features coreaudio`.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "config",
+            "headless",
+            "seconds",
+            "record",
+            "trace",
+            "record_detections",
+            "log_dir",
+            "save_show",
+            "check",
+        ]
+    )]
+    pub list_audio_devices: bool,
     /// Folder for the log and crash reports [default:
     /// ~/Library/Logs/auto-camera on macOS, $XDG_STATE_HOME/auto-camera or
     /// ~/.local/state/auto-camera on Linux].
@@ -176,6 +196,26 @@ mod tests {
         assert!(parse(&["--check", "--record-detections", "d.jsonl"]).is_err());
         // Nor does it keep the app's log.
         assert!(parse(&["--check", "--log-dir", "logs"]).is_err());
+    }
+
+    #[test]
+    fn listing_the_audio_devices_runs_alone() {
+        assert!(!parse(&[]).unwrap().list_audio_devices);
+        let cli = parse(&["--list-audio-devices"]).unwrap();
+        assert!(cli.list_audio_devices && !cli.check && !cli.headless);
+        for other in [
+            &["--config", "show.toml"][..],
+            &["--check"],
+            &["--headless"],
+            &["--trace", "t.jsonl"],
+            &["--log-dir", "logs"],
+            &["--save-show", "s.toml"],
+        ] {
+            let args: Vec<&str> = std::iter::once("--list-audio-devices")
+                .chain(other.iter().copied())
+                .collect();
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]

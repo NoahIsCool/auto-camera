@@ -11,6 +11,10 @@ repository.workspace = true
 default = []
 # Enables the OWLv2 ONNX detector (see crates/ac-vision/README.md).
 onnx = ["ac-engine/onnx"]
+# Opens audio inputs of `kind = "device"` (the board's USB interface, any
+# CoreAudio device) and lists them with `--list-audio-devices`; macOS only,
+# and opt-in like onnx (see the README's program audio section).
+coreaudio = ["ac-engine/coreaudio"]
 
 [dependencies]
 ac-audio.workspace = true
@@ -20,6 +24,8 @@ ac-engine.workspace = true
 ac-media.workspace = true
 ac-output.workspace = true
 ac-sidecar.workspace = true
+# The audio devices `--list-audio-devices` prints.
+ac-sources.workspace = true
 ac-switcher.workspace = true
 serde.workspace = true
 tracing.workspace = true
@@ -38,7 +44,6 @@ hmac-sha256 = "1.1"
 
 [dev-dependencies]
 ac-eval.workspace = true
-ac-sources.workspace = true
 ac-vision.workspace = true
 # Window tests drive the real UI through its AccessKit tree with egui's plain
 # test harness: no renderer (its wgpu feature stays off), so they need no GPU
