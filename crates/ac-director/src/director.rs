@@ -19,13 +19,14 @@
 //! 4. **Pool.** In fallback, or with nothing on program, the pool is the
 //!    eligible wides (all eligible shots if there is no eligible wide).
 //!    Otherwise it is every eligible shot.
-//! 5. **Hysteresis.** If the current suggestion is not in the pool it is
-//!    replaced by the best-scoring pool member at once. Otherwise it changes
-//!    only after the best challenger has led it by at least `margin`
-//!    continuously for `hold`; the timer tracks the lead, not the challenger's
-//!    identity, so near-equal challengers swapping places cannot starve a
-//!    switch away from a clearly worse incumbent. Ties go to the earlier
-//!    candidate in the input list.
+//! 5. **Hysteresis.** Each pool member is scored with [`score`] (quality,
+//!    prompt priority and recency). If the current suggestion is not in the
+//!    pool it is replaced by the best-scoring pool member at once. Otherwise
+//!    it changes only after the best challenger has led it by at least
+//!    `margin` continuously for `hold`; the timer tracks the lead, not the
+//!    challenger's identity, so near-equal challengers swapping places
+//!    cannot starve a switch away from a clearly worse incumbent. Ties go to
+//!    the earlier candidate in the input list.
 //! 6. **Take (Auto only, never during a transition).** With nothing on
 //!    program, or in fallback, the suggestion is taken at once (fallback with
 //!    a cut). Otherwise no take before the minimum dwell; after it, a take is
@@ -46,6 +47,8 @@ use crate::candidate::{CandidateKind, ShotCandidate, base_score, is_jump_cut, sc
 use crate::config::{ConfigError, DirectorConfig, DirectorMode};
 use crate::decision::{DirectorDecision, Reason, TakeRequest, TransitionHint};
 
+#[cfg(test)]
+mod priority_tests;
 #[cfg(test)]
 mod proptests;
 #[cfg(test)]

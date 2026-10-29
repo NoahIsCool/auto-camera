@@ -21,6 +21,7 @@ use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 
 mod feedback;
 mod framing;
+mod priority;
 mod protection;
 mod shared;
 mod switching;
@@ -61,6 +62,7 @@ fn config(subjects: u32) -> StudioConfig {
             PresetSpec::Size(ShotSize::Close),
         ]),
         literal: false,
+        priority: None,
     });
     c.output.width = W;
     c.output.height = H;

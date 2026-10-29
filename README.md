@@ -196,6 +196,7 @@ name = "Speaker"
 prompt = "a person speaking at a lectern"
 presets = ["medium", "close"]  # wide is always there; also full, medium_close,
                                # or { id, name, size, headroom, max_zoom }
+priority = 4                   # 1 to 5, higher first: ahead of the drummer (3)
 
 [[queries]]
 name = "Drummer"
@@ -222,6 +223,22 @@ audio_source = "cam-1"       # program audio from this source
 # rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
 record_path = "../recordings/show.mp4"
 ```
+
+A query's `priority` ranks its subjects for the director: a whole number
+from 1 to 5, higher first. When no query gives one, the list order is the
+ranking: the first query has 5 and each later one a level less, down to 1.
+Once any query gives one, a query without one has 3. Each level a
+subject's query stands above the lowest-ranked query that has subjects
+adds 0.05 to the score of its shots, so at equal quality the
+higher-priority prompt's shot is suggested (and taken, in Auto mode),
+while a shot tracked clearly better can still win: four levels are worth
+0.2 of quality. A subject is ranked by the query that first found it, not
+by other prompts that also box it (one stray box would otherwise rank the
+wrong person up). Only differences count: queries that all share one
+priority are directed exactly as before priorities existed, a query that
+finds no one changes nothing, and a wide counts as the lowest. A query
+added in the window joins the end of the list (or gets 3 when priorities
+are given), and a priority outside 1 to 5 is a configuration error.
 
 Further sections tune the `tracker`, `subjects` (limits and lost/retire
 times), `framing`, `switcher` (default transition), `monitors` (monitor
