@@ -11,14 +11,25 @@
 //!   overridden every tick.
 //! - **Auto**: the suggestion is staged every tick and takes are executed.
 //!
-//! Staging is skipped during a transition, since the switcher refuses to
-//! change preview while one runs.
+//! Staging is skipped during a transition. The switcher would queue it for
+//! the transition's end, where it would replace a shot the operator staged
+//! meanwhile; the director stages once the transition has ended instead:
+//! on the tick that ends it, or on the next tick when a command (the T-bar
+//! or Cut) ends it. A shot the operator staged during the transition lands
+//! on preview at that end, before the director runs, and the program
+//! change there often changes the suggestion too. In Suggest mode the
+//! landing counts as the operator staging over the suggestion
+//! ([`EngineCore::note_landing`]): the director's next suggestion is marked
+//! staged without being staged, so the edge is spent on the operator's
+//! choice and the director stages again only when its suggestion changes
+//! after that, as after a shot staged by hand. (Auto mode stages every
+//! tick regardless.)
 
 use std::time::Duration;
 
 use ac_core::ShotId;
 use ac_director::{DirectorInput, DirectorMode, ShotCandidate};
-use ac_switcher::TransitionKind;
+use ac_switcher::{Queued, TransitionKind};
 
 use super::EngineCore;
 
@@ -39,8 +50,22 @@ impl EngineCore {
         }
     }
 
+    /// Notes whether `queued`, the press waiting before a switcher call,
+    /// was a shot the operator staged that the call landed on preview at the
+    /// end of its transition, with no take of it running (see the module
+    /// docs).
+    pub(super) fn note_landing(&mut self, queued: Option<Queued>) {
+        let landed = queued.is_some_and(|q| {
+            self.switcher.queued().is_none()
+                && !self.switcher.in_transition()
+                && self.switcher.preview() == Some(&q.shot)
+        });
+        self.operator_staged |= landed;
+    }
+
     /// Runs the director and acts on its decision for the current mode.
     pub(super) fn run_director(&mut self) {
+        let operator_staged = std::mem::take(&mut self.operator_staged);
         let candidates: Vec<ShotCandidate> = self
             .catalog
             .entries()
@@ -72,7 +97,9 @@ impl EngineCore {
         match self.director.config().mode {
             DirectorMode::Off => self.last_staged = None,
             DirectorMode::Suggest => {
-                if decision.suggestion != self.last_staged {
+                if operator_staged {
+                    self.last_staged = decision.suggestion.clone();
+                } else if decision.suggestion != self.last_staged {
                     match &decision.suggestion {
                         Some(s) if self.stage(s, busy) => self.last_staged = Some(s.clone()),
                         Some(_) => {}
@@ -96,12 +123,17 @@ impl EngineCore {
         self.decision = decision;
     }
 
-    /// Puts `shot` on preview unless it is there; false if that failed.
+    /// Puts `shot` on preview unless it is there; false, changing nothing,
+    /// while `busy` with a transition (see the module docs).
     pub(super) fn stage(&mut self, shot: &ShotId, busy: bool) -> bool {
         if self.switcher.preview() == Some(shot) {
             return true;
         }
-        !busy && self.switcher.set_preview(shot.clone()).is_ok()
+        if busy {
+            return false;
+        }
+        self.switcher.set_preview(shot.clone());
+        true
     }
 
     /// Takes `shot` to program: a cut, or the selected transition.

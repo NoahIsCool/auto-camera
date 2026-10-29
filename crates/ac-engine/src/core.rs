@@ -27,8 +27,12 @@
 //!    and store (media time = the frame's PTS).
 //! 4. **Catalog.** The shot list is re-derived from the stores and queries.
 //! 5. **Framing.** Every shot's framer steps by `dt` and is rescored.
-//! 6. **Switching.** The switcher advances its transition; the director
-//!    proposes (and in Auto mode takes) a shot.
+//! 6. **Switching.** The switcher advances its transition; when one ends,
+//!    a take the operator queued during it fires if the catalog still has
+//!    its shot available, and is dropped with the reason otherwise
+//!    ([`ac_switcher`]). The director then proposes (and in Auto mode
+//!    takes) a shot; a shot the operator staged during the transition
+//!    that landed on preview as it ended counts as the operator's staging.
 //! 7. **Rendering.** The compositor renders the program; monitors and
 //!    multiview tiles are rendered at their own, lower rates.
 //! 8. **Discovery requests** are issued for sources that are due (at most
@@ -239,6 +243,9 @@ pub struct EngineCore {
     decision: DirectorDecision,
     /// Suggestion last staged on preview in suggest mode.
     last_staged: Option<ShotId>,
+    /// A shot the operator staged during a transition has landed on
+    /// preview since the director last ran (see [`directing`]).
+    operator_staged: bool,
     /// Takes requested by the director.
     director_takes: u64,
     /// Program renderer.
@@ -333,6 +340,7 @@ impl EngineCore {
             director,
             decision: DirectorDecision::off(),
             last_staged: None,
+            operator_staged: false,
             director_takes: 0,
             compositor,
             now: Duration::ZERO,
@@ -423,7 +431,10 @@ impl EngineCore {
         }
         self.sync_catalog();
         self.step_framing(dt);
-        self.switcher.tick(dt);
+        let queued = self.switcher.queued().cloned();
+        let catalog = &self.catalog;
+        self.switcher.tick(dt, |id| catalog.is_available(id));
+        self.note_landing(queued);
         self.note_program();
         self.run_director();
         self.note_program();
