@@ -527,8 +527,11 @@ channel_count = 32           # optional, as for a file
 ```
 
 The device is captured with all its input channels at the rate it runs at,
-and each block carries the host time CoreAudio stamped it with, on the
-engine's clock. The rate is kept, but the cpal library that opens the
+and each block carries the time it was captured, on the engine's clock:
+the host time CoreAudio stamped it with, less the device's latency as the
+connection's first buffer had it (a few to tens of milliseconds, the same
+for every block of the connection, so only how the times advance
+matters). The rate is kept, but the cpal library that opens the
 stream switches a device that offers a 32-bit float format at that rate to
 it: a setting of the device that stays after the show and that Audio MIDI
 Setup shows. Only the device with exactly that UID is opened: one that is

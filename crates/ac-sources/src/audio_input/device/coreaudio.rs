@@ -19,18 +19,43 @@
 //!   device that outlasts the app and that other apps and Audio MIDI Setup
 //!   see. A device without one keeps its format, which the AUHAL converts
 //!   to `f32`;
-//! * **time**: every input callback's `capture` instant, the buffer's host
-//!   time (`mHostTime`) less the device's latency, in nanoseconds of the
-//!   host clock, and `Stream::now()` on the same time base;
+//! * **time**: two instants for every input callback, in nanoseconds of
+//!   the host clock: `callback`, the buffer's own host time (`mHostTime`),
+//!   and `capture`, which cpal works out as that less the device's IO
+//!   buffer, its latency and its safety offset
+//!   (`kAudioDevicePropertyBufferFrameSize`, `kAudioDevicePropertyLatency`,
+//!   `kAudioDevicePropertySafetyOffset`, all read once, when the stream is
+//!   built), or less this callback's own length in place of the buffer
+//!   size when that could not be read. `Stream::now()` is on the same time
+//!   base;
 //! * **trouble**: its error callback reports an overload
 //!   (`kAudioDeviceProcessorOverload`) as `Xrun`, from the real-time
 //!   thread, and the device going away (`kAudioDevicePropertyDeviceIsAlive`)
 //!   or its rate changing as `DeviceNotAvailable` and `StreamInvalidated`,
 //!   from a thread of cpal's.
 //!
-//! The data callback only hands its slice and capture time to the
+//! The data callback only hands its slice and its capture time to the
 //! [`CaptureSink`]; the error callback only bumps the overload count or
 //! records the loss ([`StreamEvents`]). Everything else is the input's.
+//!
+//! # Capture time
+//!
+//! The capture time handed on is the buffer's host time less the latency
+//! cpal gave the stream's *first* buffer, held for the stream
+//! ([`CaptureLatency`]). While cpal could read the buffer size that is its
+//! own capture time, since its latency is then the same for every buffer.
+//! When it could not, cpal's latency follows each callback's length, and a
+//! callback shorter or longer than the one before would move the capture
+//! time by the difference: a jump in the PTS with no audio lost or added.
+//! Held fixed, a block's PTS is its host time less a constant, whatever
+//! length the callbacks have.
+//!
+//! # Invariants
+//!
+//! * A connection's capture times are its buffers' host times less one
+//!   latency, fixed at its first buffer: a constant offset per connection,
+//!   a few to tens of milliseconds early, that only shifts where its
+//!   timeline starts.
 
 use std::time::Duration;
 
@@ -38,7 +63,7 @@ use ac_media::MediaError;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, ErrorKind, HostId, InputCallbackInfo, StreamConfig, StreamInstant};
 
-use super::{AudioDevice, CaptureSink, DeviceStream, StreamEvents};
+use super::{AudioDevice, CaptureLatency, CaptureSink, DeviceStream, StreamEvents};
 
 /// A CoreAudio failure as an open error.
 fn open_error(what: &str, e: cpal::Error) -> MediaError {
@@ -121,8 +146,11 @@ pub(super) fn start(
         sample_rate: device.sample_rate,
         buffer_size: BufferSize::Default,
     };
+    let mut latency = CaptureLatency::default();
     let data = move |samples: &[f32], info: &InputCallbackInfo| {
-        sink.deliver(host_time(info.timestamp().capture), samples);
+        let stamp = info.timestamp();
+        let at = latency.capture(host_time(stamp.callback), host_time(stamp.capture));
+        sink.deliver(at, samples);
     };
     let trouble = move |e: cpal::Error| match e.kind() {
         ErrorKind::Xrun => events.overload(),

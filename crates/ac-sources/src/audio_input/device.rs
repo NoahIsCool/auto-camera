@@ -28,12 +28,12 @@
 //!   CoreAudio, through cpal, in a macOS build with the `coreaudio`
 //!   feature; tests use a fake. Everything that is not a CoreAudio call
 //!   lives outside it;
-//! * the **hand-off** ([`handoff`]) carries the callback's buffers to the
+//! * the **hand-off** ([`mod@handoff`]) carries the callback's buffers to the
 //!   input's worker thread through a fixed pool, never blocking or
 //!   allocating in the callback;
 //! * the **stamper** ([`timing`]) gives each block its sequence number and
-//!   its PTS, the host time it was captured at mapped to the clock the
-//!   input is paced by, and finds the stream's discontinuities.
+//!   its PTS, the time it was captured at mapped to the clock the input is
+//!   paced by, and finds the stream's discontinuities.
 //!
 //! The worker ([`input`]) polls the hand-off, stamps the blocks and queues
 //! them in the input's [`AudioRing`](ac_media::AudioRing); the first block
@@ -60,7 +60,7 @@
 //! * A connection opens the device with exactly the configured UID, or
 //!   fails.
 //! * The device's callbacks never block, allocate or take a lock
-//!   ([`handoff`]); the input's memory is bounded by its pool and its ring.
+//!   ([`mod@handoff`]); the input's memory is bounded by its pool and its ring.
 //! * Sequence numbers and PTS follow [`timing`]'s rules: one number per
 //!   block (dropped blocks keep theirs), PTS never decreasing.
 //! * After [`AudioInput::stop`](ac_media::AudioInput::stop) (or a drop)
@@ -78,7 +78,7 @@ pub mod timing;
 
 pub use handoff::{CaptureSink, Captured, HandoffReader, StreamEvents, handoff};
 pub use input::{DeviceInput, DeviceOptions};
-pub use timing::{Discontinuity, Stamper};
+pub use timing::{CaptureLatency, Discontinuity, Stamper};
 
 /// True in a build that can open CoreAudio devices: macOS, with the
 /// `coreaudio` feature.

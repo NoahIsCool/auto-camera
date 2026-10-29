@@ -3,7 +3,9 @@
 //! PTS, a rewind that moves the map), reported once their window has
 //! passed; and excursions that come back (glitches of one block or
 //! several, either way, at the blocks' sizes a device delivers), which
-//! leave the PTS on the stream's old timeline and are reported once.
+//! leave the PTS on the stream's old timeline and are reported once. Last,
+//! the capture latency held for a connection, so that callbacks of another
+//! length do not move the PTS.
 
 use super::*;
 use crate::audio_input::device::timing::GLITCH_WINDOW;
@@ -458,5 +460,90 @@ fn a_glitch_describes_itself() {
         glitch.to_string(),
         "host time of 1 block(s) from block 11250 was up to 3.0 ms off, then came back: \
          no audio missing"
+    );
+}
+
+#[test]
+fn the_first_buffers_latency_is_held_for_the_connection() {
+    // cpal's capture time when it could read the buffer size: one latency
+    // for every buffer, kept as it is.
+    let mut steady = CaptureLatency::default();
+    for k in 0..10u64 {
+        let host = ms(1000 + 10 * k);
+        assert_eq!(steady.capture(host, host - ms(12)), host - ms(12));
+    }
+    // When it could not, its latency follows each callback's length; the
+    // first one's is held.
+    let mut held = CaptureLatency::default();
+    assert_eq!(held.capture(ms(5000), ms(4989)), ms(4989));
+    assert_eq!(held.capture(ms(5010), ms(5007)), ms(4999), "11 ms, not 3");
+    // A capture time after the host time is no latency; a host time below
+    // the latency comes out as zero.
+    let mut none = CaptureLatency::default();
+    assert_eq!(none.capture(ms(10), ms(20)), ms(10));
+    let mut early = CaptureLatency::default();
+    early.capture(ms(50), ms(10));
+    assert_eq!(early.capture(ms(30), ms(0)), Duration::ZERO);
+}
+
+/// Four seconds of a 48 kHz device whose callbacks are 512 frames, then
+/// 128 from the second second on, then 512 again, stamped with cpal's
+/// capture time for a device whose buffer size it could not read (the
+/// host time less the callback's length and 64 frames more), through
+/// `latency` when given; returns the PTS and the discontinuities.
+fn cpal_without_buffer_size(
+    mut latency: Option<CaptureLatency>,
+) -> (Vec<(u64, Duration)>, Vec<Discontinuity>) {
+    let (mut sink, reader) = handoff(2, 48_000, 1024, 64);
+    let host0 = Duration::from_secs(100);
+    let mut s = stamper(host0 - ms(20));
+    let nanos = |frames: u64| Duration::from_nanos(frames * 1_000_000_000 / 48_000);
+    let (mut frame, mut pts, mut found) = (0u64, Vec::new(), Vec::new());
+    while frame < 4 * 48_000 {
+        let len = if (48_000..2 * 48_000).contains(&frame) {
+            128
+        } else {
+            512
+        };
+        let host = host0 + nanos(frame);
+        let capture = host - nanos(len + 64);
+        let at = match &mut latency {
+            Some(l) => l.capture(host, capture),
+            None => capture,
+        };
+        sink.deliver(at, &vec![0.0; len as usize * 2]);
+        while let Some(c) = reader.take() {
+            let (block, with) = s.stamp(&c);
+            reader.recycle(c);
+            pts.push((frame, block.pts));
+            found.extend(with);
+        }
+        frame += len;
+    }
+    (pts, found)
+}
+
+#[test]
+fn callbacks_of_another_length_do_not_move_the_pts() {
+    let (pts, found) = cpal_without_buffer_size(Some(CaptureLatency::default()));
+    assert!(found.is_empty(), "{found:?}");
+    // Every block's PTS is its first frame's time, from the first one on.
+    let (first_frame, first) = pts[0];
+    assert_eq!(first_frame, 0);
+    for &(frame, at) in &pts {
+        let want = first + Duration::from_nanos(frame * 1_000_000_000 / 48_000);
+        let err = at.as_nanos().abs_diff(want.as_nanos());
+        assert!(err < 1_000, "frame {frame}: {at:?}, not {want:?}");
+    }
+    // cpal's own capture times would have jumped 8 ms ahead at the shorter
+    // callbacks and back at the longer ones.
+    let (_, found) = cpal_without_buffer_size(None);
+    let eight = |by: &Duration| by.as_nanos().abs_diff(8_000_000) < 1_000;
+    assert!(
+        matches!(&found[..], [
+            Discontinuity::Gap { seq: 94, by: ahead },
+            Discontinuity::Rewind { seq: 468, by: back },
+        ] if eight(ahead) && eight(back)),
+        "{found:?}"
     );
 }

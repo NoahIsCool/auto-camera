@@ -3,20 +3,27 @@
 //!
 //! # Host time and the engine's clock
 //!
-//! CoreAudio stamps every input buffer with the host time at which its
-//! first sample frame was captured, on the Mac's host clock
-//! (`mach_absolute_time`). On macOS the engine's [`crate::WallClock`]
-//! (Rust's `Instant`) reads that same host clock, so a fixed offset maps
-//! one onto the other exactly, with no drift between them. A connection
-//! fixes the offset when it opens: it reads the host clock through its
-//! stream and the pacing clock back to back, and maps the pacing clock's
-//! reading when the open began to PTS 0 (the *origin*), as every input's
-//! PTS count from its connection's start (a supervisor then moves them
-//! onto its own timeline). A block's PTS is therefore the time its first
-//! frame was captured, measured on the engine's clock. A device whose
-//! sample clock runs fast or slow shows it as PTS that advance a little
-//! slower or faster than its sample count: the drift that program audio
-//! has to absorb, measured rather than hidden.
+//! CoreAudio stamps every input buffer with a host time (`mHostTime`) on
+//! the Mac's host clock (`mach_absolute_time`). cpal takes the device's
+//! latency off it (its IO buffer, latency and safety offset, read once
+//! when the stream is built), and the input holds that latency fixed for
+//! the connection ([`CaptureLatency`]), so a buffer's capture time is its
+//! host time less a constant: a few to tens of milliseconds before
+//! CoreAudio's stamp, the same for every buffer of a connection. On macOS
+//! the engine's [`crate::WallClock`] (Rust's `Instant`) reads that same
+//! host clock, so a fixed offset maps one onto the other exactly, with no
+//! drift between them. A connection fixes the offset when it opens: it
+//! reads the host clock through its stream and the pacing clock back to
+//! back, and maps the pacing clock's reading when the open began to PTS 0
+//! (the *origin*), as every input's PTS count from its connection's start
+//! (a supervisor then moves them onto its own timeline). A block's PTS is
+//! therefore its capture time on the engine's clock: early by the
+//! connection's constant latency, which shifts where the timeline starts
+//! and nothing else, since program audio is paced by its sample count and
+//! its drift is measured from how the PTS advance. A device whose sample
+//! clock runs fast or slow shows it as PTS that advance a little slower or
+//! faster than its sample count: the drift that program audio has to
+//! absorb, measured rather than hidden.
 //!
 //! The first buffer of a device that was already running can have been
 //! captured a few milliseconds before the open began; the origin is then
@@ -28,7 +35,7 @@
 //! `n` ended, `frames / rate` later at the nominal rate, give or take the
 //! drift (parts per million of a block: microseconds). So each block is
 //! expected at the end of the one before, plus whatever the hand-off
-//! dropped between them ([`super::handoff`]). A block captured more than
+//! dropped between them ([`mod@super::handoff`]). A block captured more than
 //! the tolerance (half the block before it, at least [`MIN_TOLERANCE`])
 //! after it was expected is a *jump ahead*: audio the device lost (an
 //! overload, a restarted stream), or a host time that is wrong. One
@@ -238,6 +245,28 @@ impl Excursion {
                 by: duration(-self.offset),
             }
         }
+    }
+}
+
+/// A connection's capture latency, fixed by its first buffer: what cpal
+/// takes off that buffer's host time for its capture time, taken off every
+/// later buffer's too, so that a change in the callbacks' length cannot
+/// move the capture times (see `coreaudio`'s module docs). For the
+/// device's callback: it never blocks or allocates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureLatency {
+    /// The first buffer's host time less its capture time, once there was
+    /// a buffer.
+    fixed: Option<Duration>,
+}
+
+impl CaptureLatency {
+    /// The capture time of a buffer CoreAudio stamped `host` and cpal
+    /// gives as captured at `capture`: `host` less the first buffer's
+    /// latency (zero for a capture time after its host time).
+    pub fn capture(&mut self, host: Duration, capture: Duration) -> Duration {
+        let latency = *self.fixed.get_or_insert(host.saturating_sub(capture));
+        host.saturating_sub(latency)
     }
 }
 

@@ -22,7 +22,7 @@
 //!   real time whatever clock the studio is paced by.
 //!
 //! Polling, rather than waiting on the hand-off, is what keeps the
-//! device's callback free of locks (see [`super::handoff`]); a few
+//! device's callback free of locks (see [`mod@super::handoff`]); a few
 //! milliseconds of poll add no more than that to the input's latency.
 //!
 //! # Invariants
