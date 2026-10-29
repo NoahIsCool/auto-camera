@@ -265,7 +265,11 @@ mod tests {
     fn ffmpeg_lists_devices_on_stderr_whatever_its_exit() {
         let tools = FfmpegTools::from_env();
         if !tools.is_available() {
-            eprintln!("skipping: ffmpeg not found");
+            // Skipped like every test that runs ffmpeg, unless it is required.
+            let required =
+                std::env::var_os("AC_REQUIRE_FFMPEG").is_some_and(|v| !v.is_empty() && v != "0");
+            assert!(!required, "ffmpeg/ffprobe are required (AC_REQUIRE_FFMPEG)");
+            eprintln!("skipping: ffmpeg/ffprobe not found");
             return;
         }
         // Off macOS the answer is that avfoundation is unknown, which the
