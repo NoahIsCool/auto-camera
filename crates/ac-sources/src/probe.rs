@@ -9,7 +9,9 @@
 //! Probing runs `ffprobe -print_format json -show_streams -show_format` once
 //! when a file is opened and reads the first real video stream and the first
 //! audio stream. Cover art (a video stream with the `attached_pic`
-//! disposition) is not a picture source and is skipped.
+//! disposition) is not a picture source and is skipped. An audio-only input
+//! ([`crate::audio_input`]) reads the first audio stream alone
+//! ([`probe_audio`]), whatever else the file holds.
 //!
 //! Parsing is separate from running the tool ([`parse_probe`]), so it is
 //! tested against canned ffprobe output without ffmpeg installed.
@@ -173,6 +175,27 @@ pub struct ProbeInfo {
 
 /// Runs ffprobe on `path` and parses the result.
 pub fn probe(tools: &FfmpegTools, path: &Path) -> Result<ProbeInfo, MediaError> {
+    let json = run_ffprobe(tools, path)?;
+    parse_probe(&json).map_err(|e| in_file(path, e))
+}
+
+/// Runs ffprobe on `path` and parses its first audio stream, for an
+/// audio-only input; a file without one is an error.
+pub fn probe_audio(tools: &FfmpegTools, path: &Path) -> Result<AudioStreamInfo, MediaError> {
+    let json = run_ffprobe(tools, path)?;
+    parse_audio_probe(&json).map_err(|e| in_file(path, e))
+}
+
+/// `e` with the name of the file it is about.
+fn in_file(path: &Path, e: MediaError) -> MediaError {
+    match e {
+        MediaError::Open(msg) => MediaError::Open(format!("{}: {msg}", path.display())),
+        other => other,
+    }
+}
+
+/// ffprobe's JSON description of `path`.
+fn run_ffprobe(tools: &FfmpegTools, path: &Path) -> Result<String, MediaError> {
     let output = Command::new(&tools.ffprobe)
         .args(["-v", "error", "-print_format", "json"])
         .args(["-show_streams", "-show_format"])
@@ -193,11 +216,7 @@ pub fn probe(tools: &FfmpegTools, path: &Path) -> Result<ProbeInfo, MediaError> 
             stderr.trim()
         )));
     }
-    let json = String::from_utf8_lossy(&output.stdout);
-    parse_probe(&json).map_err(|e| match e {
-        MediaError::Open(msg) => MediaError::Open(format!("{}: {msg}", path.display())),
-        other => other,
-    })
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// `path` as an ffmpeg `file:` URL, so names that look like options or other
@@ -283,10 +302,27 @@ struct RawTags {
     rotate: Option<String>,
 }
 
+/// Reads ffprobe's JSON output.
+fn read_raw(json: &str) -> Result<RawProbe, MediaError> {
+    serde_json::from_str(json)
+        .map_err(|e| MediaError::Open(format!("unreadable ffprobe output: {e}")))
+}
+
+/// Parses the first audio stream of ffprobe JSON (from `-show_streams`);
+/// one without an audio stream is an error.
+pub fn parse_audio_probe(json: &str) -> Result<AudioStreamInfo, MediaError> {
+    let raw = read_raw(json)?;
+    let audio = raw
+        .streams
+        .iter()
+        .find(|s| s.codec_type.as_deref() == Some("audio"))
+        .ok_or_else(|| MediaError::Open("no audio stream".into()))?;
+    parse_audio(audio)
+}
+
 /// Parses ffprobe JSON (from `-show_streams -show_format`).
 pub fn parse_probe(json: &str) -> Result<ProbeInfo, MediaError> {
-    let raw: RawProbe = serde_json::from_str(json)
-        .map_err(|e| MediaError::Open(format!("unreadable ffprobe output: {e}")))?;
+    let raw = read_raw(json)?;
     let is = |s: &RawStream, kind: &str| s.codec_type.as_deref() == Some(kind);
     let video = raw
         .streams

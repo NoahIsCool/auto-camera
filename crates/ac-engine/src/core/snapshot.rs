@@ -145,6 +145,7 @@ impl EngineCore {
             switcher,
             director,
             sources,
+            audio_inputs: Vec::new(),
             output,
             timing,
             program_monitor: self.program_monitor.clone(),

@@ -61,9 +61,9 @@ mod tick;
 use awake::SessionAwake;
 
 /// Audio may lag video by this much before silence is inserted.
-const AUDIO_SLACK: Duration = Duration::from_millis(100);
+pub(crate) const AUDIO_SLACK: Duration = Duration::from_millis(100);
 /// Audio may lead video by this much before the oldest blocks are dropped.
-const AUDIO_MAX_LEAD: Duration = Duration::from_millis(100);
+pub(crate) const AUDIO_MAX_LEAD: Duration = Duration::from_millis(100);
 
 /// A result handed back by a helper thread.
 enum Event {

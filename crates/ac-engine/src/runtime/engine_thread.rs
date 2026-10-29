@@ -9,10 +9,10 @@
 //! frame and audio to the output, sends the tick's trace record (when the
 //! engine traces; [`crate::trace`]) and the passes it applied (when it logs
 //! detections; [`crate::detection_log`]) and publishes a snapshot. The
-//! frame the tick read from the phase reference (the program audio source,
-//! else the first source) goes to the [`PhaseLock`], which delays the
-//! schedule when ticks collide with that source's frames (see
-//! [`crate::schedule`]).
+//! frame the tick read from the phase reference (the video source whose
+//! audio is program audio, else the first source) goes to the
+//! [`PhaseLock`], which delays the schedule when ticks collide with that
+//! source's frames (see [`crate::schedule`]).
 //!
 //! Only the phase reference is fed its newest frame as it is, though: every
 //! other source's newest frame is offered to its
@@ -36,8 +36,6 @@
 use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
-
-use ac_output::AudioFormat;
 
 use super::{EngineReport, Runtime};
 use crate::command::{CommandReply, EngineCommand};
@@ -132,7 +130,7 @@ impl Runtime {
                     rtmp_url,
                     record_path,
                 } => {
-                    let audio = self.program_audio_format();
+                    let audio = self.audio.format(&self.sources);
                     self.output
                         .start(rtmp_url.clone(), record_path.clone(), audio)
                 }
@@ -146,20 +144,6 @@ impl Runtime {
                 return true;
             }
         }
-    }
-
-    /// The format of program audio for an output starting now: the audio
-    /// source's, as its newest connection describes it, so a source that
-    /// was missing when the engine started gives the program its audio
-    /// once it has been on air. `None` without an audio source, or while
-    /// it has given no description with audio.
-    fn program_audio_format(&self) -> Option<AudioFormat> {
-        let source = self.sources.get(self.audio_source?)?;
-        let (sample_rate, channels) = source.current_info().audio?;
-        Some(AudioFormat {
-            sample_rate,
-            channels,
-        })
     }
 
     /// Offers every source's newest frame to its presentation buffer, if
@@ -210,7 +194,7 @@ impl Runtime {
         self.core
             .note_presentation(stats_by_source(&self.presenters));
         let reference = feeds
-            .get(self.audio_source.unwrap_or(0))
+            .get(self.audio.phase_reference())
             .and_then(|feed| feed.frame.as_ref())
             .map(|frame| (frame.seq, frame.pts));
         let out = self.core.tick(media_time, &feeds, results);
@@ -222,13 +206,7 @@ impl Runtime {
         for pass in out.applied {
             self.detections.send(pass);
         }
-        let mut program_audio = Vec::new();
-        for (i, s) in self.sources.iter().enumerate() {
-            let blocks = s.drain_audio();
-            if Some(i) == self.audio_source {
-                program_audio = blocks;
-            }
-        }
+        let program_audio = self.audio.take(&self.sources);
         self.output.push(&out.program, program_audio, skipped);
         reference
     }
@@ -255,6 +233,7 @@ impl Runtime {
         };
         let mut snapshot = self.core.snapshot(self.output.view(), timing, running);
         snapshot.sidecar = self.sidecar.as_ref().map(|s| s.status());
+        snapshot.audio_inputs = self.audio.views();
         let snapshot = Arc::new(snapshot);
         self.snapshots.publish(snapshot.clone());
         snapshot
@@ -280,6 +259,7 @@ impl Runtime {
         for s in &mut self.sources {
             s.stop();
         }
+        self.audio.stop();
         EngineReport {
             ticks: self.core.ticks(),
             threads_joined: joined,

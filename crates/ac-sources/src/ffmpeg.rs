@@ -13,6 +13,11 @@
 //! frames of variable-rate input), which is what lets PTS be derived from the
 //! frame number.
 //!
+//! An audio-only input ([`crate::audio_input`]) decodes its stream with no
+//! rate or channel option at all: ffmpeg then neither resamples nor remixes
+//! it (asking for the stream's own channel count can still remix a layout
+//! ffmpeg names differently), so a PCM file's samples arrive exactly.
+//!
 //! A file's [`Segment`](crate::segment::Segment), worked out on the file as
 //! a `Cut`, adds its options just before the `-i` and its filter first in
 //! the chain, so frames outside the segment are dropped before they are
@@ -157,6 +162,16 @@ pub(crate) fn audio_args(path: &Path, audio: &AudioStreamInfo, cut: &Cut) -> Vec
     args
 }
 
+/// Arguments that decode `audio` from `path` to interleaved little-endian
+/// `f32` samples, as they are in the file (see the module docs), on stdout.
+pub(crate) fn audio_only_args(path: &Path, audio: &AudioStreamInfo) -> Vec<OsString> {
+    let mut args: Vec<OsString> = COMMON.iter().map(OsString::from).collect();
+    args.extend(["-i".into(), file_url(path)]);
+    args.extend(["-map".into(), format!("0:{}", audio.index).into()]);
+    args.extend(["-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"].map(OsString::from));
+    args
+}
+
 /// An ffmpeg command with `args`.
 pub(crate) fn command(tools: &FfmpegTools, args: &[OsString]) -> Command {
     let mut cmd = Command::new(&tools.ffmpeg);
@@ -259,6 +274,25 @@ mod tests {
         assert_eq!(at("-ar"), "44100");
         assert_eq!(at("-ac"), "6");
         assert!(!joined.contains(&"-af".to_string()));
+    }
+
+    #[test]
+    fn an_audio_only_command_neither_resamples_nor_remixes() {
+        let a = AudioStreamInfo {
+            index: 0,
+            sample_rate: 48_000,
+            channels: 16,
+        };
+        let joined = strings(&audio_only_args(Path::new("/b/-board.wav"), &a));
+        let at = |flag: &str| &joined[joined.iter().position(|a| a == flag).unwrap() + 1];
+        assert_eq!(at("-i"), "file:/b/-board.wav");
+        assert_eq!(at("-map"), "0:0");
+        assert_eq!(at("-f"), "f32le");
+        assert_eq!(at("-acodec"), "pcm_f32le");
+        for absent in ["-ar", "-ac", "-af"] {
+            assert!(!joined.iter().any(|a| a == absent), "{absent}: {joined:?}");
+        }
+        assert_eq!(joined.last().unwrap(), "pipe:1");
     }
 
     /// `args` as strings.

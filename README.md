@@ -454,6 +454,37 @@ ffmpeg killed or crashed) is reopened the same way. If it is the
 Only a source setting no retry can fix (a synthetic pattern that cannot be
 made, a `max_width` below 2) stops the start.
 
+Program audio is one stereo pair. `output.audio_source` names a source,
+for its embedded audio, or an audio input: an audio-only feed such as the
+soundboard's. For now that is a WAV or RF64 recording of the board, played
+as a live feed (a USB audio interface comes later, behind the same input):
+
+```toml
+[[audio_inputs]]
+id = "board"                 # not a source's id
+name = "Soundboard"
+kind = "file"
+path = "../media/board-rehearsal.wav"
+loop_playback = true
+channels = [3, 4]            # left and right, counted from 1; [5] puts 5 on both sides
+channel_count = 16           # optional: what the input has, checked before use
+
+[output]
+audio_source = "board"
+```
+
+The picked channels are copied as they are; nothing is mixed. Without
+`channels` the program takes channels 1 and 2, or a mono input's one on
+both sides, and so does a source's embedded audio. A pick beyond
+`channel_count` fails the load; an input that opens without the picked
+channels, or with another count than `channel_count`, stays offline with
+the reason and is retried, like a source. Nothing resamples: an output
+runs at its input's rate, or at 48 kHz when it starts before the input has
+connected. The engine never waits on an input: a stall is filled with
+silence and the late audio after it cut, and a sample clock that drifts
+from the engine's is kept in step the same way, so the program stays in
+sync. A config without `[[audio_inputs]]` works as before.
+
 ## Shows
 
 ```sh
@@ -663,8 +694,8 @@ than for a show; choosing a model per query comes later.
 
 ## Program loudness
 
-While the output runs with program audio (`output.audio_source`), the
-paced audio the encoder gets is also metered after ITU-R BS.1770-4 and
+While the output runs with program audio (`output.audio_source`, a
+source's or an audio input's), the paced audio the encoder gets is also metered after ITU-R BS.1770-4 and
 EBU R 128 (`crates/ac-audio`): momentary (400 ms) and short-term (3 s)
 loudness, integrated loudness over the session (gated at −70 LUFS and
 10 LU below the programme, so silence and pauses do not count), and the
@@ -681,9 +712,9 @@ the program is silent. A headless run reports the session's values in
 | Crate | Role |
 |---|---|
 | `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
-| `ac-media` | Frames, audio blocks and the source trait, with latest-frame mailboxes |
+| `ac-media` | Frames, audio blocks, the source and audio input traits, latest-frame mailboxes and audio rings, and the stereo channel pick |
 | `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak |
-| `ac-sources` | File (ffmpeg) and synthetic sources, file segments, a frame-by-frame clip reader for offline tools; injectable clocks |
+| `ac-sources` | File (ffmpeg) and synthetic sources, file segments, audio-only file inputs (WAV, RF64) and a fake input that drifts and stalls, a frame-by-frame clip reader for offline tools; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector, replay of recorded detections |
 | `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |

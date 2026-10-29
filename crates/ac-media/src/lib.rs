@@ -19,13 +19,25 @@
 //! and the time a source was offline counts as elapsed media time.
 //!
 //! Pixels are packed RGBA8 in row-major order with no row padding. Audio is
-//! interleaved `f32` in `-1.0..=1.0`.
+//! interleaved `f32` in `-1.0..=1.0`, in [`AudioBlock`]s tagged like frames:
+//! source id, a per-source sequence number (one per block) and the PTS of
+//! the block's first sample.
+//!
+//! Audio with no picture, such as a soundboard's feed, comes from an
+//! [`AudioInput`] ([`audio`]), and [`ChannelPick`] ([`channels`]) chooses
+//! the two channels of any input that become program audio.
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use ac_core::SourceId;
 use thiserror::Error;
+
+pub mod audio;
+pub mod channels;
+
+pub use audio::{AudioInput, AudioInputInfo, AudioRing};
+pub use channels::{ChannelPick, PROGRAM_CHANNELS};
 
 /// A decoded video frame.
 #[derive(Debug, Clone)]
@@ -108,6 +120,9 @@ impl VideoFrame {
 pub struct AudioBlock {
     /// Source that produced the audio.
     pub source: SourceId,
+    /// Per-source sequence number, starting at 0: one per block the source
+    /// produced, so a gap is audio that was lost.
+    pub seq: u64,
     /// Presentation time of the first sample.
     pub pts: Duration,
     /// Samples per second per channel.
@@ -393,6 +408,7 @@ mod tests {
     fn audio_block_duration() {
         let b = AudioBlock {
             source: SourceId("c".into()),
+            seq: 0,
             pts: Duration::ZERO,
             sample_rate: 48_000,
             channels: 2,

@@ -45,7 +45,10 @@
 //! away counts as elapsed media time. The first connection, opened by
 //! `start`, therefore has epoch 0 and offset zero: a source that never fails
 //! delivers exactly the frames an unsupervised one would. Audio moves by the
-//! same PTS offset as its connection's frames.
+//! same PTS offset as its connection's frames, and its block sequence
+//! numbers continue after the last block delivered, as frames' do. The
+//! audio-only inputs' supervisor keeps the same books
+//! ([`crate::audio_input::supervised`]).
 //!
 //! # Threads
 //!
@@ -137,11 +140,13 @@ impl Backoff {
 /// How one connection's frames and audio are restamped onto the
 /// supervisor's timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Stamp {
+pub(crate) struct Stamp {
     /// The connection's epoch.
     epoch: u64,
-    /// Added to the connection's sequence numbers.
+    /// Added to the connection's frame sequence numbers.
     seq: u64,
+    /// Added to the connection's audio block sequence numbers.
+    audio_seq: u64,
     /// Added to the connection's PTS.
     pts: Duration,
 }
@@ -158,8 +163,9 @@ impl Stamp {
     }
 
     /// `block` on the supervisor's timeline.
-    fn audio(&self, block: AudioBlock) -> AudioBlock {
+    pub(crate) fn audio(&self, block: AudioBlock) -> AudioBlock {
         AudioBlock {
+            seq: self.audio_seq.saturating_add(block.seq),
             pts: self.pts.saturating_add(block.pts),
             ..block
         }
@@ -170,7 +176,7 @@ impl Stamp {
 /// Plain data, driven with clock readings by the supervisor thread, so its
 /// rules are tested step by step.
 #[derive(Debug, Clone)]
-struct Ledger {
+pub(crate) struct Ledger {
     /// The delays.
     backoff: Backoff,
     /// Clock reading when the supervisor started; PTS counts from it.
@@ -182,6 +188,8 @@ struct Ledger {
     /// Sequence number the next connection's first frame gets: one past the
     /// newest frame delivered.
     next_seq: u64,
+    /// The same for audio blocks.
+    next_audio_seq: u64,
     /// Media time up to which frames and audio were delivered: the newest
     /// frame's PTS, or the end of the newest audio block if later.
     delivered: Option<Duration>,
@@ -189,21 +197,27 @@ struct Ledger {
 
 impl Ledger {
     /// Bookkeeping for a supervisor started at clock reading `origin`.
-    fn new(backoff: Backoff, origin: Duration) -> Self {
+    pub(crate) fn new(backoff: Backoff, origin: Duration) -> Self {
         Self {
             backoff,
             origin,
             next_epoch: 0,
             failures: 0,
             next_seq: 0,
+            next_audio_seq: 0,
             delivered: None,
         }
+    }
+
+    /// The clock reading the supervisor started at.
+    pub(crate) fn origin(&self) -> Duration {
+        self.origin
     }
 
     /// The stamp of a connection whose attempt began at clock reading
     /// `now`: the next epoch, sequence numbers after the newest frame, and
     /// PTS from the clock but after everything delivered.
-    fn connect(&mut self, now: Duration) -> Stamp {
+    pub(crate) fn connect(&mut self, now: Duration) -> Stamp {
         let elapsed = now.saturating_sub(self.origin);
         let pts = match self.delivered {
             Some(until) => elapsed.max(until.saturating_add(Duration::from_nanos(1))),
@@ -212,6 +226,7 @@ impl Ledger {
         let stamp = Stamp {
             epoch: self.next_epoch,
             seq: self.next_seq,
+            audio_seq: self.next_audio_seq,
             pts,
         };
         self.next_epoch += 1;
@@ -225,7 +240,8 @@ impl Ledger {
     }
 
     /// Notes that `block` (restamped) was delivered.
-    fn audio_delivered(&mut self, block: &AudioBlock) {
+    pub(crate) fn audio_delivered(&mut self, block: &AudioBlock) {
+        self.next_audio_seq = self.next_audio_seq.max(block.seq.saturating_add(1));
         self.note_delivered(block.pts.saturating_add(block.duration()));
     }
 
@@ -238,7 +254,7 @@ impl Ledger {
     /// `now` of a connection that delivered frames since `up_since` (`None`
     /// for an attempt that failed to open, or a connection that delivered
     /// nothing).
-    fn failed(&mut self, now: Duration, up_since: Option<Duration>) -> Duration {
+    pub(crate) fn failed(&mut self, now: Duration, up_since: Option<Duration>) -> Duration {
         if up_since.is_some_and(|t| now.saturating_sub(t) >= self.backoff.max) {
             self.failures = 0;
         }

@@ -715,3 +715,27 @@ fn venv_files_are_read_key_by_key() {
     assert_eq!(venv_root(Path::new("/a/python")), None);
     assert_eq!(venv_root(Path::new("python")), None);
 }
+
+#[test]
+fn an_audio_input_needs_its_file_and_the_decoding_tools() {
+    let c = synthetic(
+        "[[audio_inputs]]\nid = \"board\"\nkind = \"file\"\npath = \"/studio/media/board.wav\"\n",
+    );
+    let tools = || Fake::default().tool("/bin/ffmpeg").tool("/bin/ffprobe");
+    let r = check_build(&c, &tools().file("/studio/media/board.wav"), false);
+    assert!(r.is_ready(), "{r:?}");
+    let ok: Vec<&str> = r.at(Level::Ok).collect();
+    assert!(
+        ok.contains(&"audio input \"board\": /studio/media/board.wav is readable"),
+        "{ok:?}"
+    );
+    assert!(
+        ok.iter()
+            .any(|m| m.starts_with("file sources' ffprobe (AC_FFPROBE): /bin/ffprobe runs")),
+        "{ok:?}"
+    );
+    assert_eq!(
+        only_problem(&check_build(&c, &tools(), false)),
+        "audio input \"board\": /studio/media/board.wav does not exist"
+    );
+}

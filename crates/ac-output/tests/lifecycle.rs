@@ -216,6 +216,7 @@ fn pushes_are_validated() {
     assert_eq!(enc.push_audio(&[]).unwrap(), Push::Queued);
     let block = |sample_rate, channels| AudioBlock {
         source: SourceId("mix".into()),
+        seq: 0,
         pts: Duration::ZERO,
         sample_rate,
         channels,

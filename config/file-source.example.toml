@@ -27,6 +27,22 @@ audio = true
 # start_s = 120.0
 # duration_s = 180.0
 
+# Program audio from the soundboard instead of the video's own track: an
+# audio-only input, here a multitrack WAV (or RF64) recording of the board
+# played as a live feed. `channels` picks the stereo pair, counted from 1
+# (one number puts that channel on both sides; nothing is mixed); without
+# it, channels 1 and 2. `channel_count`, optional, is what the input has:
+# a pick beyond it fails the load, and an input with another count stays
+# offline with the reason. Then set `audio_source = "board"` in [output].
+# [[audio_inputs]]
+# id = "board"
+# name = "Soundboard"
+# kind = "file"
+# path = "../media/board-rehearsal.wav"
+# loop_playback = true
+# channels = [3, 4]
+# channel_count = 16
+
 # A prompt names who or what to frame, and may name shots too (ADR 0003):
 #
 # * Shot words at either end, or right after a possessive, pick framings:
@@ -131,7 +147,9 @@ profile = "music"
 width = 1280
 height = 720
 fps = 30
-# Program audio comes from this source's embedded audio track.
+# Program audio comes from this source's embedded audio track (as stereo:
+# its first two channels, or a mono track on both sides), or from an audio
+# input's id (above).
 audio_source = "cam-1"
 # rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
 # Unlike the paths above, a relative recording path is taken from the
