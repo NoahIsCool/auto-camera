@@ -20,7 +20,8 @@
 //!    version at a time by the migration steps (step `i` takes version
 //!    `i + 1` to `i + 2`), stamped with [`SCHEMA_VERSION`] and deserialized
 //!    from the document, with a warning that the file itself is unchanged
-//!    (saving a migrated file is the runtime-edit work, SH1).
+//!    (the program never rewrites a studio file; Save show writes a show
+//!    file, in the show's own current layout, [`crate::show`]).
 //!
 //! A file without the key predates it: every such file was written in the
 //! layout schema 1 describes, so it is read as schema 1 with a warning to
@@ -38,8 +39,17 @@
 //!   [`SCHEMA_VERSION`] (when the key is missing, the field's default,
 //!   [`UNVERSIONED`], which is 1, the only version a file without it can
 //!   be read at directly).
+//!
+//! # Other layouts
+//!
+//! The steps above do not depend on the studio file: a [`Layout`] names
+//! the key that holds the version, the words the messages use, the
+//! current version, its migration steps and whether a document without
+//! the key is read at a version or refused. [`STUDIO`] is the studio
+//! file's; a show file ([`crate::show`]) has its own, keyed `show`, which
+//! it requires, and is read by the same [`read_layout`], so both kinds of
+//! file are versioned and migrated the same way.
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
@@ -51,26 +61,46 @@ const UNVERSIONED: u32 = 1;
 
 /// One migration step: rewrites the top-level table of a document of one
 /// version into the next version's layout, or says why it cannot.
-type Migration = fn(&mut Map<String, Value>) -> Result<(), String>;
+pub(crate) type Migration = fn(&mut Map<String, Value>) -> Result<(), String>;
 
 /// The steps from each older version to the next: `MIGRATIONS[0]` takes
 /// schema 1 to 2, and so on. Empty while schema 1 is the only version.
 const MIGRATIONS: [Migration; SCHEMA_VERSION as usize - 1] = [];
 
+/// A versioned document layout; see the module docs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Layout<'a> {
+    /// The top-level key holding the version (`schema`).
+    pub(crate) key: &'static str,
+    /// What a version is called in messages: "schema", as in "this file
+    /// is schema 2".
+    pub(crate) label: &'static str,
+    /// What a document of the layout is called in messages: "config", as
+    /// in "schema 0 is not a config version".
+    pub(crate) noun: &'static str,
+    /// The version this build reads and writes.
+    pub(crate) current: u32,
+    /// `steps[i]` takes version `i + 1` to `i + 2`.
+    pub(crate) steps: &'a [Migration],
+    /// The version a document without the key is read at, with a warning
+    /// to add it; `None` when the key is required.
+    pub(crate) unversioned: Option<u32>,
+}
+
+/// The studio file's layout.
+const STUDIO: Layout<'static> = Layout {
+    key: "schema",
+    label: "schema",
+    noun: "config",
+    current: SCHEMA_VERSION,
+    steps: &MIGRATIONS,
+    unversioned: Some(UNVERSIONED),
+};
+
 /// The default of the config's `schema` field: what a file without the key
 /// is read as.
 pub(super) fn unversioned() -> u32 {
     UNVERSIONED
-}
-
-/// The only key read before the version is known; every other key is
-/// ignored at this stage.
-#[derive(Deserialize)]
-struct Header {
-    /// The raw `schema` value, of any type, so a wrong type gets this
-    /// module's message rather than the parser's.
-    #[serde(default)]
-    schema: Option<Value>,
 }
 
 /// Reads `text` (JSON when `json`, else TOML) written at any schema this
@@ -80,37 +110,63 @@ pub(super) fn read<T: DeserializeOwned>(
     text: &str,
     json: bool,
 ) -> Result<(T, Vec<String>), String> {
-    read_with(text, json, SCHEMA_VERSION, &MIGRATIONS)
+    read_layout(text, json, &STUDIO)
 }
 
 /// [`read`] for a build that reads schema `current` and upgrades older
 /// files with `steps` (`steps[i]` takes version `i + 1` to `i + 2`), so the
 /// tests can try migrations this build does not have yet.
+#[cfg(test)]
 fn read_with<T: DeserializeOwned>(
     text: &str,
     json: bool,
     current: u32,
     steps: &[Migration],
 ) -> Result<(T, Vec<String>), String> {
-    let header: Header = parse(text, json)?;
+    read_layout(
+        text,
+        json,
+        &Layout {
+            current,
+            steps,
+            ..STUDIO
+        },
+    )
+}
+
+/// Reads `text` (JSON when `json`, else TOML) written at any version of
+/// `layout` this build knows, returning the value and the warnings for the
+/// operator; see the module docs. The error is a sentence for the operator.
+pub(crate) fn read_layout<T: DeserializeOwned>(
+    text: &str,
+    json: bool,
+    layout: &Layout<'_>,
+) -> Result<(T, Vec<String>), String> {
+    // Only the version key is looked at before the version is known; its
+    // value is taken whatever its type, so a wrong one gets this module's
+    // message rather than the parser's.
+    let header: Value = parse(text, json)?;
     let mut warnings = Vec::new();
-    let found = match header.schema {
-        Some(value) => version(&value, current)?,
-        None => {
-            warnings.push(missing_key(json));
-            UNVERSIONED
+    let found = match (header.get(layout.key), layout.unversioned) {
+        (Some(value), _) => version(value, layout)?,
+        (None, Some(unversioned)) => {
+            warnings.push(missing_key(json, layout, unversioned));
+            unversioned
         }
+        (None, None) => return Err(required_key(layout)),
     };
-    if found == current {
+    if found == layout.current {
         return parse(text, json).map(|value| (value, warnings));
     }
-    let Value::Object(mut doc) = parse::<Value>(text, json)? else {
-        return Err("a studio config must be a table of keys".into());
+    let Value::Object(mut doc) = header else {
+        return Err(format!("a {} file must be a table of keys", layout.noun));
     };
-    upgrade(&mut doc, found, current, steps)?;
+    upgrade(&mut doc, found, layout)?;
     warnings.push(format!(
-        "this file is schema {found}; it was read as schema {current} (the file itself \
-         is unchanged)"
+        "this file is {label} {found}; it was read as {label} {current} (the file itself \
+         is unchanged)",
+        label = layout.label,
+        current = layout.current
     ));
     let value = serde_json::from_value(Value::Object(doc)).map_err(|e| e.to_string())?;
     Ok((value, warnings))
@@ -125,61 +181,80 @@ fn parse<T: DeserializeOwned>(text: &str, json: bool) -> Result<T, String> {
     }
 }
 
-/// The version the `schema` value names, if this build reads it.
-fn version(value: &Value, current: u32) -> Result<u32, String> {
+/// The version the version key's `value` names, if this build reads it.
+fn version(value: &Value, layout: &Layout<'_>) -> Result<u32, String> {
+    let Layout {
+        key,
+        label,
+        noun,
+        current,
+        ..
+    } = *layout;
     let Some(n) = value.as_i64() else {
         return Err(format!(
-            "schema must be a whole number, as in `schema = {current}`; this file has {value}"
+            "{key} must be a whole number, as in `{key} = {current}`; this file has {value}"
         ));
     };
     match u32::try_from(n) {
         Ok(v) if (1..=current).contains(&v) => Ok(v),
         Ok(v) if v > current => Err(format!(
-            "this file is schema {v}, newer than this build of auto-camera reads \
-             (schema {current}); run a newer auto-camera, or rewrite the file for schema \
+            "this file is {label} {v}, newer than this build of auto-camera reads \
+             ({label} {current}); run a newer auto-camera, or rewrite the file for {label} \
              {current}"
         )),
         _ => Err(format!(
-            "schema {n} is not a config version; versions start at 1 and this build reads \
-             schema {current}"
+            "{label} {n} is not a {noun} version; versions start at 1 and this build reads \
+             {label} {current}"
         )),
     }
 }
 
-/// The warning for a file without a `schema` key, in its own syntax.
-fn missing_key(json: bool) -> String {
-    let (key, place) = if json {
+/// The warning for a file without the version key, read at `unversioned`,
+/// in its own syntax.
+fn missing_key(json: bool, layout: &Layout<'_>, unversioned: u32) -> String {
+    let Layout { key, label, .. } = *layout;
+    let (line, place) = if json {
         (
-            format!("\"schema\": {UNVERSIONED}"),
+            format!("\"{key}\": {unversioned}"),
             "at the top level of the file's object",
         )
     } else {
         (
-            format!("schema = {UNVERSIONED}"),
+            format!("{key} = {unversioned}"),
             "as the file's first setting, before any [table]",
         )
     };
     format!(
-        "no `schema` key; read as schema {UNVERSIONED}, the layout every file without one \
-         has. Add `{key}` {place}, so a later build can tell which layout the file uses"
+        "no `{key}` key; read as {label} {unversioned}, the layout every file without one \
+         has. Add `{line}` {place}, so a later build can tell which layout the file uses"
     )
 }
 
-/// Upgrades `doc` from version `from` to `current` one step at a time and
-/// stamps the result with `current`.
-fn upgrade(
-    doc: &mut Map<String, Value>,
-    from: u32,
-    current: u32,
-    steps: &[Migration],
-) -> Result<(), String> {
-    for v in from..current {
-        let step = steps
+/// The error for a file without the version key of a layout that
+/// requires it.
+fn required_key(layout: &Layout<'_>) -> String {
+    let Layout {
+        key,
+        label,
+        noun,
+        current,
+        ..
+    } = *layout;
+    format!("no `{key}` key; a {noun} file gives its {label}, as in `{key} = {current}`")
+}
+
+/// Upgrades `doc` from version `from` to the layout's current one, one
+/// step at a time, and stamps the result with it.
+fn upgrade(doc: &mut Map<String, Value>, from: u32, layout: &Layout<'_>) -> Result<(), String> {
+    let label = layout.label;
+    for v in from..layout.current {
+        let step = layout
+            .steps
             .get(v as usize - 1)
-            .ok_or_else(|| format!("no migration from schema {v} to {}", v + 1))?;
-        step(doc).map_err(|e| format!("cannot upgrade schema {v} to {}: {e}", v + 1))?;
+            .ok_or_else(|| format!("no migration from {label} {v} to {}", v + 1))?;
+        step(doc).map_err(|e| format!("cannot upgrade {label} {v} to {}: {e}", v + 1))?;
     }
-    doc.insert("schema".into(), Value::from(current));
+    doc.insert(layout.key.into(), Value::from(layout.current));
     Ok(())
 }
 

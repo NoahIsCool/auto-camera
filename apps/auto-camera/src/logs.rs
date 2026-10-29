@@ -23,16 +23,19 @@
 //! * The app logs its own warnings and errors beside printing them on
 //!   stderr, since a window started from the Finder has no terminal: the
 //!   config's warnings, errors that end a run, a system not kept awake
-//!   while live (`awake`), a termination signal and an engine that did not
-//!   shut down cleanly; and how a headless run ended.
+//!   while live (`awake`), a termination signal, an engine that did not
+//!   shut down cleanly and the shows the window saved, or failed to save,
+//!   as it closed; and how a headless run ended.
 //! * This module installs the one subscriber (`writer`: one line per
 //!   event, queued without blocking, written by one thread into the
 //!   rotating file of `file`), the panic hook (`crash`), and writes the
 //!   header: the app's version and commit, the process and the log's
 //!   path; once the config is loaded ([`LogSession::studio`]) the config's
-//!   path and SHA-256, and the model files, hashed in the background
-//!   (`hashes`). Header lines are marked (`log_header = true`), so every
-//!   file a rotation starts begins with them again.
+//!   path and SHA-256 (for a show, also those of the studio file it lies
+//!   over, whose edits change what the show opens), and the model files,
+//!   hashed in the background (`hashes`). Header lines are marked
+//!   (`log_header = true`), so every file a rotation starts begins with
+//!   them again.
 //!
 //! Two apps may run at once on one machine (the window beside a headless
 //! rehearsal), and the log's files have one writer each (see `file`). So
@@ -56,7 +59,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ac_engine::StudioConfig;
+use ac_engine::LoadedConfig;
 use tracing::Level;
 
 mod crash;
@@ -223,12 +226,14 @@ impl LogSession {
         })
     }
 
-    /// Logs the config at `path` (its SHA-256) and starts hashing the
-    /// model files `config` names, in the background.
-    pub fn studio(&mut self, path: &Path, config: &StudioConfig) {
+    /// Logs the config file at `path` (its SHA-256), which `loaded` was
+    /// read from, and for a show the studio file it lies over, then starts
+    /// hashing the model files the config names, in the background.
+    pub fn studio(&mut self, path: &Path, loaded: &LoadedConfig) {
         if self.writer.is_none() {
             return;
         }
+        let config = &loaded.config;
         match std::fs::read(path) {
             Ok(bytes) => tracing::info!(
                 target: TARGET,
@@ -246,10 +251,35 @@ impl LogSession {
                 path.display()
             ),
         }
+        if loaded.show {
+            studio_under_show(&loaded.studio);
+        }
         let paths = hashes::model_paths(&config.detector);
         if !paths.is_empty() {
             self.hasher = Hasher::start(paths, hashes::log);
         }
+    }
+}
+
+/// Logs the studio file a show lies over, with its SHA-256, as a header
+/// line: the show's own hash says nothing of an edit to that file (a
+/// camera added, the stream key rotated), which changes what the show
+/// opens.
+fn studio_under_show(studio: &Path) {
+    match std::fs::read(studio) {
+        Ok(bytes) => tracing::info!(
+            target: TARGET,
+            log_header = true,
+            "the show lies over studio {}: sha256 {}",
+            studio.display(),
+            hashes::sha256_hex(&bytes)
+        ),
+        Err(e) => tracing::warn!(
+            target: TARGET,
+            log_header = true,
+            "the show lies over studio {}: cannot hash: {e}",
+            studio.display()
+        ),
     }
 }
 
@@ -267,6 +297,8 @@ impl Drop for LogSession {
 
 #[cfg(test)]
 mod tests {
+    use ac_engine::StudioConfig;
+
     use super::*;
 
     #[test]
@@ -350,8 +382,15 @@ mod tests {
                 subjects: 1,
             },
         );
+        let loaded = LoadedConfig {
+            base: config.clone(),
+            config,
+            warnings: Vec::new(),
+            studio: PathBuf::from("/nonexistent/studio.toml"),
+            show: true,
+        };
         let mut session = LogSession::inactive();
-        session.studio(Path::new("/nonexistent/studio.toml"), &config);
+        session.studio(Path::new("/nonexistent/sunday.show.toml"), &loaded);
         assert!(session.hasher.is_none());
     }
 }

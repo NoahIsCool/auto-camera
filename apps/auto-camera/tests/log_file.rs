@@ -3,7 +3,8 @@
 //! set to a temporary folder, must leave a log there that says which build
 //! ran which config, what the studio did and that the app exited, and no
 //! crash report. What the app prints on stderr is in that log too. Two runs
-//! at once on one folder write a log each.
+//! at once on one folder write a log each. A run of a saved show also
+//! names, and hashes, the studio file it lies over.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -220,4 +221,47 @@ fn two_apps_at_once_write_a_log_each() {
     }
     assert_ne!(pids[0], pids[1], "two processes");
     assert!(named(&dir.0, "auto-camera-3").is_empty());
+}
+
+/// The SHA-256 of `bytes`, in lower-case hex, as the log writes it.
+fn sha256_hex(bytes: &[u8]) -> String {
+    hmac_sha256::Hash::hash(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[test]
+fn a_show_logs_the_studio_file_it_lies_over() {
+    let dir = TempDir::new("show");
+    let studio = std::fs::canonicalize(DEMO).unwrap();
+    let show = dir.0.join("sunday.show.toml");
+    let text = format!("show = 1\nstudio = {:?}\n", studio.display().to_string());
+    std::fs::write(&show, &text).unwrap();
+    let logs = dir.0.join("logs");
+    let out = Command::new(APP)
+        .arg("--config")
+        .arg(&show)
+        .args(["--headless", "--seconds", "1", "--log-dir"])
+        .arg(&logs)
+        .stdin(Stdio::null())
+        .output()
+        .expect("the app runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let log = std::fs::read_to_string(logs.join("auto-camera.log")).expect("a log");
+    let show_sha = sha256_hex(text.as_bytes());
+    assert!(
+        log.contains(&format!("sunday.show.toml: sha256 {show_sha}, 1 sources")),
+        "the show itself: {log}"
+    );
+    let studio_sha = sha256_hex(&std::fs::read(&studio).unwrap());
+    assert!(
+        log.contains(&format!(
+            "the show lies over studio {}: sha256 {studio_sha}",
+            studio.display()
+        )),
+        "the studio file under it: {log}"
+    );
+    assert!(!log.contains(" ERROR "), "{log}");
 }

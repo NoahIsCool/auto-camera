@@ -4,7 +4,8 @@
 //! leaves the core exactly as it was. Switcher commands use the catalog's
 //! health guard: a shot that does not exist or whose source has no fresh
 //! frames is never taken to program. Output and shutdown commands belong to
-//! the runtime, which owns the encoder and the threads.
+//! the runtime, which owns the encoder and the threads. Exporting the show
+//! only reads ([`super::show`]).
 //!
 //! A running transition does not make switching commands fail
 //! ([`ac_switcher`] has the rules, the T-bar's included): staging and Auto
@@ -193,6 +194,7 @@ impl EngineCore {
                 self.release_hold();
                 false
             }
+            C::ExportShow => return Ok(CommandReply::Show(Box::new(self.export_show()))),
             C::StartOutput { .. } | C::StopOutput | C::Shutdown => {
                 return Err(CommandError::Invalid(format!(
                     "{} is handled by the engine runtime",
