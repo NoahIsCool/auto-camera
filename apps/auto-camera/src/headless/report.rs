@@ -5,11 +5,11 @@
 //! director and program shot from the last running snapshot; the sources,
 //! queries, output and timing from the final one, published at shutdown
 //! (the last running one when there is none); the tick and thread counts
-//! from the engine's report ([`Totals`]); and the crop ranges, the program
-//! log and the largest subject count from the [`Sampler`], since no single
-//! snapshot has them. Measurements are rounded for reading ([`round`]). A
-//! run whose engine never started still gets a summary, with the error and
-//! no snapshots ([`failed_to_start`]).
+//! from the engine's report and the trace from its writer ([`Totals`]); and
+//! the crop ranges, the program log and the largest subject count from the
+//! [`Sampler`], since no single snapshot has them. Measurements are rounded
+//! for reading ([`round`]). A run whose engine never started still gets a
+//! summary, with the error and no snapshots ([`failed_to_start`]).
 
 use std::path::Path;
 use std::time::Instant;
@@ -20,17 +20,21 @@ use ac_engine::EngineSnapshot;
 use super::{
     CropRange, DirectorSummary, HeadlessOptions, MatchSummary, OutputSummary, ProgramSummary,
     QuerySummary, Sampler, ShotSummary, SourceSummary, SubjectSummary, Summary, TimingSummary,
+    TraceSummary,
 };
 
-/// Counters from the engine report.
+/// Counters from the engine report and the trace writer.
 pub(super) struct Totals {
     /// Ticks run.
     pub(super) ticks: u64,
     /// Threads joined.
     pub(super) threads_joined: usize,
+    /// The trace, with `--trace`.
+    pub(super) trace: Option<TraceSummary>,
 }
 
-/// The summary of a run whose engine never started.
+/// The summary of a run whose engine never started, which leaves no trace
+/// file behind.
 pub(super) fn failed_to_start(
     path: &Path,
     options: &HeadlessOptions,
@@ -45,6 +49,7 @@ pub(super) fn failed_to_start(
         Totals {
             ticks: 0,
             threads_joined: 0,
+            trace: None,
         },
         None,
         None,
@@ -240,6 +245,7 @@ pub(super) fn summarize(
             skipped_ticks: timing.skipped_ticks,
         },
         output,
+        trace: totals.trace,
         render_issues: end.map(|s| s.render_issues.clone()).unwrap_or_default(),
     }
 }

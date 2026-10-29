@@ -1,6 +1,7 @@
 //! Headless runs on small synthetic studios (real time, about a second each).
 
 mod summary;
+mod trace;
 
 use super::report::round;
 use super::*;
@@ -43,7 +44,11 @@ fn studio() -> StudioConfig {
 
 /// Run options.
 fn options(seconds: f64, record: Option<PathBuf>) -> HeadlessOptions {
-    HeadlessOptions { seconds, record }
+    HeadlessOptions {
+        seconds,
+        record,
+        trace: None,
+    }
 }
 
 /// The snapshot of [`studio`] before its first tick, built by a real core:

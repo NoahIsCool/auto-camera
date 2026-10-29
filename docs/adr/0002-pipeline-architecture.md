@@ -32,6 +32,7 @@ channels, and the operator sees it only through immutable snapshots.
 | `ac-discovery-<source>` | `DiscoveryWorker`, one per source with a detector | Loads the detector (a CoreML compile can take minutes), then runs it on the newest frame it was handed. The OWL detector returns whole people, each tagged with the query whose object they hold (`ac_vision::matching`). |
 | `ac-output-start`, `ac-output-finish` | `OutputController` | Start ffmpeg (probing encoders) and finish it (flushing the recording) off the engine thread, since both can take seconds. |
 | `ac-output-video/-audio/-progress/-stderr` and the `ffmpeg` child | `ProgramEncoder` | Feed and watch the single program encode (RTMP and MP4 from one encode, ADR 0001). |
+| `ac-trace`, with `--trace` | `apps/auto-camera` `TraceFile` | Writes the engine's per-tick trace records to the trace file as JSON Lines; nothing else writes to that file. |
 | rayon pool | process | Data-parallel per-pixel kernels (tracker pyramid, compositor) *inside* a tick; holds no state. |
 
 ### Mailboxes and channels
@@ -46,6 +47,7 @@ channels, and the operator sees it only through immutable snapshots.
 | engine → operator | `mailbox::Latest<Arc<EngineSnapshot>>` | Newest snapshot only, with a version counter; readers never block the engine. |
 | engine → encoder | `ProgramEncoder` bounded queues | Never blocks: a full queue drops the frame and the writer repeats the last one, keeping a constant frame rate. |
 | output helpers → engine | `mpsc` channel | Start and finish results, collected by `OutputController::poll` each tick. |
+| engine → trace writer | bounded `sync_channel` (`EngineOptions::trace`; the app's holds 1024 records) | Never waits: a full channel drops the record (the gap shows in the records' tick numbers), and a closed one ends tracing for the run. |
 
 Nothing between threads is an unbounded queue of frames, and no lock is
 held across I/O. The only locks are inside the mailboxes themselves, held
