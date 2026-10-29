@@ -56,10 +56,17 @@ audio = true
 # reach are drawn at the ceiling and marked limited. On a guitarist half the
 # frame high, the second query's Full is now a 1.8x crop instead of the wide,
 # and its Tight needs about 9x, so it is drawn at its 6x ceiling and marked.
+#
+# A query's `priority` (1 to 5, higher first) ranks its subjects for the
+# director: at equal quality it suggests the higher one's shot. Without any
+# `priority` the list order ranks them (5, 4, 3, ...); here the Speaker has 4
+# and the two queries without one have 3. Only differences count, so queries
+# that all share one priority change nothing.
 [[queries]]
 name = "Speaker"
 prompt = "a person speaking at a lectern"
 presets = ["medium", "close"]
+priority = 4
 
 [[queries]]
 name = "Guitarist"

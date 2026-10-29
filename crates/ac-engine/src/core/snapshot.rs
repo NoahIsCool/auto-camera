@@ -1,34 +1,20 @@
 //! Building the published [`EngineSnapshot`] from the core's state.
 //!
-//! Tally follows exposure, as on hardware switchers: a shot is lit red while
-//! any of it is visible on program (both sides of a running mix, the
-//! outgoing shot during the first half of a dip), and green while it is
-//! staged on preview and not visible on program.
+//! Tally comes from the switcher, which owns the buses
+//! ([`ac_switcher::Switcher::tally`]): it follows exposure, as on hardware
+//! switchers, so a shot is lit red while any of it is on program (both sides
+//! of a running mix, the outgoing shot during the first half of a dip), and
+//! green while it is staged on preview and not on program.
 
-use std::collections::HashSet;
-
-use ac_core::ShotId;
 use ac_director::CandidateKind;
 
 use super::EngineCore;
 use crate::snapshot::{
     DirectorView, EngineSnapshot, OutputView, QueryView, ShotView, SourceView, SubjectView,
-    SwitcherView, Tally, TimingView,
+    SwitcherView, TimingView,
 };
 
 impl EngineCore {
-    /// Shots visible on program right now.
-    fn on_air(&self) -> HashSet<ShotId> {
-        let out = self.switcher.output();
-        let mut visible: HashSet<ShotId> = out.base.into_iter().collect();
-        if let Some((shot, alpha)) = out.overlay
-            && alpha > 0.0
-        {
-            visible.insert(shot);
-        }
-        visible
-    }
-
     /// The snapshot of the newest tick, with the runtime's output and timing.
     pub fn snapshot(
         &self,
@@ -36,34 +22,27 @@ impl EngineCore {
         timing: TimingView,
         running: bool,
     ) -> EngineSnapshot {
-        let on_air = self.on_air();
         let preview = self.switcher.preview();
         let shots = self
             .catalog
             .entries()
             .iter()
-            .map(|e| {
-                let program = on_air.contains(&e.shot.id);
-                ShotView {
-                    id: e.shot.id.clone(),
-                    name: e.shot.name.clone(),
-                    source: self.sources[e.source].id.clone(),
-                    kind: CandidateKind::from(&e.shot.target),
-                    subject: e.subject,
-                    preset: e.preset.as_ref().map(|p| p.id.clone()),
-                    crop: e.crop,
-                    quality: e.quality,
-                    settled: e.settled,
-                    limited_by_zoom: e.limited_by_zoom,
-                    same_picture_as: e.same_picture_as.clone(),
-                    status: e.status,
-                    available: e.available,
-                    tally: Tally {
-                        program,
-                        preview: !program && preview == Some(&e.shot.id),
-                    },
-                    thumbnail: self.thumbnails.get(&e.shot.id).cloned(),
-                }
+            .map(|e| ShotView {
+                id: e.shot.id.clone(),
+                name: e.shot.name.clone(),
+                source: self.sources[e.source].id.clone(),
+                kind: CandidateKind::from(&e.shot.target),
+                subject: e.subject,
+                preset: e.preset.as_ref().map(|p| p.id.clone()),
+                crop: e.crop,
+                quality: e.quality,
+                settled: e.settled,
+                limited_by_zoom: e.limited_by_zoom,
+                same_picture_as: e.same_picture_as.clone(),
+                status: e.status,
+                available: e.available,
+                tally: self.switcher.tally(&e.shot.id),
+                thumbnail: self.thumbnails.get(&e.shot.id).cloned(),
             })
             .collect();
         let subjects = self
@@ -106,8 +85,12 @@ impl EngineCore {
             preview: preview.cloned(),
             transition: self.switcher.transition(),
             in_transition: self.switcher.in_transition(),
+            tbar_held: self.switcher.tbar_held(),
             overlay: out.overlay,
             dip: out.dip,
+            queued: self.switcher.queued().cloned(),
+            dropped_takes: self.switcher.dropped_takes(),
+            last_dropped: self.switcher.last_dropped().cloned(),
         };
         let config = self.director.config();
         let director = DirectorView {
@@ -117,6 +100,14 @@ impl EngineCore {
             reason: self.decision.reason.clone(),
             reason_text: self.decision.reason.to_string(),
             takes: self.director_takes,
+            takeover: config.takeover,
+            pause: config.pause,
+            paused: self.director.paused(self.now),
+            skip: config.skip,
+            skipped: self.director.skipped(self.now),
+            preview_held: self.preview_hold.clone(),
+            held_back: self.held_back,
+            last_held_back: self.last_held_back.clone(),
         };
         let now = self.now;
         let sources = self
@@ -126,6 +117,7 @@ impl EngineCore {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 state: s.state,
+                error: s.error.clone(),
                 width: s.info.width,
                 height: s.info.height,
                 nominal_fps: s.info.fps,

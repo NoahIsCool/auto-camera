@@ -146,6 +146,7 @@ impl Compositor {
         });
         let frame = VideoFrame {
             source: self.config.program.clone(),
+            epoch: 0,
             seq: self.next_seq,
             pts,
             width,
@@ -229,6 +230,7 @@ impl Compositor {
         });
         Ok(VideoFrame {
             source: frame.source.clone(),
+            epoch: frame.epoch,
             seq: frame.seq,
             pts: frame.pts,
             width,

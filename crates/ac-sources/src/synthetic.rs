@@ -19,7 +19,9 @@
 //! rectangle is within half a pixel of the true box on every side.
 //!
 //! [`SyntheticSource`] plays a pattern as a live [`VideoSource`], paced by a
-//! [`Clock`] exactly like a file source, with `pts = seq / fps`.
+//! [`Clock`] exactly like a file source, with `pts = seq / fps`. For tests of
+//! supervision, [`crate::fault`] starts one that fails at a set clock
+//! reading, as a source does when its input is lost.
 
 use std::fmt;
 use std::sync::Arc;
@@ -168,6 +170,26 @@ impl SyntheticPattern {
 
     /// A `width` x `height` pattern at `fps` with `subjects` moving boxes.
     pub fn new(width: u32, height: u32, fps: f64, subjects: u32) -> Result<Self, MediaError> {
+        let rate = Self::check(width, height, fps, subjects)?;
+        Ok(Self {
+            width,
+            height,
+            rate,
+            movers: (0..subjects).map(|i| Mover::new(i, subjects)).collect(),
+            background: render_background(width, height),
+        })
+    }
+
+    /// Checks the parameters of [`SyntheticPattern::new`] without rendering
+    /// anything, returning the frame rate; `new` accepts exactly what this
+    /// accepts. A config is checked with it before a source is opened, since
+    /// a pattern that cannot be made is a mistake no reconnect can mend.
+    pub fn check(
+        width: u32,
+        height: u32,
+        fps: f64,
+        subjects: u32,
+    ) -> Result<FrameRate, MediaError> {
         let invalid = |msg: String| Err(MediaError::Open(format!("synthetic source: {msg}")));
         if !(1..=Self::MAX_SIDE).contains(&width) || !(1..=Self::MAX_SIDE).contains(&height) {
             return invalid(format!(
@@ -184,13 +206,7 @@ impl SyntheticPattern {
                 Self::MAX_SUBJECTS
             ));
         }
-        Ok(Self {
-            width,
-            height,
-            rate,
-            movers: (0..subjects).map(|i| Mover::new(i, subjects)).collect(),
-            background: render_background(width, height),
-        })
+        Ok(rate)
     }
 
     /// Width in pixels.
@@ -306,6 +322,10 @@ struct Shared {
     timeline: Timeline,
     /// The newest frame.
     latest: LatestFrame,
+    /// Clock reading at which the source fails as if its input were lost
+    /// (fault injection, [`crate::fault`]); the first frame due at or after
+    /// it is not published.
+    fail_at: Option<Duration>,
 }
 
 /// A [`SyntheticPattern`] played as a live source; see [`crate::synthetic`].
@@ -342,6 +362,17 @@ impl SyntheticSource {
         pattern: SyntheticPattern,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, MediaError> {
+        Self::start_failing(id, pattern, clock, None)
+    }
+
+    /// Starts playing `pattern` paced by `clock`, failing with an error once
+    /// the clock reaches `fail_at`, if given.
+    pub(crate) fn start_failing(
+        id: SourceId,
+        pattern: SyntheticPattern,
+        clock: Arc<dyn Clock>,
+        fail_at: Option<Duration>,
+    ) -> Result<Self, MediaError> {
         let info = SourceInfo {
             id: id.clone(),
             width: pattern.width,
@@ -355,6 +386,7 @@ impl SyntheticSource {
             status: Status::new(),
             timeline: Timeline::new(clock),
             latest: LatestFrame::new(),
+            fail_at,
         });
         let (p, s) = (pattern.clone(), shared.clone());
         let worker = std::thread::Builder::new()
@@ -393,6 +425,10 @@ fn render_loop(id: &SourceId, pattern: &SyntheticPattern, shared: &Shared) {
         if !shared.timeline.wait_until(pts, &shared.stop) {
             break;
         }
+        if shared.fail_at.is_some_and(|t| shared.timeline.now() >= t) {
+            shared.status.fail("injected fault: the input was lost");
+            break;
+        }
         let (w, h) = (pattern.width, pattern.height);
         match VideoFrame::new(id.clone(), seq, pts, w, h, data.clone()) {
             Ok(frame) => shared.latest.publish(frame),
@@ -421,8 +457,16 @@ impl VideoSource for SyntheticSource {
         self.shared.latest.get()
     }
 
+    fn wait_newer(&self, after: Option<u64>, timeout: Duration) -> Option<VideoFrame> {
+        self.shared.latest.wait_newer(after, timeout)
+    }
+
     fn drain_audio(&self) -> Vec<AudioBlock> {
         Vec::new()
+    }
+
+    fn error(&self) -> Option<String> {
+        self.shared.status.error()
     }
 
     fn stop(&mut self) {

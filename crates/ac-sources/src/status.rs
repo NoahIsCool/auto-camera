@@ -29,9 +29,13 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Ordinal of a state; the order is the only allowed direction of travel.
+/// `Offline` and `Reconnecting` belong to supervised sources, which keep
+/// their own state ([`crate::supervisor`]); here they rank with `Starting`
+/// (not delivering, not finished), so a stray advance to one of them can
+/// neither stop nor start a plain source.
 fn ordinal(state: SourceState) -> u8 {
     match state {
-        SourceState::Starting => 0,
+        SourceState::Starting | SourceState::Offline | SourceState::Reconnecting => 0,
         SourceState::Running => 1,
         SourceState::Stopped => 2,
     }
@@ -188,6 +192,13 @@ mod tests {
         assert_eq!(s.get(), SourceState::Running);
         s.advance(SourceState::Starting);
         assert_eq!(s.get(), SourceState::Running);
+        s.advance(SourceState::Offline);
+        s.advance(SourceState::Reconnecting);
+        assert_eq!(
+            s.get(),
+            SourceState::Running,
+            "supervised states do not apply"
+        );
         s.advance(SourceState::Stopped);
         s.advance(SourceState::Running);
         assert_eq!(s.get(), SourceState::Stopped);

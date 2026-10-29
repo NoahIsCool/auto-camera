@@ -32,7 +32,8 @@ The window has the preview (green) and program (red) monitors with Cut,
 Auto, the transition selector and a T-bar between them; under them the
 multiview of every shot with tally borders, tracking status and quality.
 On the right: the director (mode Off/Suggest/Auto, profile Talk/Music, the
-current suggestion and why, Accept), the queries (add a prompt with its
+current suggestion and why, Accept and Skip, and Release while a shot you
+staged holds preview), the queries (add a prompt with its
 framings, remove one; pin, hide or show subjects) and the output (RTMP URL,
 recording path, start/stop, encoder statistics and, while it streams, the
 stream's connection: "stream connected · 3980 kbit/s", or in amber "stream
@@ -53,19 +54,58 @@ source frame rates, tick timing and dropped frames.
 | Input | Action |
 |---|---|
 | click a tile | stage it on preview |
-| double-click a tile | stage it and cut it to program |
+| double-click a tile | cut it straight to program ("Cut now") |
 | right-click a subject tile | pin, hide or re-acquire the subject |
-| `1`–`9` | stage tile 1–9 on preview |
-| `Space` | cut |
-| `Enter` | auto transition |
+| `1`–`9` | stage tile 1–9 on preview (during a transition, for its end) |
+| `Space` | cut (during a transition, cut it short); refused if preview changed since you saw it |
+| `Enter` | auto transition (during one, queue a take of the shot staged meanwhile); refused likewise |
+| `Esc` | leave a focused field or control, so the shortcuts work again |
 
-Shortcuts are ignored while a text field has focus and on key repeat.
+Shortcuts are paused while a field or control has the keyboard (a prompt or
+number being edited, or a control reached with `Tab`), and the status bar
+then says "shortcuts paused"; they are also ignored on key repeat and with
+Ctrl, Alt or Cmd held. While the output is starting or running, closing the
+window or clicking Stop asks first, so a stray click cannot end the show; a
+termination signal (Ctrl-C, `SIGTERM`) still quits without asking.
+
+A running transition does not block the controls. A shot staged during
+one waits for its end and then lands on preview (the preview caption says
+"next …"); Auto queues a take of it, which fires once, when the transition
+ends, if the shot is still available, and is otherwise dropped with a
+notice saying why. Cut cuts the transition short: the shot it brings in,
+which the preview monitor shows, lands on program at once, provided it is
+still available; a shot staged meanwhile then lands on preview, and a take
+queued of it is cancelled. A double click on a tile still puts that tile
+on air at once, ending the transition in the same step. The T-bar and the
+clock never share a transition: the T-bar cannot take over a running Auto,
+and while the T-bar holds a transition CUT is disabled, and `Space` and a
+double click on a tile are refused with a notice (the lever finishes or
+abandons it; the double click's first click still stages the tile for the
+end).
+
+Preview is the operator's. Cut and Auto (the buttons, `Space` and `Enter`)
+take the shot the window showed on preview when you pressed (or the shot
+you had just staged, while the picture has not caught up), and Accept the
+suggestion the panel showed; if that changed in between (the director
+restaged preview or moved its suggestion on a moment earlier), the take is
+refused with a notice, so none of them puts on air a shot you did not see.
+The T-bar is not fenced: it takes whatever preview holds when you start to
+move it. A shot you stage holds preview against the director: in Suggest
+mode it never stages a suggestion over yours until you take it or click
+Release, and the status bar says what it held back. Skip leaves the current
+suggestion out of the suggestions for `skip_s` seconds. While the director
+runs in Auto mode the program monitor carries a red AUTO badge, and your
+own switching (a key, a click on a tile, Cut, Auto or the T-bar) takes over
+as `takeover` says: by default it drops the director to Suggest; `"pause"`
+holds its takes for `pause_s` seconds after each action, counted down on
+the badge; with `"director"` it carries on and stages its shot over yours.
+A notice says which happened.
 
 ## Headless mode
 
 ```sh
 cargo run -p auto-camera -- --headless --seconds 5 --record /tmp/demo.mp4
-auto-camera [--config PATH] --headless [--seconds N] [--record PATH]
+auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
 ```
 
 A headless run starts the engine without a window, waits for the first
@@ -76,23 +116,24 @@ still loading then), starts recording when `--record` is given
 (the stream also goes to `output.rtmp_url` if the config sets one), runs for
 `--seconds` (default 10) after recording started, finalizes the recording,
 shuts down and prints a JSON summary on stdout. Besides counters, each
-source says whether its detector was still preparing and when it was ready
-(`discovery_preparing`, `detector_ready_s`), `queries` says how each prompt
-was read (with the parse's `notes`), each shot gives the range of its crop
-size over the run (`crop_width_min` to `crop_height_max`) and whether the
-zoom ceiling limits it (`limited_by_zoom`, with `same_picture_as` naming
-the shot it then looks the same as), `subjects` lists the subjects at
-the end with the queries they answer, and for a stream `output.stream`
-says how its connection stood while the output last ran (`state`,
-`attempt`, `stalled`, `bitrate_kbps`, which is `null` on an ffmpeg older
-than 6.0) and how often it was lost and opened again (`outages`,
-`reconnects`):
+source gives its `state` and the `error` that keeps it off the air (`null`
+while it delivers), and says whether its detector was still preparing and
+when it was ready (`discovery_preparing`, `detector_ready_s`), `queries`
+says how each prompt was read (with the parse's `notes`), each shot gives
+the range of its crop size over the run (`crop_width_min` to
+`crop_height_max`) and whether the zoom ceiling limits it
+(`limited_by_zoom`, with `same_picture_as` naming the shot it then looks
+the same as), `subjects` lists the subjects at the end with the queries
+they answer, and for a stream `output.stream` says how its connection
+stood while the output last ran (`state`, `attempt`, `stalled`,
+`bitrate_kbps`, which is `null` on an ffmpeg older than 6.0) and how often
+it was lost and opened again (`outages`, `reconnects`):
 
 ```json
 {
   "ok": true,
   "ticks": 160,
-  "sources": [{ "id": "stage", "fps": 31.0, "frames": 155, "missed": 3, "discovery_preparing": false, "detector_ready_s": 0.03, "discovery_applied": 40 }],
+  "sources": [{ "id": "stage", "state": "running", "error": null, "fps": 31.0, "frames": 155, "missed": 3, "discovery_preparing": false, "detector_ready_s": 0.03, "discovery_applied": 40 }],
   "queries": [{ "prompt": "person", "detector_phrase": "person", "presets": ["medium", "close"], "basis": "person",
                 "parse": "Detector sees: person · Framing: no shot words (person)",
                 "matches": [{ "source": "stage", "count": 3, "best": 0.9, "seq": 148, "pts_seconds": 4.933 }] }],
@@ -106,10 +147,56 @@ than 6.0) and how often it was lost and opened again (`outages`,
 
 (abridged). Each query's `matches` is the prompt feedback of the window:
 what the newest applied detector pass of each source found for it, and on
-which frame. The exit status is 0 on success, 1 when the engine or the output
-failed (`ok` is false and `error` says why), 2 for usage and configuration
-errors. Recordings are never overwritten: an existing `--record` path is an
-error.
+which frame. The exit status is 0 on success, 1 when the engine, the output
+or the trace failed or a source never delivered a picture during the run
+(`ok` is false and `error` says why), 2 for usage and configuration errors.
+Recordings are never overwritten: an existing `--record` path is an error.
+
+### Per-tick trace
+
+`--trace PATH` (headless or in the window) writes what the engine did on
+every tick as JSON Lines, one compact JSON object per tick, for scoring
+framing offline with `ac-eval` (spec V9: containment, framing error, jerk,
+latency):
+
+```sh
+cargo run -p auto-camera -- --headless --seconds 2 --trace /tmp/demo.jsonl
+```
+
+Each line has the tick number and its PTS (`tick`, `pts_ns`), whether it
+started late and how many ticks were skipped before it (`late`,
+`skipped`), each source's newest frame and its subjects with box and track
+state, each shot's `target` (the ideal crop for its subject's box, `null`
+while the subject is lost) and its `crop` (where the smoothing actually
+drew it), and the program, preview and running transition. The schema is
+`ac_eval::TraceRecord`; its docs show a full record. The line count equals
+the summary's `ticks`, which the summary's `trace` repeats (`records`, with
+`missing` for ticks a writer that fell over half a minute behind had to
+drop). The file must not exist, as for `--record`; a run whose engine does
+not start (a setup no retry mends, such as a detector sidecar whose program
+is missing) removes its empty trace, so the same command works once the
+cause is fixed. A source that cannot be opened does not stop the engine (it
+starts offline and is retried, see "Studio configuration"), so a run with a
+missing file ticks and, like every run that ticked, keeps its trace: move
+or remove it before running the same command again.
+
+## Staying awake while live
+
+On macOS the app keeps the Mac from sleeping while program goes out: it
+runs `caffeinate -i -m -s -w <its pid>` (no idle, disk or system sleep)
+while an output session runs in the window, with `-d` added because the
+window's monitors show program, and for the whole of a headless run, from
+before the detector loads until the recording is final. `caffeinate` is a
+supervised child like ffmpeg: it is killed and reaped when the session or
+run ends, and `-w` ends it if the app dies. Other platforms have no
+`caffeinate`; the app says so on stderr and runs on, as it does when
+`caffeinate` cannot start or ends early (the window when an output session
+turns out not to be held, a headless run at its start or its end). The
+engine's output view (`keep_awake`) says whether a live session is held,
+by the engine's own `caffeinate` or by the headless run's, and if not,
+why. This does not stop App Nap from throttling a minimized window: that
+takes `LSAppNapIsDisabled` in an app bundle's `Info.plist`, and the
+repository builds no bundle yet.
 
 ## Studio configuration
 
@@ -133,6 +220,7 @@ name = "Speaker"
 prompt = "a person speaking at a lectern"
 presets = ["medium", "close"]  # wide is always there; also full, medium_close,
                                # or { id, name, size, headroom, max_zoom }
+priority = 4                   # 1 to 5, higher first: ahead of the drummer (3)
 
 [[queries]]
 name = "Drummer"
@@ -150,6 +238,9 @@ rate_hz = 1.0                # detector passes per second per source
 [director]
 mode = "suggest"             # off, suggest or auto
 profile = "music"            # talk or music
+takeover = "suggest"         # what your switching does in Auto mode: suggest, pause or director
+pause_s = 10                 # with takeover = "pause", seconds each action holds its takes
+skip_s = 30                  # seconds a skipped suggestion stays out
 
 [output]
 width = 1280
@@ -160,10 +251,36 @@ audio_source = "cam-1"       # program audio from this source
 record_path = "../recordings/show.mp4"
 ```
 
+A query's `priority` ranks its subjects for the director: a whole number
+from 1 to 5, higher first. When no query gives one, the list order is the
+ranking: the first query has 5 and each later one a level less, down to 1.
+Once any query gives one, a query without one has 3. Each level a
+subject's query stands above the lowest-ranked query that has subjects
+adds 0.05 to the score of its shots, so at equal quality the
+higher-priority prompt's shot is suggested (and taken, in Auto mode),
+while a shot tracked clearly better can still win: four levels are worth
+0.2 of quality. A subject is ranked by the query that first found it, not
+by other prompts that also box it (one stray box would otherwise rank the
+wrong person up). Only differences count: queries that all share one
+priority are directed exactly as before priorities existed, a query that
+finds no one changes nothing, and a wide counts as the lowest. A query
+added in the window joins the end of the list (or gets 3 when priorities
+are given), and a priority outside 1 to 5 is a configuration error.
+
 Further sections tune the `tracker`, `subjects` (limits and lost/retire
 times), `framing`, `switcher` (default transition), `monitors` (monitor
 and multiview tile sizes and rates) and `lexicon` (below); see
 `crates/ac-engine/src/config.rs`.
+
+A source that cannot be opened when the engine starts (a file that is not
+there yet) does not stop it: the other sources run, the window's status
+line shows that source `OFFLINE` (or `RECONNECTING`) with the reason, and
+it is retried with a backoff of 0.5 s doubling to 8 s, so it goes on air
+once its input appears. A source that loses its input while running (its
+ffmpeg killed or crashed) is reopened the same way. If it is the
+`audio_source`, an output started after it came on air carries its audio.
+Only a source setting no retry can fix (a synthetic pattern that cannot be
+made, a `max_width` below 2) stops the start.
 
 ## Prompts
 
@@ -323,10 +440,10 @@ than for a show; choosing a model per query comes later.
 | `ac-subjects` | Per-source subject store: identities from detections and tracks |
 | `ac-framing` | Ideal crops (fill rule for objects, body cut lines for whole people, zoom-limit flags) and per-shot smoothing |
 | `ac-director` | Shot scoring, suggestions and opt-in auto-takes |
-| `ac-switcher` | Preview/program, cut/auto/T-bar transitions |
+| `ac-switcher` | Preview/program, cut/auto/T-bar transitions, the take queued during one |
 | `ac-compositor` | CPU program compositor |
-| `ac-output` | One ffmpeg encode to RTMP and fragmented MP4 |
-| `ac-eval` | Framing-quality metrics |
+| `ac-output` | One ffmpeg encode to RTMP and fragmented MP4; `caffeinate` while live |
+| `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import), framing-quality metrics, and the per-tick trace schema (`TraceRecord`) the engine emits and they score |
 | `ac-engine` | The runtime that wires them together (ADR 0002) |
 | `apps/auto-camera` | Operator window and headless runner |
 

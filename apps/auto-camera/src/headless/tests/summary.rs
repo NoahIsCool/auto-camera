@@ -16,6 +16,7 @@ fn summary_of(snap: &EngineSnapshot, error: Option<&str>) -> serde_json::Value {
         Totals {
             ticks: 0,
             threads_joined: 0,
+            trace: None,
         },
         Some(snap),
         Some(snap),
@@ -142,6 +143,7 @@ fn the_stream_reads_as_the_running_output_saw_it_with_the_sessions_counts() {
             Totals {
                 ticks: 0,
                 threads_joined: 0,
+                trace: None,
             },
             sampler.last.as_deref(),
             Some(fin),

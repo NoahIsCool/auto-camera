@@ -28,7 +28,9 @@
 //! detector phrase, and `literal = true` sends the text as typed. Explicit
 //! `presets` always win over shot words. A role that names an action draws
 //! a notice unless the `detector` sees actions
-//! ([`DetectorSettings::sees_actions`]); see [`crate::queries`].
+//! ([`DetectorSettings::sees_actions`]); see [`crate::queries`]. A query's
+//! `priority`, 1 to 5, ranks its subjects for the director; when no query
+//! gives one, the list order ranks them, first highest ([`Ranking`]).
 //!
 //! The `detector` table picks one detector `kind` for the whole studio:
 //! `"none"`, `"synthetic"` (ground truth of synthetic sources), `"owl"`
@@ -110,7 +112,7 @@ pub use director::DirectorSettings;
 pub use discovery::DiscoverySettings;
 pub use monitors::MonitorSettings;
 pub use output::{EncoderSetting, OutputSettings};
-pub use queries::{PresetSpec, QuerySettings, slug, validate_query};
+pub use queries::{PresetSpec, QuerySettings, Ranking, slug, validate_query};
 pub use sidecar::SidecarSettings;
 pub use sources::SourceEntry;
 pub use subjects::SubjectSettings;
@@ -187,7 +189,8 @@ pub struct StudioConfig {
     /// Framing controller tuning (partial table over the defaults).
     #[serde(default, deserialize_with = "partial")]
     pub framing: FramerConfig,
-    /// Auto-director mode and profile.
+    /// Auto-director mode, profile and the operator's side (takeover,
+    /// pause and skip windows).
     #[serde(default)]
     pub director: DirectorSettings,
     /// Initial transition.
@@ -300,6 +303,11 @@ impl StudioConfig {
             if !ids.insert(s.id.as_str()) {
                 return bad(format!("duplicate source id {:?}", s.id));
             }
+            // A source that fails to open starts offline and is retried, so
+            // a mistake no retry can mend is caught here instead.
+            if let Err(e) = s.input.validate() {
+                return bad(format!("source {:?}: {e}", s.id));
+            }
             if matches!(self.detector, DetectorSettings::Synthetic { .. })
                 && !matches!(s.input, SourceConfig::Synthetic { .. })
             {
@@ -401,7 +409,7 @@ impl StudioConfig {
 
     /// The director parameters, validated.
     pub fn director_config(&self) -> Result<DirectorConfig, ConfigError> {
-        let c = DirectorConfig::new(self.director.mode, self.director.profile);
+        let c = self.director.to_director_config()?;
         c.validate()
             .map_err(|e| ConfigError::Invalid(format!("director: {e}")))?;
         Ok(c)

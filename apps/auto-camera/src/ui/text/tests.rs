@@ -124,6 +124,51 @@ fn status_bar_lines_show_rates_timing_and_drops() {
 }
 
 #[test]
+fn source_line_says_why_a_source_is_off_the_air() {
+    let mut snap = snapshot();
+    let now = Duration::ZERO;
+    let src = &mut snap.sources[0];
+    // A file missing at start: no rate known yet, retried, and why.
+    src.nominal_fps = 0.0;
+    src.state = SourceState::Offline;
+    src.error = Some("cannot open source: cannot open later.mkv".into());
+    assert_eq!(
+        source_line(src, now),
+        "stage –/– fps · 0 missed · OFFLINE: cannot open source: cannot open later.mkv"
+    );
+    assert_eq!(source_tone(src), Tone::Warning);
+    src.state = SourceState::Reconnecting;
+    assert_eq!(
+        source_line(src, now),
+        "stage –/– fps · 0 missed · RECONNECTING: cannot open source: cannot open later.mkv"
+    );
+    assert_eq!(source_tone(src), Tone::Warning);
+    // Retried without a reason given, and stopped by an error.
+    src.error = None;
+    assert!(source_line(src, now).ends_with(" · RECONNECTING"));
+    src.state = SourceState::Stopped;
+    src.error = Some("the source supervisor panicked".into());
+    assert!(
+        source_line(src, now).ends_with(" · NO SIGNAL: the source supervisor panicked"),
+        "{}",
+        source_line(src, now)
+    );
+    assert_eq!(source_tone(src), Tone::Warning);
+    src.error = None;
+    assert!(source_line(src, now).ends_with(" · NO SIGNAL"));
+    assert_eq!(source_tone(src), Tone::Plain, "it ended");
+    // Back on air: its rate is known and no reason is shown.
+    src.state = SourceState::Running;
+    src.error = None;
+    src.available = true;
+    src.frames = 30;
+    src.fps = 30.0;
+    src.nominal_fps = 30.0;
+    assert_eq!(source_line(src, now), "stage 30.0/30 fps · 0 missed");
+    assert_eq!(source_tone(src), Tone::Plain);
+}
+
+#[test]
 fn source_line_says_the_detector_is_preparing_and_for_how_long() {
     let mut snap = preparing_snapshot();
     let src = &mut snap.sources[0];
