@@ -69,8 +69,9 @@
 //! [`resample`]'s band-limited windowed-sinc resampler, whose ratio ramps
 //! and never jumps, makes up a small step at once with silence or a cut,
 //! and leaves the blocks bit for bit as they are while the drift is within
-//! a dead band, as it always is for a file played on the engine's clock. Like the meter, all of it is pure:
-//! samples, PTS and sample counts in, samples and estimates out.
+//! a dead band, as it always is for a file played on the engine's clock.
+//! Like the meter, all of it is pure: samples, PTS and sample counts in,
+//! samples and estimates out.
 
 pub mod correct;
 pub mod drift;

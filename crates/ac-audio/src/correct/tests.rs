@@ -293,6 +293,7 @@ fn a_step_in_the_pts_is_made_up_at_once_and_not_taken_for_drift() {
         }
     }
 }
+
 #[test]
 fn a_first_block_stamped_off_does_not_move_the_stream() {
     // Ten minutes of a drift-free input with exact PTS but for the first
