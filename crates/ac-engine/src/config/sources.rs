@@ -5,7 +5,9 @@
 //! optional operator-facing name. The id is part of every shot id of the
 //! source, so [`StudioConfig::validate`](super::StudioConfig::validate)
 //! requires each to pass [`valid_id`](super::valid_id) and to be unique; a
-//! source without a name is shown by its id.
+//! source without a name is shown by its id. [`input_problems`] lists what
+//! the opener of an entry's input would refuse before looking at any file,
+//! so a load and `--check` catch it, not only a start.
 //!
 //! A source that cannot be opened when the engine starts (a file that is
 //! not there yet, a camera that is not plugged in) starts offline and is
@@ -17,9 +19,10 @@
 //! description of the connection that delivered it.
 
 use ac_core::SourceId;
-use ac_media::SourceInfo;
-use ac_sources::SourceConfig;
+use ac_media::{MediaError, SourceInfo};
 use ac_sources::capture::request_problems;
+use ac_sources::segment::Segment;
+use ac_sources::{FrameRate, SourceConfig, SyntheticPattern};
 use serde::{Deserialize, Serialize};
 
 /// One video source.
@@ -69,6 +72,65 @@ impl SourceEntry {
             audio: None,
         }
     }
+}
+
+/// What the opener of `input` would refuse before looking at any file: a
+/// synthetic pattern's size, rate and subject count, against the limits
+/// [`SyntheticPattern::new`] applies, a file's `max_width`, by
+/// [`ac_sources::output_size`] itself, and its segment, by
+/// [`Segment::from_seconds`], and a capture request ([`capture_problems`]). So a load
+/// and `--check` catch them, not only a start. Whether the file is there is
+/// the readiness check's question.
+pub(super) fn input_problems(input: &SourceConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    let why = |e: MediaError| match e {
+        MediaError::Open(why) => why,
+        other => other.to_string(),
+    };
+    match input {
+        SourceConfig::File {
+            max_width,
+            start_s,
+            duration_s,
+            ..
+        } => {
+            // Any picture will do: only `max_width` is in question.
+            if let Err(e) = ac_sources::output_size((2, 2), *max_width) {
+                out.push(why(e));
+            }
+            if let Err(e) = Segment::from_seconds(*start_s, *duration_s) {
+                out.push(why(e));
+            }
+        }
+        SourceConfig::Synthetic {
+            width,
+            height,
+            fps,
+            subjects,
+        } => {
+            let side = 1..=SyntheticPattern::MAX_SIDE;
+            if !side.contains(width) || !side.contains(height) {
+                out.push(format!(
+                    "synthetic size {width}x{height} is outside 1..={}",
+                    SyntheticPattern::MAX_SIDE
+                ));
+            }
+            if FrameRate::from_f64(*fps).is_none() {
+                out.push(format!(
+                    "synthetic fps {fps} is not a usable frame rate (more than 0, at most {})",
+                    FrameRate::MAX_FPS
+                ));
+            }
+            if *subjects > SyntheticPattern::MAX_SUBJECTS {
+                out.push(format!(
+                    "{subjects} synthetic subjects, at most {} allowed",
+                    SyntheticPattern::MAX_SUBJECTS
+                ));
+            }
+        }
+        SourceConfig::Capture { .. } => out.extend(capture_problems(input)),
+    }
+    out
 }
 
 /// Every problem with a capture source's request, as

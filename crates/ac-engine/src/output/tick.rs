@@ -109,6 +109,7 @@ mod tests {
             .collect();
         AudioBlock {
             source: SourceId("stage".into()),
+            seq: 0,
             pts: Duration::ZERO,
             sample_rate: 48_000,
             channels: 2,

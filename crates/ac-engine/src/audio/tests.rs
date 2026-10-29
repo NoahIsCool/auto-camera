@@ -20,6 +20,7 @@ fn block(frames: usize, rate: u32, channels: u16) -> AudioBlock {
 fn timed(frames: usize, rate: u32, channels: u16, pts: Duration) -> AudioBlock {
     AudioBlock {
         source: SourceId("a".into()),
+        seq: 0,
         pts,
         sample_rate: rate,
         channels,

@@ -7,7 +7,7 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use ac_core::SourceId;
 use ac_media::{AudioBlock, MediaError, SourceInfo, SourceState, VideoFrame, VideoSource};
 use ac_sources::{
-    Backoff, FileOptions, FileSource, FrameRate, SourceConfig, SupervisedSource, VirtualClock,
-    WallClock, open_source, probe,
+    Backoff, FfmpegTools, FileOptions, FileSource, FrameRate, SourceConfig, SupervisedSource,
+    VirtualClock, WallClock, open_source, probe,
 };
 use common::{TempDir, make_clip, poll, tools};
 
@@ -159,6 +159,64 @@ fn audio_blocks_cover_the_file() {
         assert!(energy(b) > 0.0);
     }
     assert_contiguous(&blocks);
+}
+
+/// Writes `name.mkv` in `dir`: a 1 s 160x120 30 fps `testsrc` clip whose
+/// audio is ffmpeg's 48 kHz 440 Hz `sine` tone (crest 1/8, 16-bit PCM)
+/// routed by the `pan` filter `pan` (its layout, then its channels).
+fn clip_with_audio(tools: &FfmpegTools, dir: &Path, name: &str, pan: &str) -> PathBuf {
+    let path = dir.join(format!("{name}.mkv"));
+    let status = Command::new(&tools.ffmpeg)
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-f", "lavfi", "-i"])
+        .arg("testsrc=size=160x120:rate=30:duration=1")
+        .args(["-f", "lavfi", "-i"])
+        .arg("sine=frequency=440:sample_rate=48000:duration=1")
+        .args(["-af", &format!("pan={pan}"), "-c:a", "pcm_s16le"])
+        .args(["-c:v", "mpeg4", "-q:v", "4"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg could not make {name}");
+    path
+}
+
+/// A file's audio arrives as stereo, mixed as the encoder mixed a
+/// source's own channels before program audio was always stereo: a mono
+/// track on both sides at −3 dB, a 5.1 track's centre (its dialogue) in
+/// both sides at −3 dB and its LFE left out. Program audio from a video
+/// source therefore keeps its level.
+#[test]
+fn embedded_audio_is_mixed_to_stereo_as_the_encoder_mixed_it() {
+    let Some(tools) = tools() else { return };
+    let dir = TempDir::new("mix");
+    let want = 0.125 * std::f64::consts::FRAC_1_SQRT_2;
+    for (name, pan) in [("mono", "mono|c0=c0"), ("surround", "5.1|FC=c0|LFE=c0")] {
+        let clip = clip_with_audio(&tools, &dir.0, name, pan);
+        let src = open_unpaced(&clip, opts(false));
+        assert_eq!(src.info().audio, Some((48_000, 2)), "{name}");
+        let mut blocks: Vec<AudioBlock> = Vec::new();
+        assert!(poll(Duration::from_secs(20), || {
+            blocks.extend(src.drain_audio());
+            src.state() == SourceState::Stopped
+        }));
+        std::thread::sleep(Duration::from_millis(50));
+        blocks.extend(src.drain_audio());
+        assert!(!blocks.is_empty(), "{name}: no audio");
+        let mut peak = 0f64;
+        for b in &blocks {
+            assert_eq!(b.channels, 2, "{name}");
+            for frame in b.samples.chunks_exact(2) {
+                let (l, r) = (frame[0], frame[1]);
+                assert_eq!(l.to_bits(), r.to_bits(), "{name}: both sides alike");
+                peak = peak.max(f64::from(l.abs()));
+            }
+        }
+        assert!(
+            (peak - want).abs() < 1e-4,
+            "{name}: peak {peak}, want {want}"
+        );
+    }
 }
 
 #[test]

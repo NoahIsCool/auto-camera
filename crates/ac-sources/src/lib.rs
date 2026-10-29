@@ -1,5 +1,6 @@
 //! Video sources: local files decoded by ffmpeg, a synthetic test pattern,
-//! and the supervisor that reopens a source when its input is lost.
+//! and the supervisor that reopens a source when its input is lost; and
+//! audio-only inputs for program audio ([`audio_input`]).
 //!
 //! Every source implements [`ac_media::VideoSource`]. It decodes on its own
 //! worker threads, publishes frames into a latest-frame mailbox and queues
@@ -27,6 +28,11 @@
 //!   with sequence numbers and PTS continuing across connections (see
 //!   [`supervisor`]). [`FlakySynthetic`] is a synthetic source whose input
 //!   drops out on a schedule, for testing that ([`fault`]).
+//! * [`AudioFileInput`] plays an audio-only WAV/RF64 file as a live feed,
+//!   the rehearsal stand-in for a soundboard's, behind
+//!   [`ac_media::AudioInput`]; [`FakeAudioInput`] drifts, stalls and gets
+//!   unplugged on a plan, and [`SupervisedAudio`] reopens either as a
+//!   supervised source is reopened ([`audio_input`]).
 //!
 //! # Timing
 //!
@@ -43,9 +49,11 @@
 //!
 //! [`SourceConfig`] is the serializable description of a source and
 //! [`open_source`] turns one into a running `Box<dyn VideoSource>`;
-//! [`open_supervised`] opens one under a supervisor.
+//! [`open_supervised`] opens one under a supervisor. [`AudioInputConfig`]
+//! and [`open_supervised_audio`] do the same for audio inputs.
 
 pub mod audio;
+pub mod audio_input;
 pub mod capture;
 pub mod clip;
 pub mod clock;
@@ -64,6 +72,11 @@ pub mod supervisor;
 pub mod synthetic;
 
 pub use audio::BLOCK_MILLIS;
+pub use audio_input::{
+    AudioFileInput, AudioFileOptions, AudioInputConfig, AudioOpener, FakeAudio, FakeAudioInput,
+    FakeFeed, FeedState, Gap, SupervisedAudio, WavEncoding, fake_sample, open_audio_input,
+    open_supervised_audio, write_fake_wav,
+};
 pub use capture::{CaptureFormat, CaptureOptions, CaptureSource, DeviceInventory, SystemInventory};
 pub use clip::{ClipOptions, ClipReader};
 pub use clock::{Clock, MAX_SLEEP_SLICE, VirtualClock, WallClock};
@@ -73,8 +86,8 @@ pub use ffmpeg::{check_max_width, output_size};
 pub use file::{DEFAULT_AUDIO_QUEUE_BLOCKS, FileOptions, FileSource};
 pub use frame_rate::FrameRate;
 pub use probe::{
-    AudioStreamInfo, FFMPEG_ENV, FFPROBE_ENV, FfmpegTools, ProbeInfo, VideoStreamInfo, parse_probe,
-    probe,
+    AudioStreamInfo, FFMPEG_ENV, FFPROBE_ENV, FfmpegTools, ProbeInfo, VideoStreamInfo,
+    parse_audio_probe, parse_probe, probe, probe_audio,
 };
 pub use supervisor::{Backoff, SourceOpener, SupervisedSource, open_supervised};
 pub use synthetic::{GroundTruth, SyntheticPattern, SyntheticSource};

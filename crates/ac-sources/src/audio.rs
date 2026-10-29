@@ -4,13 +4,16 @@
 //! file's own rate and channel count. The worker cuts them into blocks of
 //! about [`BLOCK_MILLIS`] and stamps each block from a running sample count
 //! (`SampleClock`), so audio PTS is exact, gap-free and strictly increasing:
-//! block `n + 1` starts at the sample where block `n` ended.
+//! block `n + 1` starts at the sample where block `n` ended, with the next
+//! sequence number.
 //!
 //! A block is released when its *last* sample is due on the source's timeline,
 //! as a real capture device delivers a buffer once it has been filled. Blocks
-//! wait in a bounded queue (`AudioQueue`); when nobody drains it, the oldest
-//! block is dropped and counted, so a forgotten queue costs a fixed amount of
-//! memory and the newest audio is always available.
+//! wait in a bounded queue (`AudioQueue`, an [`ac_media::AudioRing`]); when
+//! nobody drains it, the oldest block is dropped and counted, so a forgotten
+//! queue costs a fixed amount of memory and the newest audio is always
+//! available. The same clock and queue serve the audio-only inputs
+//! ([`crate::audio_input`]).
 //!
 //! The video worker defines the timeline and shares how far it has got.
 //! A block is released only once the video has published frames up to the
@@ -21,10 +24,7 @@
 //! pass is padded with silence, so every pass of audio starts at exactly the
 //! PTS of the first video frame of the same pass, paced or unpaced.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ac_core::SourceId;
@@ -32,7 +32,6 @@ use ac_media::AudioBlock;
 
 use crate::file::Shared;
 use crate::process::{END_GRACE, Respawner, Spawned, read_full};
-use crate::status::lock;
 
 /// Target block length in milliseconds.
 pub const BLOCK_MILLIS: u32 = 10;
@@ -44,47 +43,7 @@ const SAMPLE_BYTES: usize = 4;
 const NANOS: u128 = 1_000_000_000;
 
 /// Bounded FIFO of decoded audio that drops its oldest block when full.
-#[derive(Debug)]
-pub(crate) struct AudioQueue {
-    /// Queued blocks, oldest first.
-    blocks: Mutex<VecDeque<AudioBlock>>,
-    /// Most blocks held at once; at least 1.
-    capacity: usize,
-    /// Blocks dropped because the queue was full.
-    dropped: AtomicU64,
-}
-
-impl AudioQueue {
-    /// A queue holding up to `capacity` blocks (at least one).
-    pub(crate) fn new(capacity: usize) -> Self {
-        let capacity = capacity.max(1);
-        Self {
-            blocks: Mutex::new(VecDeque::with_capacity(capacity)),
-            capacity,
-            dropped: AtomicU64::new(0),
-        }
-    }
-
-    /// Appends `block`, dropping the oldest block when full.
-    pub(crate) fn push(&self, block: AudioBlock) {
-        let mut q = lock(&self.blocks);
-        if q.len() >= self.capacity {
-            q.pop_front();
-            self.dropped.fetch_add(1, Ordering::Relaxed);
-        }
-        q.push_back(block);
-    }
-
-    /// Removes and returns every queued block, oldest first.
-    pub(crate) fn drain(&self) -> Vec<AudioBlock> {
-        lock(&self.blocks).drain(..).collect()
-    }
-
-    /// Number of blocks dropped so far.
-    pub(crate) fn dropped(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
-    }
-}
+pub(crate) type AudioQueue = ac_media::AudioRing;
 
 /// Position on a source's audio timeline, counted in sample frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +54,8 @@ pub(crate) struct SampleClock {
     channels: u16,
     /// Index of the next sample frame to emit.
     pos: u64,
+    /// Blocks stamped so far: the sequence number of the next one.
+    blocks: u64,
 }
 
 impl SampleClock {
@@ -104,6 +65,7 @@ impl SampleClock {
             rate: rate.max(1),
             channels: channels.max(1),
             pos: 0,
+            blocks: 0,
         }
     }
 
@@ -152,18 +114,20 @@ impl SampleClock {
         self.time_of(self.pos.saturating_add(frames as u64))
     }
 
-    /// Stamps `samples` (whole interleaved frames) at the current position and
-    /// moves past them.
+    /// Stamps `samples` (whole interleaved frames) at the current position,
+    /// with the next sequence number, and moves past them.
     pub(crate) fn block(&mut self, source: &SourceId, samples: Arc<[f32]>) -> AudioBlock {
         let frames = samples.len() / self.channels as usize;
         let block = AudioBlock {
             source: source.clone(),
+            seq: self.blocks,
             pts: self.time_of(self.pos),
             sample_rate: self.rate,
             channels: self.channels,
             samples,
         };
         self.pos = self.pos.saturating_add(frames as u64);
+        self.blocks += 1;
         block
     }
 }
@@ -303,50 +267,6 @@ pub(crate) fn decode_f32le(bytes: &[u8]) -> Arc<[f32]> {
 mod tests {
     use super::*;
 
-    /// A block of `n` samples tagged `tag` in its first sample.
-    fn block(tag: f32, n: usize) -> AudioBlock {
-        let mut samples = vec![0.0; n];
-        samples[0] = tag;
-        AudioBlock {
-            source: SourceId("s".into()),
-            pts: Duration::ZERO,
-            sample_rate: 48_000,
-            channels: 1,
-            samples: Arc::from(samples),
-        }
-    }
-
-    #[test]
-    fn queue_drains_in_order() {
-        let q = AudioQueue::new(4);
-        q.push(block(1.0, 1));
-        q.push(block(2.0, 1));
-        let tags: Vec<f32> = q.drain().iter().map(|b| b.samples[0]).collect();
-        assert_eq!(tags, [1.0, 2.0]);
-        assert!(q.drain().is_empty());
-        assert_eq!(q.dropped(), 0);
-    }
-
-    #[test]
-    fn full_queue_drops_oldest_and_counts() {
-        let q = AudioQueue::new(2);
-        for tag in 1..=5 {
-            q.push(block(tag as f32, 1));
-        }
-        let tags: Vec<f32> = q.drain().iter().map(|b| b.samples[0]).collect();
-        assert_eq!(tags, [4.0, 5.0]);
-        assert_eq!(q.dropped(), 3);
-    }
-
-    #[test]
-    fn zero_capacity_still_keeps_the_newest_block() {
-        let q = AudioQueue::new(0);
-        q.push(block(1.0, 1));
-        q.push(block(2.0, 1));
-        assert_eq!(q.drain()[0].samples[0], 2.0);
-        assert_eq!(q.dropped(), 1);
-    }
-
     #[test]
     fn blocks_are_ten_milliseconds() {
         assert_eq!(SampleClock::new(48_000, 2).block_frames(), 480);
@@ -362,9 +282,9 @@ mod tests {
         let mut c = SampleClock::new(44_100, 2);
         let src = SourceId("s".into());
         let mut end = Duration::ZERO;
-        for _ in 0..100 {
+        for seq in 0..100 {
             let b = c.block(&src, Arc::from(vec![0.0f32; 441 * 2]));
-            assert_eq!(b.pts, end);
+            assert_eq!((b.seq, b.pts), (seq, end));
             assert_eq!(b.frames(), 441);
             end = c.time_of(c.pos);
         }
