@@ -55,10 +55,12 @@ Above it, the status bar lists alarms (spec M14), one row each, for as long
 as their cause lasts: the program black for 2 s while the output runs, the
 program on a subject lost for half a second, the program's source sending
 no new frame for over half a second, encoder drops, a failed output, the
-stream reconnecting, stalled (the ingest takes no packets) or down, and a
-recording without audio (no audio track, or no source audio for 2 s). Most
-clear only once their cause has been gone for a while (a second for the
-picture and audio, five for drops and for a stream taking packets again),
+stream reconnecting, stalled (the ingest takes no packets) or down, a
+recording without audio (no audio track, or no source audio for 2 s), and
+program audio unheard (it connected, or came back, at another rate than
+the output was started with: restart the output). Most clear only once
+their cause has been gone for a while (a second for the picture and
+audio, five for drops and for a stream taking packets again),
 so they do not flicker; a failed output clears when the output starts
 again, and a stream that is down when the session ends. Acknowledge dims an alarm and removes its button,
 but it stays listed until its cause clears; one that comes back is new.
@@ -537,13 +539,18 @@ it: a setting of the device that stays after the show and that Audio MIDI
 Setup shows. Only the device with exactly that UID is opened: one that is
 not connected leaves the input offline, retried like a source, so the
 board comes on air within seconds of being plugged in, and back after it
-was unplugged; the default microphone is never opened in its place. The
-log says why it is offline, with the UIDs of the devices that are
-connected, and says it again when that list changes. A glitch the input
-delivers through (audio dropped because the input fell behind its device,
-a jump in the device's timestamps, an overload CoreAudio reports) keeps it
-on air: it is counted, kept as the input's error
-(`audio discontinuity (3 so far; the device reported 2 overloads): ...`)
+was unplugged; the default microphone is never opened in its place. On
+air, it is heard if it runs at the rate the output was started with: the
+board's own if it was connected then, 48 kHz if the output started before
+it was. A board at another rate (one plugged in at 96 kHz after the output
+started without it, or one whose rate was changed during the show) is not
+heard until the output is restarted, which its error and the alarm
+"program audio unheard" say. The log says why it is offline, with the
+UIDs of the devices that are connected, and says it again when that list
+changes. A glitch the input delivers through (audio dropped because the
+input fell behind its device, a jump in the device's timestamps, an
+overload CoreAudio reports) keeps it on air: it is counted, kept as the
+input's error (`audio discontinuity (3 so far; the device reported 2 overloads): ...`)
 and written to the log, at most a line every 10 s. Overloads are counted
 apart from what the input measures, since one that lost audio also shows
 as the gap it left. A jump in the timestamps is reported half a second after

@@ -44,8 +44,10 @@ fps = 30
 # and paste the board's `uid` line here. A device that is not connected
 # leaves the input offline (the default microphone is never opened
 # instead), which the log says with the UIDs of the devices that are, and
-# it comes on air within seconds of being plugged in. `channels` picks the
-# stereo pair, counted from 1; `channel_count`, optional, is what the
+# it comes on air within seconds of being plugged in if it runs at the
+# rate the output was started with (its own if it was connected then,
+# else 48 kHz); at another rate an alarm says to restart the output.
+# `channels` picks the stereo pair, counted from 1; `channel_count`, optional, is what the
 # device has. Then set `audio_source = "board"` in [output].
 # [[audio_inputs]]
 # id = "board"

@@ -39,7 +39,17 @@
 //! [`STAND_IN_RATE`], the rate a soundboard runs at, so the recording still
 //! has its audio track and the input is heard as soon as it connects at that
 //! rate; at another rate its blocks are dropped by the pacer (its
-//! `mismatched_blocks`) until the output is started again.
+//! `mismatched_blocks`) until the output is started again. So is the board
+//! of a running show that comes back at another rate (its rate changed
+//! under the stream, which ends the connection, and its supervisor opens
+//! it again at the new one), and a video source that reconnects with its
+//! audio at another rate. The engine does not convert the rate, nor reopen
+//! the encoder by itself, which would cut the recording and the stream;
+//! it says so instead. While the program input runs at another rate than
+//! the live session's, its view's error is why it is not heard
+//! ([`unheard`], [`AudioInputView::unheard`]), which the log notes, and
+//! for any origin the alarm "program audio unheard" stays raised while the
+//! pacer drops its blocks ([`crate::alarms`]).
 //!
 //! # Ownership and threads
 //!
@@ -97,7 +107,8 @@ pub struct AudioInputView {
     pub name: String,
     /// Health.
     pub state: SourceState,
-    /// Why it is offline, while it is; while it runs, the trouble it
+    /// Why it is offline, while it is; while it runs, why it is not heard
+    /// when it is not ([`AudioInputView::unheard`]), else the trouble it
     /// reports and delivers through (a device's discontinuities), if any.
     pub error: Option<String>,
     /// Sample rate and channel count of its newest connection, once one
@@ -114,6 +125,20 @@ pub struct AudioInputView {
     pub dropped: u64,
     /// Program blocks dropped because they lacked the picked channels.
     pub unusable: u64,
+    /// It is program audio and runs at another rate than the live output
+    /// session was started with, so the pacer drops its blocks and it is
+    /// not heard until the output is started again; `error` says so (see
+    /// the module docs).
+    pub unheard: bool,
+}
+
+/// Why program audio from `name`, running at `rate`, is not heard in an
+/// output started at `output_rate`; see the module docs.
+pub fn unheard(name: &str, rate: u32, output_rate: u32) -> String {
+    format!(
+        "{name} runs at {rate} Hz; the output was started at {output_rate} Hz: not heard \
+         until the output is restarted"
+    )
 }
 
 /// An opened audio input and what the engine counts of it.
@@ -254,21 +279,36 @@ impl ProgramAudio {
         program
     }
 
-    /// Every audio input as the operator sees it, in config order.
-    pub fn views(&self) -> Vec<AudioInputView> {
+    /// Every audio input as the operator sees it, in config order, while
+    /// a live output session's program audio is in format `output` (`None`
+    /// while no session is live): the program input running at another
+    /// rate than that is not heard, and its view says so (see the module
+    /// docs).
+    pub fn views(&self, output: Option<AudioFormat>) -> Vec<AudioInputView> {
         self.inputs
             .iter()
             .enumerate()
             .map(|(i, slot)| {
                 let info = slot.input.current_info();
+                let state = slot.input.state();
+                let program = self.origin == Some(Origin::Input(i));
+                let not_heard = match (info.format, output) {
+                    (Some((rate, _)), Some(out))
+                        if program && state == SourceState::Running && rate != out.sample_rate =>
+                    {
+                        Some(unheard(&slot.name, rate, out.sample_rate))
+                    }
+                    _ => None,
+                };
                 AudioInputView {
                     id: info.id,
                     name: slot.name.clone(),
-                    state: slot.input.state(),
-                    error: slot.input.error(),
+                    state,
+                    unheard: not_heard.is_some(),
+                    error: not_heard.or_else(|| slot.input.error()),
                     format: info.format,
                     pick: slot.pick,
-                    program: self.origin == Some(Origin::Input(i)),
+                    program,
                     blocks: slot.blocks,
                     dropped: slot.input.dropped(),
                     unusable: slot.unusable,
@@ -292,5 +332,7 @@ fn stereo(pick: Option<ChannelPick>, block: &AudioBlock) -> Option<AudioBlock> {
         .select(block)
 }
 
+#[cfg(test)]
+mod rate_tests;
 #[cfg(test)]
 mod tests;

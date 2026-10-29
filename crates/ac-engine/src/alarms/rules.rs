@@ -2,9 +2,10 @@
 //! bad, good or unsure, with the sentence a bad reading raises (see the
 //! parent module for the rules and their holds).
 //!
-//! The rules read only the snapshot, except for two counters that only
-//! mean something as a change: the encoder's drops and the program audio
-//! pushed. For those a [`Session`] remembers the previous observation of
+//! The rules read only the snapshot, except for three counters that only
+//! mean something as a change: the encoder's drops, the program audio
+//! pushed and the program audio blocks the pacer dropped for their format.
+//! For those a [`Session`] remembers the previous observation of
 //! the same output session. It starts on the first observation that finds
 //! the output running, taking the counters as they are then (drops counted
 //! before a reader started watching are not news), and ends on the first
@@ -55,6 +56,8 @@ pub(super) struct Session {
     /// Media time of the observation that last found more source audio
     /// pushed, or that started the session.
     audio_at: Duration,
+    /// Program audio blocks dropped for their format, as last observed.
+    mismatched: u64,
 }
 
 impl Session {
@@ -68,6 +71,7 @@ impl Session {
                 .map_or((0, 0), |s| (s.frames_dropped, s.audio_samples_dropped)),
             audio_pushed: o.audio.map_or(0, |a| a.pushed),
             audio_at: snap.media_time,
+            mismatched: o.audio.map_or(0, |a| a.mismatched_blocks),
         }
     }
 }
@@ -98,6 +102,7 @@ pub(super) fn read(snap: &EngineSnapshot, session: &mut Option<Session>) -> Vec<
     encoder(snap, s, &mut out);
     stream(snap, &mut out);
     audio(snap, s, &mut out);
+    unheard(snap, s, &mut out);
     out
 }
 
@@ -286,4 +291,37 @@ fn audio(snap: &EngineSnapshot, s: &mut Session, out: &mut Vec<Read>) {
             SILENT_AFTER.as_secs_f64()
         ),
     );
+}
+
+/// Program audio the pacer dropped since the previous observation of the
+/// session for being in another format than the session's, whether the
+/// session records, streams or both. The sentence is the program input's
+/// own when it is the one not heard (its view says why), else it names
+/// the session's format.
+fn unheard(snap: &EngineSnapshot, s: &mut Session, out: &mut Vec<Read>) {
+    let Some(pacer) = snap.output.audio else {
+        return;
+    };
+    let before = std::mem::replace(&mut s.mismatched, pacer.mismatched_blocks);
+    // A count below the remembered one is a new pacer's: compare from here.
+    let reading = if pacer.mismatched_blocks > before {
+        Reading::Bad
+    } else {
+        Reading::Good
+    };
+    let message = snap
+        .audio_inputs
+        .iter()
+        .find(|a| a.unheard)
+        .and_then(|a| a.error.clone())
+        .unwrap_or_else(|| {
+            let started = snap.output.audio_format.map_or(String::new(), |f| {
+                format!(" ({} Hz, {} channels)", f.sample_rate, f.channels)
+            });
+            format!(
+                "program audio is not in the format the output was started with{started}: \
+                 not heard until the output is restarted"
+            )
+        });
+    push(out, AlarmCause::ProgramAudioUnheard, reading, message);
 }

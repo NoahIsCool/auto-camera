@@ -19,7 +19,7 @@ use ac_core::{
 };
 use ac_director::{CandidateKind, ContentProfile, DirectorMode, Reason, Takeover};
 use ac_media::{SourceState, VideoFrame};
-use ac_output::EncoderStats;
+use ac_output::{AudioFormat, EncoderStats};
 use ac_switcher::{Queued, SwitchError, Transition};
 
 use crate::audio::AudioPacerStats;
@@ -364,6 +364,10 @@ pub struct OutputView {
     pub stats: Option<EncoderStats>,
     /// Program audio pacing, when the output carries audio.
     pub audio: Option<AudioPacerStats>,
+    /// The format the live session's program audio is pushed in, the one
+    /// its encoder was opened with; `None` while no session is live, and
+    /// for a session without audio.
+    pub audio_format: Option<AudioFormat>,
     /// Program loudness and peaks (EBU R 128) of the session, measured on
     /// the paced audio, when the output carries audio; final once the
     /// session has ended.

@@ -8,7 +8,11 @@
 //! build. Whether the device is connected is not asked, as for cameras: it
 //! can be plugged in later, and an input whose device is missing stays
 //! offline with the UIDs of the devices that are, and comes on air once it
-//! is plugged in (`auto-camera --list-audio-devices` lists them).
+//! is plugged in (`auto-camera --list-audio-devices` lists them). It is
+//! heard if it runs at the rate the output was started with (48 kHz when
+//! the output started before the device was connected); at another rate it
+//! is not heard until the output is restarted, which its view and an alarm
+//! say ([`crate::program_audio`]).
 //!
 //! An empty UID is a config problem already, so it gets no finding here.
 

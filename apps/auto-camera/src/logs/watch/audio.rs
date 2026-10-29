@@ -20,11 +20,20 @@
 //! state stays is noted the same way. So a board left unplugged logs why
 //! once, with the UIDs of the devices that are connected, and again only
 //! when that list changes. The memory of the reason ends when the input
-//! runs: the next outage is noted with its reason whatever it reads.
+//! runs and is heard: the next outage is noted with its reason whatever it
+//! reads.
 //!
 //! A running input's error is the trouble it delivers through (a device's
 //! discontinuities). The input logs that itself, at most a line every
-//! 10 s with a count, so the watcher leaves it out.
+//! 10 s with a count, so the watcher leaves it out, with one exception:
+//! program audio that is not heard because it runs at another rate than
+//! the output was started with (a board plugged in, or back, at another
+//! rate).
+//! The engine says so as the input's error ([`AudioInputView::unheard`]),
+//! and the watcher notes it like the reason of a state, at WARN:
+//! `audio input board: offline -> running (Soundboard runs at 44100 Hz;
+//! the output was started at 48000 Hz: not heard until the output is
+//! restarted)`.
 //!
 //! # Invariants
 //!
@@ -65,7 +74,7 @@ pub(super) fn observe(
     let reason = a
         .error
         .as_deref()
-        .filter(|_| a.state != SourceState::Running);
+        .filter(|_| a.state != SourceState::Running || a.unheard);
     let Some(last) = seen.get_mut(&a.id) else {
         let format = a.format.map_or(String::new(), |(rate, channels)| {
             let s = if channels == 1 { "" } else { "s" };
@@ -104,7 +113,7 @@ pub(super) fn observe(
             | (SourceState::Reconnecting, SourceState::Offline)
     );
     if last.state != a.state && (!retry || new_reason.is_some()) {
-        let level = if a.state == SourceState::Running {
+        let level = if a.state == SourceState::Running && reason.is_none() {
             Level::INFO
         } else {
             Level::WARN
@@ -126,7 +135,7 @@ pub(super) fn observe(
             format!("audio input {id}: {}", state_of(a.state, Some(r))),
         ));
     }
-    if a.state == SourceState::Running {
+    if a.state == SourceState::Running && reason.is_none() {
         last.reason = None;
     } else if let Some(r) = reason {
         last.reason = Some(shape(r));
@@ -172,6 +181,7 @@ mod tests {
             blocks: 0,
             dropped: 0,
             unusable: 0,
+            unheard: false,
         }
     }
 
@@ -188,6 +198,41 @@ mod tests {
         let mut snap = fixtures::snapshot();
         snap.audio_inputs = vec![input];
         snap
+    }
+
+    #[test]
+    fn a_board_back_at_another_rate_than_the_output_is_noted_as_not_heard() {
+        let mut w = Watcher::default();
+        let mut on_air = board(SourceState::Running, None);
+        on_air.format = Some((48_000, 2));
+        assert_eq!(notes_of(&mut w, &with(on_air)).len(), 1);
+        let gone = "audio device \"SQ\" went away: Device sample rate changed";
+        let snap = with(board(SourceState::Offline, Some(gone)));
+        assert_eq!(
+            notes_of(&mut w, &snap),
+            [(
+                Level::WARN,
+                format!("audio input board: running -> offline ({gone})")
+            )]
+        );
+        assert!(notes_of(&mut w, &with(board(SourceState::Reconnecting, Some(gone)))).is_empty());
+        let text = ac_engine::program_audio::unheard("Soundboard", 44_100, 48_000);
+        let mut back = board(SourceState::Running, Some(&text));
+        back.format = Some((44_100, 2));
+        back.unheard = true;
+        assert_eq!(
+            notes_of(&mut w, &with(back.clone())),
+            [(
+                Level::WARN,
+                format!("audio input board: offline -> running ({text})")
+            )]
+        );
+        // Once, however long it lasts.
+        assert!(notes_of(&mut w, &with(back.clone())).is_empty());
+        // The output restarted at its rate: heard, nothing to note.
+        back.unheard = false;
+        back.error = None;
+        assert!(notes_of(&mut w, &with(back)).is_empty());
     }
 
     #[test]

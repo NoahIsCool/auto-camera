@@ -10,6 +10,10 @@
 //! the tests; none is kept in the repository. Skipped when ffmpeg is not
 //! installed (unless `AC_REQUIRE_FFMPEG` is set).
 //!
+//! A board missing when the output starts and then connected at another
+//! rate than the session's is not heard, which the engine publishes as
+//! the input's error and the alarm model raises with the same words.
+//!
 //! These engines run in real time ([`start_real_time`]), not on the
 //! sped-up clock of the other engine tests: a looping file input starts
 //! the decoder of its next pass one pass ahead, and four times real time
@@ -21,14 +25,15 @@
 
 mod common;
 
+use std::cell::RefCell;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ac_core::ShotId;
 use ac_engine::{
-    AudioInputEntry, DetectorSettings, Engine, EngineCommand, EngineHandle, EngineOptions,
-    OutputState, StudioConfig,
+    AlarmCause, Alarms, AudioInputEntry, DetectorSettings, Engine, EngineCommand, EngineHandle,
+    EngineOptions, OutputState, StudioConfig,
 };
 use ac_media::{ChannelPick, SourceState};
 use ac_sources::{AudioInputConfig, SourceConfig, WavEncoding, fake_sample, write_fake_wav};
@@ -377,6 +382,102 @@ fn an_input_without_the_picked_channels_stays_offline_with_the_reason() {
         "{why}"
     );
     assert_eq!((view.blocks, view.format), (0, None));
+    engine.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The board is not there when the output starts, so the session takes
+/// the 48 kHz stand-in; plugged in (its recording appears) at 96 kHz, it
+/// runs, but the pacer drops its blocks. The engine's view says why it is
+/// not heard, and the alarm model raises with the same words. Restarted,
+/// the output takes the board's rate and hears it.
+#[test]
+fn a_board_plugged_in_at_96_khz_after_the_output_started_is_not_heard_until_a_restart() {
+    if !have("ffmpeg") || !have("ffprobe") {
+        eprintln!("skipped: ffmpeg is not installed");
+        return;
+    }
+    let dir = folder("unheard");
+    let wav = dir.join("board.wav");
+    let engine = start_real_time(board_studio(board(&wav, None, None), "ffmpeg".into()));
+    let h = engine.handle();
+    let wide = ShotId("stage/wide".into());
+    h.wait_until(WAIT, |s| s.shot(&wide).is_some_and(|v| v.available))
+        .expect("the video source runs");
+    let start = |name: &str| {
+        h.send(EngineCommand::StartOutput {
+            rtmp_url: None,
+            record_path: Some(dir.join(name)),
+        })
+        .unwrap();
+    };
+    start("first.mp4");
+    let alarms = RefCell::new(Alarms::new());
+    let live = h
+        .wait_until(WAIT, |s| {
+            alarms.borrow_mut().observe(s);
+            s.output.state == OutputState::Running
+        })
+        .expect("the encoder starts");
+    assert_eq!(
+        live.output.audio_format.map(|f| f.sample_rate),
+        Some(48_000)
+    );
+    assert!(!live.audio_inputs[0].unheard, "{:?}", live.audio_inputs[0]);
+    // Plugged in: the whole recording appears at once.
+    let part = dir.join("board.part");
+    write_fake_wav(&part, 96_000, 2, 96_000, WavEncoding::Pcm16, false).unwrap();
+    std::fs::rename(&part, &wav).unwrap();
+    let text = "Board runs at 96000 Hz; the output was started at 48000 Hz: not heard until \
+                the output is restarted";
+    let unheard = h
+        .wait_until(WAIT, |s| {
+            alarms.borrow_mut().observe(s);
+            alarms
+                .borrow()
+                .get(&AlarmCause::ProgramAudioUnheard)
+                .is_some()
+        })
+        .expect("the alarm is raised");
+    let board = &unheard.audio_inputs[0];
+    assert_eq!(board.state, SourceState::Running, "{board:?}");
+    assert!(board.unheard);
+    assert_eq!(board.error.as_deref(), Some(text));
+    assert_eq!(
+        alarms
+            .borrow()
+            .get(&AlarmCause::ProgramAudioUnheard)
+            .unwrap()
+            .message,
+        text
+    );
+    assert!(unheard.output.audio.unwrap().mismatched_blocks > 0);
+    // Restarted: the session takes the board's rate.
+    h.send(EngineCommand::StopOutput).unwrap();
+    h.wait_until(WAIT, |s| s.output.state == OutputState::Finished)
+        .expect("the encoder finishes");
+    start("second.mp4");
+    let heard = h
+        .wait_until(WAIT, |s| {
+            alarms.borrow_mut().observe(s);
+            s.output.state == OutputState::Running && s.output.audio.is_some_and(|a| a.pushed > 0)
+        })
+        .expect("the board is heard");
+    assert_eq!(
+        heard.output.audio_format.map(|f| f.sample_rate),
+        Some(96_000)
+    );
+    assert!(!heard.audio_inputs[0].unheard);
+    assert_eq!(heard.audio_inputs[0].error, None);
+    assert!(
+        alarms
+            .borrow()
+            .get(&AlarmCause::ProgramAudioUnheard)
+            .is_none()
+    );
+    h.send(EngineCommand::StopOutput).unwrap();
+    h.wait_until(WAIT, |s| s.output.state == OutputState::Finished)
+        .expect("the encoder finishes");
     engine.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
