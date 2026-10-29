@@ -28,6 +28,7 @@ mod console;
 mod fixtures;
 mod keys;
 mod layout;
+mod meter;
 mod multiview;
 mod notices;
 mod panels;

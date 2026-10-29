@@ -23,6 +23,7 @@ ac-output = { path = "crates/ac-output" }
 ac-engine = { path = "crates/ac-engine" }
 ac-sources = { path = "crates/ac-sources" }
 ac-sidecar = { path = "crates/ac-sidecar" }
+ac-audio = { path = "crates/ac-audio" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 # Logging in the adapter crates and the app only; the core crates stay
@@ -55,4 +56,9 @@ opt-level = 3
 
 # The sidecar host downscales every frame it sends with a box filter.
 [profile.dev.package.ac-sidecar]
+opt-level = 3
+
+# The program loudness meter filters every sample of program audio (two
+# biquads and a 48-tap interpolator per channel).
+[profile.dev.package.ac-audio]
 opt-level = 3
