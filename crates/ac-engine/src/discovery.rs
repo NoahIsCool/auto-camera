@@ -189,7 +189,7 @@ pub fn build_detector(
                     .map_err(|e| e.to_string())?;
                 Ok(Some(ready(Box::new(synthetic_detector(pattern, *score)))))
             }
-            SourceConfig::File { .. } => {
+            SourceConfig::File { .. } | SourceConfig::Capture { .. } => {
                 Err("the synthetic detector only works on synthetic sources".into())
             }
         },

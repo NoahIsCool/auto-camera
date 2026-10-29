@@ -40,7 +40,9 @@
 //! takes a video source's id too (its embedded audio), so the two kinds
 //! share one namespace: an audio input's id must be a valid id
 //! ([`valid_id`]), unique among the audio inputs, and not
-//! a source's id.
+//! a source's id. `output.audio_source` may not name a capture source: a
+//! camera's audio is not captured, so the program would be silent with
+//! nothing saying why.
 //!
 //! The check here is pure, like every config check: whether the file is
 //! there is the readiness check's question ([`crate::readiness`]), and its
@@ -51,7 +53,7 @@ use std::path::Path;
 
 use ac_core::SourceId;
 use ac_media::{AudioInputInfo, ChannelPick};
-use ac_sources::AudioInputConfig;
+use ac_sources::{AudioInputConfig, SourceConfig};
 use serde::{Deserialize, Serialize};
 
 use super::{StudioConfig, valid_id};
@@ -142,8 +144,8 @@ pub(super) fn resolve_paths(entries: &mut [AudioInputEntry], dir: &Path) {
 }
 
 /// Every problem of `config`'s audio inputs and of `output.audio_source`,
-/// which must name one of `source_ids` or an audio input; see the module
-/// docs.
+/// which must name one of `source_ids` or an audio input, and not a
+/// capture source (whose audio is not captured); see the module docs.
 pub(super) fn problems(config: &StudioConfig, source_ids: &HashSet<&str>) -> Vec<String> {
     let mut out = Vec::new();
     let mut ids = HashSet::new();
@@ -179,13 +181,24 @@ pub(super) fn problems(config: &StudioConfig, source_ids: &HashSet<&str>) -> Vec
             None => {}
         }
     }
-    if let Some(audio) = &config.output.audio_source
-        && !source_ids.contains(audio.as_str())
-        && !ids.contains(audio.as_str())
-    {
-        out.push(format!(
-            "output.audio_source {audio:?} is not a source or audio input id"
-        ));
+    if let Some(audio) = &config.output.audio_source {
+        if !source_ids.contains(audio.as_str()) && !ids.contains(audio.as_str()) {
+            out.push(format!(
+                "output.audio_source {audio:?} is not a source or audio input id"
+            ));
+        }
+        // A capture source opens the video only, so naming one would give
+        // the program no audio and nothing would say why.
+        if config
+            .sources
+            .iter()
+            .any(|s| s.id == *audio && matches!(s.input, SourceConfig::Capture { .. }))
+        {
+            out.push(format!(
+                "output.audio_source {audio:?} is a camera, whose audio is not captured; \
+                 name an audio input ([[audio_inputs]]) for program audio"
+            ));
+        }
     }
     out
 }

@@ -107,9 +107,7 @@ use std::time::Duration;
 use ac_core::{Lexicon, Preset, Query, ShotSize};
 use ac_director::DirectorConfig;
 use ac_framing::FramerConfig;
-use ac_media::MediaError;
-use ac_sources::segment::Segment;
-use ac_sources::{FrameRate, SourceConfig, SyntheticPattern};
+use ac_sources::SourceConfig;
 use ac_subjects::StoreConfig;
 use ac_vision::TemplateTrackerConfig;
 use serde::{Deserialize, Serialize};
@@ -396,7 +394,7 @@ impl StudioConfig {
             }
             // A source that fails to open starts offline and is retried, so
             // a mistake no retry can mend is caught here instead.
-            for p in input_problems(&s.input) {
+            for p in sources::input_problems(&s.input) {
                 out.push(format!("source {:?}: {p}", s.id));
             }
             if matches!(self.detector, DetectorSettings::Synthetic { .. })
@@ -527,63 +525,6 @@ fn invalid_message(e: ConfigError) -> String {
         ConfigError::Invalid(message) => message,
         other => other.to_string(),
     }
-}
-
-/// What the opener of `input` would refuse before looking at any file: a
-/// synthetic pattern's size, rate and subject count, against the limits
-/// [`SyntheticPattern::new`] applies, and a file's `max_width`, by
-/// [`ac_sources::output_size`] itself, and its segment, by
-/// [`Segment::from_seconds`]. So a load and `--check` catch them, not only
-/// a start. Whether the file is there is the readiness check's question.
-fn input_problems(input: &SourceConfig) -> Vec<String> {
-    let mut out = Vec::new();
-    let why = |e: MediaError| match e {
-        MediaError::Open(why) => why,
-        other => other.to_string(),
-    };
-    match input {
-        SourceConfig::File {
-            max_width,
-            start_s,
-            duration_s,
-            ..
-        } => {
-            // Any picture will do: only `max_width` is in question.
-            if let Err(e) = ac_sources::output_size((2, 2), *max_width) {
-                out.push(why(e));
-            }
-            if let Err(e) = Segment::from_seconds(*start_s, *duration_s) {
-                out.push(why(e));
-            }
-        }
-        SourceConfig::Synthetic {
-            width,
-            height,
-            fps,
-            subjects,
-        } => {
-            let side = 1..=SyntheticPattern::MAX_SIDE;
-            if !side.contains(width) || !side.contains(height) {
-                out.push(format!(
-                    "synthetic size {width}x{height} is outside 1..={}",
-                    SyntheticPattern::MAX_SIDE
-                ));
-            }
-            if FrameRate::from_f64(*fps).is_none() {
-                out.push(format!(
-                    "synthetic fps {fps} is not a usable frame rate (more than 0, at most {})",
-                    FrameRate::MAX_FPS
-                ));
-            }
-            if *subjects > SyntheticPattern::MAX_SUBJECTS {
-                out.push(format!(
-                    "{subjects} synthetic subjects, at most {} allowed",
-                    SyntheticPattern::MAX_SUBJECTS
-                ));
-            }
-        }
-    }
-    out
 }
 
 /// True for non-empty ids of ASCII letters, digits, `-` and `_`.

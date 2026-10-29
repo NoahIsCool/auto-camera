@@ -23,6 +23,7 @@ id in backquotes (the check prints the ids it is missing), a licence, an
 |---|---|---|---|---|
 | `native:ffmpeg` | FFmpeg: the `ffmpeg` and `ffprobe` programs | LGPL-2.1-or-later; GPL-2.0-or-later when built with `--enable-gpl` (libx264 needs it); GPL-3.0-or-later with `--enable-version3` too | [FFmpeg `LICENSE.md`](https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md) | yes |
 | `native:caffeinate` | `caffeinate`, the macOS tool the app runs as `/usr/bin/caffeinate` to keep the Mac awake while program goes out | Part of macOS, under Apple's licence for macOS; Apple publishes its source under APSL-2.0 | [`caffeinate.c`](https://github.com/apple-oss-distributions/PowerManagement/blob/main/caffeinate/caffeinate.c), [PowerManagement `APPLE_LICENSE`](https://github.com/apple-oss-distributions/PowerManagement/blob/main/APPLE_LICENSE) | partly |
+| `native:system_profiler` | `system_profiler`, the macOS tool the app runs as `/usr/sbin/system_profiler` to list the connected cameras and their unique IDs before a capture source opens | Part of macOS, under Apple's licence for macOS | [Apple software licence agreements](https://www.apple.com/legal/sla/) | no |
 | `native:onnxruntime` | ONNX Runtime 1.28.0, linked into the app with `--features onnx` | MIT, and the licences of the code it includes | [`LICENSE`](https://github.com/microsoft/onnxruntime/blob/v1.28.0/LICENSE), [`ThirdPartyNotices.txt`](https://github.com/microsoft/onnxruntime/blob/v1.28.0/ThirdPartyNotices.txt) | partly |
 | `native:python` | CPython, the interpreter the SAM sidecar's `command` names (the user's own, 3.10 or newer, unpinned) | PSF-2.0; the code it includes under its own licences | [CPython `LICENSE`](https://github.com/python/cpython/blob/main/LICENSE), [incorporated software, `Doc/license.rst`](https://github.com/python/cpython/blob/main/Doc/license.rst) | yes |
 | `model:owlv2-split-onnx` | OWLv2 base patch16 ensemble weights (Google), exported to ONNX, with their tokenizer | Apache-2.0 | [scenic OWL-ViT README, License](https://github.com/google-research/scenic/blob/main/scenic/projects/owl_vit/README.md#license), [`LICENSE`](https://github.com/google-research/scenic/blob/main/LICENSE) | partly |
@@ -87,6 +88,28 @@ built from.
 
 **Obligations.** None: the app runs the copy that comes with macOS as a
 separate program, and neither ships, links nor changes it.
+
+## system_profiler
+
+**What and where from.** On macOS a capture source finds its camera by
+unique ID, before every open, from the list `system_profiler
+SPCameraDataType -json` prints (`ac-sources`' `SystemInventory`): the copy
+macOS installs at `/usr/sbin/system_profiler`, run by that path. It is
+part of the operating system; Auto Camera ships none, and runs nothing in
+its place elsewhere (a capture source then stays offline, saying it needs
+macOS).
+
+**Licence.** The program comes with macOS, under Apple's licence for
+macOS; Apple lists its software licence agreements at the link in the
+table.
+
+**Not verified:** that page could not be reached from where this was
+written (2026-10-29), so the row is `no`, and whether Apple publishes the
+program's source was not checked.
+
+**Obligations.** None: the app runs the copy that comes with macOS as a
+separate program and reads what it prints, and neither ships, links nor
+changes it.
 
 ## ONNX Runtime
 

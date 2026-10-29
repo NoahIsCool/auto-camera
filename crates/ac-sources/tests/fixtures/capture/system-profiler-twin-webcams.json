@@ -1,0 +1,19 @@
+{
+  "SPCameraDataType" : [
+    {
+      "_name" : "FaceTime HD Camera",
+      "spcamera_model-id" : "FaceTime HD Camera",
+      "spcamera_unique-id" : "47B4B64B-7067-4B9C-AD2B-AE273A71F4B5"
+    },
+    {
+      "_name" : "USB Camera",
+      "spcamera_model-id" : "UVC Camera VendorID_3141 ProductID_25446",
+      "spcamera_unique-id" : "0x141000000c456366"
+    },
+    {
+      "_name" : "USB Camera",
+      "spcamera_model-id" : "UVC Camera VendorID_3141 ProductID_25446",
+      "spcamera_unique-id" : "0x142000000c456366"
+    }
+  ]
+}

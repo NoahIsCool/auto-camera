@@ -16,11 +16,12 @@
 //!   another crate checks);
 //! * **sources**: each file source's video, and each audio input's file,
 //!   is a readable file;
-//! * **ffmpeg**: `output.ffmpeg -version` runs, and with file sources (or
-//!   audio inputs) so do
-//!   the ffmpeg and ffprobe they decode with (`AC_FFMPEG`, `AC_FFPROBE`).
-//!   Like the program itself, the check runs a tool as named: a bare name
-//!   from `PATH`, a relative path from the working folder;
+//! * **ffmpeg**: `output.ffmpeg -version` runs, with file sources (or
+//!   audio inputs) so do the ffmpeg and ffprobe they decode with
+//!   (`AC_FFMPEG`, `AC_FFPROBE`), and with capture sources the ffmpeg that
+//!   lists and captures their cameras (the same `AC_FFMPEG`; they need no
+//!   ffprobe). Like the program itself, the check runs a tool as named: a
+//!   bare name from `PATH`, a relative path from the working folder;
 //! * **the detector's files**: OWL's model, text encoder and tokenizer are
 //!   readable files, in a build with the `onnx` feature; a sidecar's
 //!   program is found and executable (in a venv, a link that still points
@@ -66,7 +67,10 @@ use ac_sources::{FfmpegTools, SourceConfig};
 
 use crate::config::{DetectorSettings, SidecarSettings, StudioConfig};
 
+mod decoders;
 mod system;
+
+use decoders::DecoderUsers;
 
 pub use system::SystemInspector;
 
@@ -167,7 +171,8 @@ pub trait Inspect {
     fn find_program(&self, name: &str) -> Option<PathBuf>;
     /// The text of a small file (a venv's `pyvenv.cfg`).
     fn read_text(&self, path: &Path) -> Result<String, String>;
-    /// The tools file sources decode with.
+    /// The tools file sources and audio inputs decode with, whose ffmpeg
+    /// capture sources also run.
     fn decoder_tools(&self) -> FfmpegTools;
 }
 
@@ -207,20 +212,24 @@ fn check_build(config: &StudioConfig, inspector: &dyn Inspect, onnx: bool) -> Re
         out: Readiness::default(),
     };
     c.config(config);
-    let mut file_sources = false;
+    let mut users = DecoderUsers::default();
     for s in &config.sources {
-        if let SourceConfig::File { path, .. } = &s.input {
-            file_sources = true;
-            c.file(&format!("source {:?}", s.id), path);
+        match &s.input {
+            SourceConfig::File { path, .. } => {
+                users.file_sources = true;
+                c.file(&format!("source {:?}", s.id), path);
+            }
+            SourceConfig::Capture { .. } => users.capture_sources = true,
+            SourceConfig::Synthetic { .. } => {}
         }
     }
     for a in &config.audio_inputs {
         if let Some(path) = a.input.path() {
-            file_sources = true;
+            users.audio_inputs = true;
             c.file(&format!("audio input {:?}", a.id), path);
         }
     }
-    c.tools(config, file_sources);
+    c.tools(config, users);
     match &config.detector {
         DetectorSettings::Owl {
             model,
@@ -334,23 +343,27 @@ impl Checker<'_> {
         self.problem(message);
     }
 
-    /// The ffmpeg tools: the output's, and the decoders when there are
-    /// file sources; a tool named twice is run once.
-    fn tools(&mut self, config: &StudioConfig, file_sources: bool) {
+    /// The ffmpeg tools: the output's, and the decoders' ffmpeg and
+    /// ffprobe when something in the studio runs them, named for what does
+    /// ([`DecoderUsers`]); a tool named twice is run once.
+    fn tools(&mut self, config: &StudioConfig, users: DecoderUsers) {
         // (what it is, where, how to name another one)
         let mut tools: Vec<(String, PathBuf, &str)> = Vec::new();
-        if file_sources {
+        if let Some(ffmpeg_users) = users.ffmpeg() {
             let decoders = self.inspector.decoder_tools();
             tools.push((
-                "file sources' ffmpeg (AC_FFMPEG)".into(),
+                format!("{ffmpeg_users} ffmpeg (AC_FFMPEG)"),
                 decoders.ffmpeg,
                 "AC_FFMPEG",
             ));
-            tools.push((
-                "file sources' ffprobe (AC_FFPROBE)".into(),
-                decoders.ffprobe,
-                "AC_FFPROBE",
-            ));
+            // ffprobe's users are some of ffmpeg's.
+            if let Some(ffprobe_users) = users.ffprobe() {
+                tools.push((
+                    format!("{ffprobe_users} ffprobe (AC_FFPROBE)"),
+                    decoders.ffprobe,
+                    "AC_FFPROBE",
+                ));
+            }
         }
         let output = &config.output.ffmpeg;
         match tools.iter_mut().find(|(_, path, _)| path == output) {

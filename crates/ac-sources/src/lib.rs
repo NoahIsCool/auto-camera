@@ -12,13 +12,17 @@
 //!   against FFmpeg's libraries, so the crate builds anywhere and runs wherever
 //!   an `ffmpeg` binary is installed, on macOS and Linux alike. It can play a
 //!   [`segment`] of the file as if it were a clip of its own.
+//! * [`CaptureSource`] reads a camera or capture device (a USB/UVC webcam,
+//!   an HDMI-to-USB dongle) through ffmpeg's avfoundation input on macOS,
+//!   in a requested mode, named by its unique ID, which is matched to
+//!   ffmpeg's current device index before every open ([`capture`]).
 //! * [`ClipReader`] decodes a file frame by frame on demand, with no clock and
 //!   no thread, for offline tools that step the engine on simulated time
 //!   ([`clip`]).
 //! * [`SyntheticSource`] renders a deterministic moving test pattern in pure
 //!   Rust and exposes the exact ground-truth box of every moving subject, for
 //!   demos and for testing everything downstream.
-//! * [`SupervisedSource`] keeps either on air: a source that fails (ffmpeg
+//! * [`SupervisedSource`] keeps any of them on air: a source that fails (ffmpeg
 //!   killed, a file not there yet) is reopened with a backoff of 0.5 s
 //!   doubling to 8 s, each connection a new *epoch* tagged on its frames,
 //!   with sequence numbers and PTS continuing across connections (see
@@ -50,6 +54,7 @@
 
 pub mod audio;
 pub mod audio_input;
+pub mod capture;
 pub mod clip;
 pub mod clock;
 pub mod config;
@@ -72,6 +77,7 @@ pub use audio_input::{
     FakeFeed, FeedState, Gap, SupervisedAudio, WavEncoding, fake_sample, open_audio_input,
     open_supervised_audio, write_fake_wav,
 };
+pub use capture::{CaptureFormat, CaptureOptions, CaptureSource, DeviceInventory, SystemInventory};
 pub use clip::{ClipOptions, ClipReader};
 pub use clock::{Clock, MAX_SLEEP_SLICE, VirtualClock, WallClock};
 pub use config::{SourceConfig, open_source, open_source_with_clock};

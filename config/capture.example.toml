@@ -1,0 +1,47 @@
+# A studio fed by a camera: a USB/UVC webcam or an HDMI-to-USB capture
+# dongle on macOS, read through ffmpeg's avfoundation input.
+#
+# Requires macOS and an ffmpeg built with avfoundation (Homebrew's is):
+#
+#   cargo run -p auto-camera -- --config config/capture.example.toml
+#
+# A camera is named by its unique ID, never by ffmpeg's device number, which
+# moves when cameras are plugged or unplugged. List the IDs with
+#
+#   system_profiler SPCameraDataType
+#
+# ("Unique ID: 0x14200000046d085e"). macOS builds a USB camera's ID from the
+# port it is plugged into, so plug it back into the same port. A camera that
+# is not connected leaves its source OFFLINE with the IDs of the cameras that
+# are, and it comes on air within seconds of being plugged in.
+
+# The layout this file is written in (README, "Studio configuration").
+schema = 1
+
+[[sources]]
+id = "cam-1"
+name = "Stage"
+kind = "capture"
+unique_id = "0x14200000046d085e"
+# The mode to ask for. A mode the camera does not offer leaves the source
+# OFFLINE with ffmpeg's answer as its error: the reason, then the modes the
+# camera has (up to 64 lines of them).
+width = 1280
+height = 720
+fps = 30
+# Optional; one of ffmpeg's avfoundation pixel formats (uyvy422, yuyv422,
+# nv12, ...). Without it uyvy422 is asked for, which macOS offers for
+# webcams and capture dongles; the picture is converted anyway.
+# pixel_format = "nv12"
+
+[detector]
+kind = "none"
+
+[director]
+mode = "suggest"
+
+[output]
+width = 1280
+height = 720
+fps = 30
+record_path = "recordings/capture.mp4"

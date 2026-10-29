@@ -72,7 +72,8 @@ enum Kind {
 
 impl Input {
     /// The input of source `id` configured as `config`: a pattern for a
-    /// synthetic source, a clip (with its segment and looping) for a file.
+    /// synthetic source, a clip (with its segment and looping) for a file;
+    /// an error for a camera.
     pub fn open(id: SourceId, config: &SourceConfig) -> Result<Self, MediaError> {
         match config {
             SourceConfig::Synthetic {
@@ -88,6 +89,10 @@ impl Input {
                 let reader = ClipReader::from_config(id, config)?;
                 Ok(Self::clip(reader, *loop_playback))
             }
+            SourceConfig::Capture { .. } => Err(MediaError::Open(format!(
+                "source {}: a capture source is a live camera, which simulated time cannot replay",
+                id.0
+            ))),
         }
     }
 
@@ -263,5 +268,14 @@ mod tests {
             subjects: 1,
         };
         assert!(Input::open(SourceId("s".into()), &bad).is_err());
+        let camera = SourceConfig::Capture {
+            unique_id: "0x1".into(),
+            width: 64,
+            height: 36,
+            fps: 30.0,
+            pixel_format: None,
+        };
+        let err = Input::open(SourceId("cam".into()), &camera).unwrap_err();
+        assert!(err.to_string().contains("live camera"), "{err}");
     }
 }

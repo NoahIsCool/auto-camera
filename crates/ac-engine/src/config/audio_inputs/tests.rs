@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 use ac_sources::SourceConfig;
 
+use crate::config::SourceEntry;
+
 use super::*;
 
 /// A studio with one synthetic source "stage".
@@ -210,6 +212,33 @@ fn the_audio_source_names_a_source_or_an_audio_input() {
             vec!["output.audio_source \"nope\" is not a source or audio input id"]
         );
     }
+}
+
+#[test]
+fn a_camera_is_refused_as_the_audio_source() {
+    let mut config = studio();
+    config.sources.push(SourceEntry {
+        id: "cam-1".into(),
+        name: None,
+        input: SourceConfig::Capture {
+            unique_id: "0x14200000046d085e".into(),
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            pixel_format: None,
+        },
+    });
+    config.audio_inputs = vec![board(None, None)];
+    config.output.audio_source = Some("board".into());
+    assert!(config.problems().is_empty(), "{:?}", config.problems());
+    config.output.audio_source = Some("cam-1".into());
+    assert_eq!(
+        config.problems(),
+        vec![
+            "output.audio_source \"cam-1\" is a camera, whose audio is not captured; \
+             name an audio input ([[audio_inputs]]) for program audio"
+        ]
+    );
 }
 
 #[test]

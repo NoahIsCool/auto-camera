@@ -213,6 +213,84 @@ fn file_sources_need_their_video_and_the_decoding_tools() {
     );
 }
 
+/// A studio with one capture source, `ffmpeg` at `/bin/ffmpeg`, and `more`
+/// after it.
+fn capture_studio(more: &str) -> StudioConfig {
+    let text = format!(
+        "schema = 1\n[[sources]]\nid = \"cam-1\"\nkind = \"capture\"\n\
+         unique_id = \"0x14200000046d085e\"\nwidth = 1280\nheight = 720\nfps = 30\n{more}"
+    );
+    with_ffmpeg(StudioConfig::parse(&text, false).unwrap())
+}
+
+#[test]
+fn capture_sources_need_the_ffmpeg_they_list_and_capture_with() {
+    // The output encodes with another ffmpeg, so the decoders' is run apart.
+    let mut c = capture_studio("");
+    c.output.ffmpeg = "/opt/ffmpeg/bin/ffmpeg".into();
+    let fake = Fake::default()
+        .tool("/opt/ffmpeg/bin/ffmpeg")
+        .tool("/bin/ffmpeg");
+    let r = check_build(&c, &fake, false);
+    assert!(r.is_ready(), "{r:?}");
+    assert_eq!(
+        *fake.ran.borrow(),
+        [
+            PathBuf::from("/bin/ffmpeg"),
+            "/opt/ffmpeg/bin/ffmpeg".into()
+        ],
+        "no ffprobe: a capture source does not probe"
+    );
+    let ok: Vec<&str> = r.at(Level::Ok).collect();
+    assert!(
+        ok.contains(
+            &"capture sources' ffmpeg (AC_FFMPEG): /bin/ffmpeg runs (ffmpeg version 7.1-test)"
+        ),
+        "{ok:?}"
+    );
+    // A missing one is a problem, not a camera that stays offline.
+    let r = check_build(&c, &Fake::default().tool("/opt/ffmpeg/bin/ffmpeg"), false);
+    assert_eq!(
+        only_problem(&r),
+        "capture sources' ffmpeg (AC_FFMPEG): /bin/ffmpeg does not run: not found; install \
+         ffmpeg, or name it with AC_FFMPEG"
+    );
+    // The same ffmpeg for both is run once, and named for both.
+    let fake = Fake::default().tool("/bin/ffmpeg");
+    let r = check_build(&capture_studio(""), &fake, false);
+    assert!(r.is_ready(), "{r:?}");
+    assert_eq!(fake.ran.borrow().len(), 1);
+    assert!(
+        r.at(Level::Ok)
+            .any(|m| m.starts_with("output.ffmpeg and capture sources' ffmpeg (AC_FFMPEG):")),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn file_and_capture_sources_share_the_decoders_ffmpeg() {
+    let text = "schema = 1\n[[sources]]\nid = \"cam-1\"\nkind = \"file\"\n\
+                path = \"/studio/media/show.mp4\"\n[[sources]]\nid = \"cam-2\"\n\
+                kind = \"capture\"\nunique_id = \"0x1\"\nwidth = 64\nheight = 36\nfps = 30\n";
+    let c = with_ffmpeg(StudioConfig::parse(text, false).unwrap());
+    let fake = owl_machine();
+    let r = check_build(&c, &fake, false);
+    assert!(r.is_ready(), "{r:?}");
+    assert_eq!(fake.ran.borrow().len(), 2, "ffmpeg once, ffprobe once");
+    let ok: Vec<&str> = r.at(Level::Ok).collect();
+    assert!(
+        ok.iter()
+            .any(|m| m
+                .starts_with("output.ffmpeg and file and capture sources' ffmpeg (AC_FFMPEG):")),
+        "{ok:?}"
+    );
+    assert!(
+        ok.iter()
+            .any(|m| m.starts_with("file sources' ffprobe (AC_FFPROBE):")),
+        "{ok:?}"
+    );
+}
+
 #[test]
 fn an_owl_detector_needs_its_files_and_the_onnx_build() {
     let c = file_studio(OWL);
@@ -651,6 +729,7 @@ fn every_example_config_is_ready_on_a_machine_with_its_files() {
         format!("home = {python_home}\nversion = 3.12.4\n"),
     );
     for name in [
+        "capture.example.toml",
         "demo.toml",
         "file-source.example.toml",
         "sam3-sidecar.example.toml",
@@ -731,11 +810,38 @@ fn an_audio_input_needs_its_file_and_the_decoding_tools() {
     );
     assert!(
         ok.iter()
-            .any(|m| m.starts_with("file sources' ffprobe (AC_FFPROBE): /bin/ffprobe runs")),
+            .any(|m| m.starts_with("audio inputs' ffprobe (AC_FFPROBE): /bin/ffprobe runs")),
         "{ok:?}"
     );
     assert_eq!(
         only_problem(&check_build(&c, &tools(), false)),
         "audio input \"board\": /studio/media/board.wav does not exist"
     );
+}
+
+#[test]
+fn cameras_and_a_board_name_only_themselves_for_the_decoders_tools() {
+    let c = capture_studio(
+        "[[audio_inputs]]\nid = \"board\"\nkind = \"file\"\npath = \"/studio/media/board.wav\"\n",
+    );
+    let fake = Fake::default()
+        .tool("/bin/ffmpeg")
+        .tool("/bin/ffprobe")
+        .file("/studio/media/board.wav");
+    let r = check_build(&c, &fake, false);
+    assert!(r.is_ready(), "{r:?}");
+    assert_eq!(fake.ran.borrow().len(), 2, "ffmpeg once, ffprobe once");
+    let ok: Vec<&str> = r.at(Level::Ok).collect();
+    assert!(
+        ok.iter().any(|m| m.starts_with(
+            "output.ffmpeg and capture sources' and audio inputs' ffmpeg (AC_FFMPEG):"
+        )),
+        "{ok:?}"
+    );
+    assert!(
+        ok.iter()
+            .any(|m| m.starts_with("audio inputs' ffprobe (AC_FFPROBE):")),
+        "{ok:?}"
+    );
+    assert!(!ok.iter().any(|m| m.contains("file sources'")), "{ok:?}");
 }
