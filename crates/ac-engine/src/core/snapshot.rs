@@ -109,6 +109,7 @@ impl EngineCore {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 state: s.state,
+                error: s.error.clone(),
                 width: s.info.width,
                 height: s.info.height,
                 nominal_fps: s.info.fps,

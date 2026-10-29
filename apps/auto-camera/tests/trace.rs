@@ -1,7 +1,8 @@
 //! `--trace` end to end: the built binary runs the demo studio (synthetic,
 //! no camera, model or network) headless for 2 s and writes one JSON line
 //! per tick, as many as the summary's tick count; and a studio whose engine
-//! does not start, headless or in the window, leaves no trace behind.
+//! does not start (a detector sidecar whose program is missing), headless
+//! or in the window, leaves no trace behind.
 
 use std::ffi::OsStr;
 use std::io::Read;
@@ -124,14 +125,17 @@ fn an_existing_trace_file_is_refused() {
 
 #[test]
 fn an_engine_that_does_not_start_leaves_no_trace_to_refuse_the_next_run() {
-    // A file source whose file does not exist: the engine fails to open it
-    // when it starts, so the window mode exits before any window opens.
+    // A detector sidecar whose program does not exist: the engine refuses
+    // it when it starts, before its first tick, so the window mode exits
+    // before any window opens. A missing source file would not do: that
+    // source starts offline and is retried, so the engine starts and ticks.
     let studio = temp_path("unstartable.toml");
-    let missing = temp_path("missing.mp4");
+    let missing = temp_path("missing-python");
     std::fs::write(
         &studio,
         format!(
-            "[[sources]]\nid = \"stage\"\nkind = \"file\"\npath = {:?}\n\n[detector]\nkind = \"none\"\n",
+            "[[sources]]\nid = \"stage\"\nkind = \"synthetic\"\nwidth = 320\nheight = 180\n\
+             fps = 30\nsubjects = 1\n\n[detector]\nkind = \"sidecar\"\ncommand = [{:?}]\n",
             missing.display().to_string()
         ),
     )
@@ -167,7 +171,7 @@ fn an_engine_that_does_not_start_leaves_no_trace_to_refuse_the_next_run() {
         } else {
             log
         };
-        assert!(error.contains("cannot open"), "{case}: {error}");
+        assert!(error.contains("program not found"), "{case}: {error}");
         assert!(!error.contains("the trace"), "{case}: {error}");
         assert!(!leftover, "{case} left its empty trace");
     }

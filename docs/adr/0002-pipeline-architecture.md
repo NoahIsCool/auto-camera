@@ -14,7 +14,7 @@ one orchestrator, shared locks and unbounded queues, and it stalled and
 leaked under load. The rules from CLAUDE.md apply: one owner per piece of
 state, message passing and immutable snapshots instead of shared locks,
 latest-frame mailboxes, stale results dropped, every frame tagged with
-source, sequence number and PTS.
+source, connection epoch, sequence number and PTS.
 
 ## Decision
 
@@ -29,6 +29,7 @@ channels, and the operator sees it only through immutable snapshots.
 | UI (`main`) or headless runner | `apps/auto-camera` | Reads snapshots, posts commands. Never touches engine state. |
 | `ac-engine` | `Engine` | The master clock loop: applies commands, runs one `EngineCore::tick` per output frame, pushes program to the encoder, publishes a snapshot. |
 | source workers (`ac-synthetic-<id>`, file decoders) | each `VideoSource` | Decode or generate frames at the source rate; publish into the source's frame mailbox and a small bounded audio queue. |
+| `ac-supervise-<id>` | `SupervisedSource`, one per source | Owns the source's current connection and passes its frames (tagged with the connection's epoch) and audio on; when the connection fails, stops it, reaps its children and opens it again with a backoff of 0.5 s doubling to 8 s (below). |
 | `ac-discovery-<source>` | `DiscoveryWorker`, one per source with a detector | Loads the detector (a CoreML compile can take minutes), then runs it on the newest frame it was handed. The OWL detector returns whole people, each tagged with the query whose object they hold (`ac_vision::matching`). |
 | `ac-output-start`, `ac-output-finish` | `OutputController` | Start ffmpeg (probing encoders) and finish it (flushing the recording) off the engine thread, since both can take seconds. |
 | `ac-output-video/-audio/-progress/-stderr` and the `ffmpeg` child | `ProgramEncoder` | Feed and watch the single program encode (RTMP and MP4 from one encode, ADR 0001). |
@@ -59,12 +60,13 @@ Two clocks, never mixed:
 
 - The **media clock** of each source is its frames' PTS. Tracking,
   subject identity and staleness run on it: a detection result is dropped
-  as *superseded* when a newer frame's result was already applied, and as
-  *too old* when its frame's PTS is more than `discovery.max_result_age_s`
-  behind the source's newest frame. A subject's track observations count
-  only while a detection has seen it within `discovery.max_undetected_s`
-  (detections vouch for existence; the tracker alone cannot keep a subject
-  alive).
+  as *old epoch* when its frame is from an earlier connection than the
+  source's newest frame, as *superseded* when a newer frame's result was
+  already applied, and as *too old* when its frame's PTS is more than
+  `discovery.max_result_age_s` behind the source's newest frame. A
+  subject's track observations count only while a detection has seen it
+  within `discovery.max_undetected_s` (detections vouch for existence; the
+  tracker alone cannot keep a subject alive).
 - The **master clock** is the tick index times the output frame period.
   Framing steps, transitions, the director's dwell and hold times and the
   encoder's constant frame rate all run on it, and program audio is paced
@@ -103,6 +105,25 @@ so commands name shots, not indices. The subjects of the program and preview
 shots are *protected*: they are not retired, and their shots stay listed
 even after their query is removed or they are hidden, until they leave the
 air.
+
+### Sources that drop out
+
+Every source runs under a supervisor (`ac_sources::supervisor`). A
+connection that stops with an error (ffmpeg killed or crashed, a file not
+there yet) makes the source `Offline`, with the error in its snapshot; after
+the backoff it is `Reconnecting`, and `Running` again from its first frame,
+so an input that comes back is on air at most 8 s later plus the time to
+open it (spec C.3). Each connection is a new *epoch*, counted from 0; the
+supervisor restamps frames so sequence numbers and PTS keep increasing
+across connections, and the time away counts as elapsed media time. The
+core only compares epochs: a source that is not delivering is unavailable,
+and a detection about an older epoch's picture is dropped however recent
+its PTS. A source that cannot be opened at start does not stop the engine;
+it starts offline, described by its config (a file by the program size at
+an unknown rate), and the other sources run meanwhile. Once it delivers,
+the supervisor describes it as its input does: the core takes the size of
+its first frame and the rate of that frame's connection, and an output
+started from then on carries its audio.
 
 ### Shutdown
 

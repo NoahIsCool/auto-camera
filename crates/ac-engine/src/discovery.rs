@@ -8,13 +8,15 @@
 //! newest frame through a single-slot mailbox, so the detector always works
 //! on the newest frame and requests never queue. The
 //! worker answers on a channel with a [`DiscoveryResult`] carrying the frame
-//! it looked at, so results are tagged with that frame's source, sequence
-//! number and PTS, and the ids of the queries it looked for (a query added
-//! while the pass ran was not looked for, so its absence from the result
-//! says nothing about it).
+//! it looked at, so results are tagged with that frame's source, epoch,
+//! sequence number and PTS, and the ids of the queries it looked for (a
+//! query added while the pass ran was not looked for, so its absence from
+//! the result says nothing about it).
 //!
 //! Results are applied on the engine thread unless they are stale
-//! ([`staleness`]): computed on a frame older than one already applied, or
+//! ([`staleness`]): computed on a frame of an older epoch than the source's
+//! newest frame (the source reconnected since, and its picture may be
+//! another one), on a frame older than one already applied, or on a frame
 //! older than `max_result_age` relative to the newest frame of the source
 //! (the subjects have moved on, and a late box would yank shots backwards).
 //! Detections for queries removed in the meantime are filtered out when
@@ -99,26 +101,34 @@ pub struct DiscoveryResult {
 /// Why a result is not applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Staleness {
+    /// The frame is of an older epoch than the newest frame: the boxes
+    /// describe the picture of a connection that is gone.
+    OldEpoch,
     /// A result for this or a newer frame was already applied.
     Superseded,
     /// The frame is older than the age limit relative to the newest frame.
     TooOld,
 }
 
-/// Decides whether a result computed on frame `(seq, pts)` is stale; see the
-/// module docs. `last_applied` is the sequence number of the newest frame
-/// whose detections were applied, `newest_pts` the PTS of the newest frame.
+/// Decides whether a result computed on frame `(epoch, seq, pts)` is stale;
+/// see the module docs. `last_applied` is the sequence number of the newest
+/// frame whose detections were applied, `newest` the epoch and PTS of the
+/// newest frame.
 pub fn staleness(
+    epoch: u64,
     seq: u64,
     pts: Duration,
     last_applied: Option<u64>,
-    newest_pts: Option<Duration>,
+    newest: Option<(u64, Duration)>,
     max_age: Duration,
 ) -> Option<Staleness> {
+    if newest.is_some_and(|(e, _)| epoch < e) {
+        return Some(Staleness::OldEpoch);
+    }
     if last_applied.is_some_and(|s| seq <= s) {
         return Some(Staleness::Superseded);
     }
-    if newest_pts.is_some_and(|n| n.saturating_sub(pts) > max_age) {
+    if newest.is_some_and(|(_, n)| n.saturating_sub(pts) > max_age) {
         return Some(Staleness::TooOld);
     }
     None
@@ -376,18 +386,25 @@ mod tests {
     #[test]
     fn staleness_rules() {
         let age = ms(2000);
-        assert_eq!(staleness(10, ms(300), None, Some(ms(400)), age), None);
-        assert_eq!(staleness(10, ms(300), Some(9), None, age), None);
+        let newest = |v| Some((0, ms(v)));
+        assert_eq!(staleness(0, 10, ms(300), None, newest(400), age), None);
+        assert_eq!(staleness(0, 10, ms(300), Some(9), None, age), None);
         assert_eq!(
-            staleness(10, ms(300), Some(10), Some(ms(300)), age),
+            staleness(0, 10, ms(300), Some(10), newest(300), age),
             Some(Staleness::Superseded)
         );
         assert_eq!(
-            staleness(10, ms(300), None, Some(ms(2301)), age),
+            staleness(0, 10, ms(300), None, newest(2301), age),
             Some(Staleness::TooOld)
         );
         // A result newer than the newest frame seen is fine.
-        assert_eq!(staleness(10, ms(900), None, Some(ms(300)), age), None);
+        assert_eq!(staleness(0, 10, ms(900), None, newest(300), age), None);
+        // The source reconnected since: dropped however recent; a result of
+        // the newest epoch is judged as before.
+        let reconnected = Some((1, ms(310)));
+        let old = staleness(0, 10, ms(300), None, reconnected, age);
+        assert_eq!(old, Some(Staleness::OldEpoch));
+        assert_eq!(staleness(1, 11, ms(310), Some(10), reconnected, age), None);
     }
 
     #[test]

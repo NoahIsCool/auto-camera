@@ -20,8 +20,12 @@
 //! In either mode `--trace PATH` writes the engine's per-tick trace as JSON
 //! Lines ([`trace`]): the file is created before the engine starts, the
 //! engine is given its channel, and the app waits for the last line once
-//! the engine has stopped. A run whose engine does not start removes the
-//! empty file, so that the same command works once the cause is fixed.
+//! the engine has stopped. A run whose engine does not start (a setup no
+//! retry mends, such as a detector sidecar whose program is missing)
+//! removes the empty file, so that the same command works once the cause
+//! is fixed. A source that cannot be opened does not stop the engine (it
+//! starts offline and is retried), so a run with a missing source file
+//! ticks and, like every run that ticked, keeps its trace.
 //!
 //! Exit status: 0 on success, 1 when the engine, the output or the trace
 //! failed, 2 for usage and configuration errors, 130 after a termination

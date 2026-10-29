@@ -31,7 +31,7 @@ use ac_core::SourceId;
 use ac_media::AudioBlock;
 
 use crate::file::Shared;
-use crate::process::{Respawner, Spawned, read_full};
+use crate::process::{END_GRACE, Respawner, Spawned, read_full};
 use crate::status::lock;
 
 /// Target block length in milliseconds.
@@ -204,7 +204,8 @@ impl AudioWorker {
         self.decoder.discard(&shared.children);
     }
 
-    /// Plays pass `pass` from `decoder`. Returns `false` when stopped.
+    /// Plays pass `pass` from `decoder`. Returns `false` when stopped, or
+    /// when the decoder was killed or crashed (the source then fails).
     fn play_pass(
         &mut self,
         shared: &Shared,
@@ -215,9 +216,12 @@ impl AudioWorker {
         let Spawned { key, mut stdout } = decoder;
         let frame_bytes = self.clock.frame_bytes();
         let mut stopped = false;
+        // The decoder's output ended by itself, rather than being cut off.
+        let mut ended = false;
         while let Ok(n) = read_full(&mut stdout, bytes) {
             let frames = n / frame_bytes;
             if frames == 0 {
+                ended = true;
                 break;
             }
             let end = shared
@@ -228,15 +232,31 @@ impl AudioWorker {
                 stopped = true;
                 break;
             }
-            // Stop at end of input, or when the video's pass ended first and
-            // the rest of this pass is to be discarded.
-            if keep < frames || n < bytes.len() {
+            // Stop when the video's pass ended first and the rest of this
+            // pass is to be discarded, or at end of input.
+            if keep < frames {
+                break;
+            }
+            if n < bytes.len() {
+                ended = true;
                 break;
             }
         }
         drop(stdout);
-        // Whether it finished, was trimmed or is stopping, this decoder is
-        // done; its exit status says nothing the video worker cannot.
+        // A decoder whose output ended has exited: with success at end of
+        // input, otherwise it was killed or crashed and the input is lost,
+        // which fails the whole source (see `crate::file`). One that was cut
+        // off, trimmed or stopped is simply done.
+        if ended
+            && let Some(status) = shared.children.finish_within(key, END_GRACE)
+            && !status.success()
+            && !shared.stopping()
+        {
+            shared.fail(format!(
+                "the audio decoder exited during playback ({status})"
+            ));
+            return false;
+        }
         shared.children.kill(key);
         !stopped
     }

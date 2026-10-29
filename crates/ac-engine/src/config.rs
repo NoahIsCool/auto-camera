@@ -300,6 +300,11 @@ impl StudioConfig {
             if !ids.insert(s.id.as_str()) {
                 return bad(format!("duplicate source id {:?}", s.id));
             }
+            // A source that fails to open starts offline and is retried, so
+            // a mistake no retry can mend is caught here instead.
+            if let Err(e) = s.input.validate() {
+                return bad(format!("source {:?}: {e}", s.id));
+            }
             if matches!(self.detector, DetectorSettings::Synthetic { .. })
                 && !matches!(s.input, SourceConfig::Synthetic { .. })
             {
