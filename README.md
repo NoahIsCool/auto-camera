@@ -320,7 +320,7 @@ than for a show; choosing a model per query comes later.
 | `ac-switcher` | Preview/program, cut/auto/T-bar transitions |
 | `ac-compositor` | CPU program compositor |
 | `ac-output` | One ffmpeg encode to RTMP and fragmented MP4 |
-| `ac-eval` | Framing-quality metrics |
+| `ac-eval` | Evaluation-set label files (versioned JSON schema, validator with field paths, MOT import) and framing-quality metrics |
 | `ac-engine` | The runtime that wires them together (ADR 0002) |
 | `apps/auto-camera` | Operator window and headless runner |
 
