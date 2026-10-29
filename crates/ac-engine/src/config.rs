@@ -24,6 +24,10 @@
 //! an error, and an older one is upgraded by the migration steps in
 //! `schema` before it is deserialized.
 //!
+//! A show file ([`crate::show`]), which the app saves, is read as the
+//! studio file it names with the show laid over it, so every loader here
+//! opens either kind of file (`load`).
+//!
 //! Sections mirror the pipeline: `sources` (any [`SourceConfig`] plus an id
 //! and a name), `queries` (prompts with their framing presets), `lexicon`
 //! (additions to the prompt parser's shot, role and person words),
@@ -114,11 +118,12 @@ use crate::queries::PromptReader;
 mod detector;
 mod director;
 mod discovery;
+mod load;
 mod monitors;
 mod output;
 mod partial;
 mod queries;
-mod schema;
+pub(crate) mod schema;
 mod sidecar;
 mod sources;
 mod subjects;
@@ -136,6 +141,7 @@ pub use sources::SourceEntry;
 pub use subjects::SubjectSettings;
 pub use switcher::SwitcherSettings;
 
+pub(crate) use load::open_show;
 use partial::{partial, validate_framing};
 
 // The tests (`config/tests.rs`) name `QueryId` through `use super::*`; it
@@ -152,6 +158,15 @@ pub struct LoadedConfig {
     /// Things to fix that did not stop the load (a missing `schema` key),
     /// each a sentence starting with the file's path.
     pub warnings: Vec<String>,
+    /// The studio file read: the file itself, or the one a show names.
+    pub studio: PathBuf,
+    /// The file was a show, laid over `studio`.
+    pub show: bool,
+    /// The studio file's config as read, before a show was laid over it
+    /// (so `config` itself, unvalidated, when the file is a studio file):
+    /// what a show saved from this config leaves out where it only repeats
+    /// it ([`crate::Show::leave_out_repeats`]).
+    pub base: StudioConfig,
 }
 
 /// Errors from loading or validating a [`StudioConfig`].
@@ -277,28 +292,12 @@ impl StudioConfig {
         Ok(loaded)
     }
 
-    /// Reads and parses the file at `path` and resolves its relative paths,
-    /// without validating the values, so that the readiness check can list
-    /// every problem ([`Self::problems`]) rather than the first.
+    /// Reads and parses the file at `path` (a studio file, or a show over
+    /// the one it names) and resolves its relative paths, without
+    /// validating the values, so that the readiness check can list every
+    /// problem ([`Self::problems`]) rather than the first.
     pub fn read_file(path: &Path) -> Result<LoadedConfig, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.into(),
-            source,
-        })?;
-        let json = path.extension().is_some_and(|e| e == "json");
-        let (mut config, warnings) =
-            Self::parse_with_warnings(&text, json).map_err(|message| ConfigError::Parse {
-                path: path.into(),
-                message,
-            })?;
-        if let Some(dir) = path.parent() {
-            config.resolve_paths(dir);
-        }
-        let warnings = warnings
-            .into_iter()
-            .map(|w| format!("{}: {w}", path.display()))
-            .collect();
-        Ok(LoadedConfig { config, warnings })
+        load::read_file(path)
     }
 
     /// Parses `text` as JSON or TOML without validating it; the warnings

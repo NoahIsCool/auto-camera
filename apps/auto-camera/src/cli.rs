@@ -1,7 +1,7 @@
 //! Command-line interface.
 //!
 //! ```text
-//! auto-camera [--config PATH] [--trace PATH]                    # operator window
+//! auto-camera [--config PATH] [--trace PATH] [--save-show PATH]  # operator window
 //! auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
 //! auto-camera [--config PATH] --check                           # readiness check
 //! ```
@@ -16,9 +16,12 @@
 //! both other modes: it writes the engine's per-tick trace as JSON Lines
 //! ([`crate::trace`]). So does `--record-detections`: it writes every
 //! detector pass the engine applied, for the eval runner to replay
-//! ([`crate::detections`]). The config path defaults to the demo studio
-//! relative to the working directory, which is the repository root under
-//! `cargo run`.
+//! ([`crate::detections`]). `--save-show` is the window's alone: the show
+//! file its Save show writes ([`crate::show`]); a headless run changes
+//! nothing a show holds, so it has nothing to save and refuses the flag.
+//! `--config` opens a studio file or a saved show. The config path
+//! defaults to the demo studio relative to the working directory, which is
+//! the repository root under `cargo run`.
 
 use std::path::PathBuf;
 
@@ -38,7 +41,8 @@ const MAX_SECONDS: f64 = 86_400.0;
     about = "AI camera crew: framed virtual shots, preview/program switching, RTMP and MP4 output"
 )]
 pub struct Cli {
-    /// Studio configuration: TOML, or JSON when the file ends in `.json`.
+    /// Studio configuration, or a saved show: TOML, or JSON when the file
+    /// ends in `.json`.
     #[arg(long, value_name = "PATH", default_value = DEFAULT_CONFIG)]
     pub config: PathBuf,
     /// Run without a window for `--seconds` and print a JSON summary.
@@ -65,6 +69,11 @@ pub struct Cli {
     /// scores) to this file as JSON lines, for replay; it must not exist.
     #[arg(long, value_name = "PATH")]
     pub record_detections: Option<PathBuf>,
+    /// Save the show (queries, director, transition) to this file when
+    /// Save show is pressed in the window. Without it the window saves to
+    /// the show file it opened, or to the data dir's `shows` folder.
+    #[arg(long, value_name = "PATH", conflicts_with = "headless")]
+    pub save_show: Option<PathBuf>,
     /// Check the studio without starting it: list the problems with the
     /// config and the files, tools and folders it names, then exit 0 when
     /// there is none and 2 otherwise.
@@ -77,6 +86,7 @@ pub struct Cli {
             "trace",
             "record_detections",
             "log_dir",
+            "save_show",
         ]
     )]
     pub check: bool,
@@ -175,6 +185,31 @@ mod tests {
         let headless = parse(&["--headless", "--log-dir", "logs"]).unwrap();
         assert_eq!(headless.log_dir, Some(PathBuf::from("logs")));
         assert!(parse(&["--log-dir"]).is_err(), "the folder is required");
+    }
+
+    #[test]
+    fn the_window_takes_a_show_file_to_save_to() {
+        assert_eq!(parse(&[]).unwrap().save_show, None);
+        let window = parse(&["--save-show", "sunday.show.toml"]).unwrap();
+        assert_eq!(window.save_show, Some(PathBuf::from("sunday.show.toml")));
+        assert!(parse(&["--save-show"]).is_err(), "a path is required");
+        // A headless run changes nothing a show holds: nothing to save.
+        assert!(parse(&["--headless", "--save-show", "s.toml"]).is_err());
+        // A check starts no engine, so there is no show to save.
+        assert!(parse(&["--check", "--save-show", "s.toml"]).is_err());
+        // The window's other files go with it.
+        let all = parse(&[
+            "--save-show",
+            "s.toml",
+            "--log-dir",
+            "logs",
+            "--record-detections",
+            "passes.jsonl",
+        ])
+        .unwrap();
+        assert_eq!(all.save_show, Some(PathBuf::from("s.toml")));
+        assert_eq!(all.log_dir, Some(PathBuf::from("logs")));
+        assert_eq!(all.record_detections, Some(PathBuf::from("passes.jsonl")));
     }
 
     #[test]

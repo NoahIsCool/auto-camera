@@ -17,6 +17,13 @@
 //!   with the config and the files, tools and folders it names, so a show
 //!   does not find them at its start.
 //!
+//! `--config` opens a studio file or a show saved from one ([`show`]): the
+//! window's Save show writes the queries, director and transition to a
+//! show file (`--save-show PATH`, or a default one), which opens again as
+//! its studio file with the show laid over it. A `--save-show` path the
+//! window cannot save to (the studio file itself) is a usage error before
+//! anything starts.
+//!
 //! Ctrl-C, `SIGTERM` and `SIGHUP` shut the engine down as closing the
 //! window does ([`signals`]), so the detector sidecar never outlives the
 //! app; a second signal exits at once. Warnings about the config (a missing
@@ -52,6 +59,7 @@ mod cli;
 mod detections;
 mod headless;
 mod logs;
+mod show;
 mod signals;
 #[cfg(test)]
 mod testing;
@@ -82,8 +90,8 @@ fn main() -> ExitCode {
         eprintln!("auto-camera: {e}");
         tracing::error!("{e}");
     }
-    let (config, warnings) = match StudioConfig::load_with_warnings(&cli.config) {
-        Ok(loaded) => (loaded.config, loaded.warnings),
+    let loaded = match StudioConfig::load_with_warnings(&cli.config) {
+        Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("auto-camera: {e}");
             tracing::error!("{e}");
@@ -93,11 +101,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    for warning in &warnings {
+    for warning in &loaded.warnings {
         eprintln!("auto-camera: warning: {warning}");
         tracing::warn!("{warning}");
     }
-    log.studio(&cli.config, &config);
+    log.studio(&cli.config, &loaded);
     if cli.headless {
         let options = headless::HeadlessOptions {
             seconds: cli.seconds,
@@ -105,7 +113,7 @@ fn main() -> ExitCode {
             trace: cli.trace,
             record_detections: cli.record_detections,
         };
-        let summary = headless::run(config, &cli.config, &options, &quit);
+        let summary = headless::run(loaded.config, &cli.config, &options, &quit);
         match &summary.error {
             Some(e) => tracing::error!("headless run failed: {e}"),
             None => tracing::info!("headless run done"),
@@ -125,20 +133,40 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     } else {
+        let target = show::ShowTarget::for_run(
+            &loaded,
+            &cli.config,
+            cli.save_show.as_deref(),
+            show::shows_dir(),
+        );
+        if let (Some(_), Err(e)) = (&cli.save_show, &target) {
+            eprintln!("auto-camera: --save-show: {e}");
+            tracing::error!("--save-show: {e}");
+            return ExitCode::from(2);
+        }
         let passes = cli.record_detections.as_deref();
-        run_window(config, &warnings, cli.trace.as_deref(), passes, &quit)
+        run_window(
+            loaded.config,
+            &loaded.warnings,
+            cli.trace.as_deref(),
+            passes,
+            target,
+            &quit,
+        )
     }
 }
 
 /// Runs the operator window until it is closed, opening with the config's
-/// `warnings` in its status bar and writing the per-tick trace to `trace`
-/// and the applied detector passes to `log` if given; see the module docs
-/// for the exit status.
+/// `warnings` in its status bar, writing the per-tick trace to `trace` and
+/// the applied detector passes to `log` if given, and saving the show to
+/// `target` when the operator asks; see the module docs for the exit
+/// status.
 fn run_window(
     config: StudioConfig,
     warnings: &[String],
     trace: Option<&Path>,
     log: Option<&Path>,
+    target: Result<show::ShowTarget, String>,
     quit: &QuitSignal,
 ) -> ExitCode {
     let (trace, options) = match trace::attach(trace, EngineOptions::default()) {
@@ -159,7 +187,7 @@ fn run_window(
             return ExitCode::FAILURE;
         }
     };
-    let result = ui::run(config, options, warnings, quit.clone());
+    let result = ui::run(config, options, warnings, target, quit.clone());
     // The window's engine has stopped, and its senders with it. A window
     // that failed, most often because its engine did not start, leaves no
     // empty trace or log behind.

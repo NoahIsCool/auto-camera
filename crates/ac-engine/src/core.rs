@@ -127,6 +127,7 @@ mod directing;
 mod passes;
 mod render;
 mod shots;
+mod show;
 mod slot;
 mod snapshot;
 #[cfg(test)]
@@ -269,6 +270,9 @@ pub struct EngineCore {
     /// When the run of black program frames that ends with the newest
     /// began ([`render`]).
     program_black_since: Option<Duration>,
+    /// The sources and default recording path, as configured, for the
+    /// show export ([`show`]).
+    show_base: show::ShowBase,
 }
 
 impl EngineCore {
@@ -364,6 +368,7 @@ impl EngineCore {
             next_thumbs_at: Duration::ZERO,
             render_issues: Vec::new(),
             program_black_since: None,
+            show_base: show::ShowBase::of(config),
         };
         // Wide shots exist from the start, so they can be staged before the
         // first tick.

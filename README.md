@@ -317,10 +317,11 @@ another. The current file is `auto-camera.log`; at 8 MiB it moves to
 `auto-camera.1.log` and the four newest old files are kept. A second app
 running at the same time (the window beside a headless rehearsal) writes
 `auto-camera-2.log` instead, and so on up to four. One line per event, in
-UTC: the app's version and commit, the config's SHA-256 and the model
-files (path, size and time at once, their SHA-256 from a background
-thread, so a start never waits for gigabytes of weights), which lines
-start every file again after a rotation, then what the studio did
+UTC: the app's version and commit, the config's SHA-256 (for a show,
+also that of the studio file it lies over) and the model files (path,
+size and time at once, their SHA-256 from a background thread, so a
+start never waits for gigabytes of weights), which lines start every
+file again after a rotation, then what the studio did
 (sources starting, going offline and stopping, with the reason, detectors
 ready or failing, program changes, the output's lifecycle and the
 stream's connection), every line ffmpeg and the detector sidecar print on
@@ -328,13 +329,13 @@ stderr (stream key redacted; a source decoder's repeats of one complaint
 are written at most once a minute, with a count), the sidecar's starts,
 losses and restarts, and the warnings and errors the app prints on stderr
 (the config's warnings, a system not kept awake while live, a termination
-signal, an engine that failed or did not shut down cleanly). A panic
-writes `crash-<time>-<pid>-<n>.txt` next to the log, with the panic, its
-backtrace and a summary of the studio's newest state, and prints its path;
-each start keeps the 20 newest reports. Nothing is sent anywhere. A
-headless summary also reports the detector sidecar, when the studio has
-one (`sidecar`: `state`, `pid`, `model`, `spawns`, `restarts`,
-`failures` and the other host counters).
+signal, an engine that failed or did not shut down cleanly, a show saved
+or not as the window closed). A panic writes `crash-<time>-<pid>-<n>.txt`
+next to the log, with the panic, its backtrace and a summary of the
+studio's newest state, and prints its path; each start keeps the 20 newest
+reports. Nothing is sent anywhere. A headless summary also reports the
+detector sidecar, when the studio has one (`sidecar`: `state`, `pid`,
+`model`, `spawns`, `restarts`, `failures` and the other host counters).
 
 ## Studio configuration
 
@@ -433,6 +434,66 @@ ffmpeg killed or crashed) is reopened the same way. If it is the
 `audio_source`, an output started after it came on air carries its audio.
 Only a source setting no retry can fix (a synthetic pattern that cannot be
 made, a `max_width` below 2) stops the start.
+
+## Shows
+
+```sh
+auto-camera [--config PATH] [--save-show PATH]                # Save show in the window
+auto-camera --config sunday.show.toml [--check]               # open or check a show
+```
+
+A show is what the operator built on a studio: the queries (with their
+presets, literal flags and priorities, those added while it ran
+included), the director's mode and profile and the transition. The
+window's **Save show** button writes it to a show file; nothing is saved
+on a change, and a headless run, which changes none of these, saves
+nothing. A show file is TOML (or JSON, by extension) that starts with
+`show = 1`, its own layout number, and names the studio file it lies
+over:
+
+```toml
+show = 1
+studio = "/Users/me/studios/sunday.toml"
+
+[[queries]]
+name = "Pastor"
+prompt = "speaker upper body"
+presets = ["medium", "medium_close"]
+
+[director]
+mode = "auto"
+```
+
+The studio file stays the base. A show never holds the RTMP URL, so the
+stream key stays in the studio file alone, and a show that gives
+`rtmp_url` is refused. A saved show holds `sources` and `[output]
+record_path` only where they differ from the studio file's (a show
+written by hand with its own), so a camera added to the studio file, or
+a recording path changed there, is in the show the next time it opens.
+
+`--config` and `--check` take a show file as they take a studio file: the
+studio file is read, the lists the show gives (`sources`, `queries`)
+replace its lists, the keys it gives in `[director]`, `[switcher]` and
+`[output]` replace those values, and the result is checked like any
+studio config. As with a studio file's `schema`, a show of an older
+layout is upgraded as it is read, with a warning (1 is the first), and a
+newer one is an error.
+
+Save show writes to `--save-show PATH` when given, back to the show file
+the window opened, and otherwise to the `shows` folder of the data dir,
+named after the studio file and a short hash of its full path (as in
+`sunday-4b3716bc.show.toml`), so studio files named alike in different
+folders get shows of their own. The data dir is `AC_DATA_DIR` when set,
+which must be an absolute path (a relative one makes Save show fail and
+say so), else `~/Library/Application Support/auto-camera` on macOS and
+`$XDG_DATA_HOME/auto-camera` or `~/.local/share/auto-camera` elsewhere.
+A show that would not open is not written, and a file that is not a
+show, a show this build cannot read (one a newer build wrote), the show
+of another studio file and the studio file itself are never replaced.
+The write goes to a temp file beside the target, readable by its owner
+only (`0600`), synced, then renamed over the target, so a failed save
+leaves the previous show as it was. The status bar says where the show
+went, or why it did not.
 
 ## Prompts
 

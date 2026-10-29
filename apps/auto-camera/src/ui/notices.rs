@@ -49,6 +49,8 @@ pub fn notice_for(
         Ok(CommandReply::TookOver(handover)) => {
             Some((format!("{handover}, as you switched by hand"), false))
         }
+        // The app saves the show; its notice says where ([`super::save`]).
+        Ok(CommandReply::Show(_)) => None,
         Ok(CommandReply::Done) => match command {
             "set_preview" | "cut" | "cut_to" | "auto" | "set_tbar" | "accept_suggestion" => None,
             other => Some((format!("{other}: done"), false)),

@@ -48,6 +48,11 @@
 //!   lost subject, encoder drops, a failed output, a stream reconnecting,
 //!   stalled or down, a recording without audio. It is pure: each reader
 //!   keeps its own, and acknowledges alarms there.
+//! * [`show`] is what the operator built on a studio (queries, director
+//!   mode and profile, transition; sources and recording path where they
+//!   differ from the studio file's, never the stream key): the core
+//!   exports it on [`EngineCommand::ExportShow`], the app saves it, and a
+//!   show file opens as its studio file with the show laid over it.
 //! * [`queries`] reads each query's prompt once, when it is created: the
 //!   detector is asked for the parsed phrase ("speaker upper body" asks for
 //!   "a person speaking"), and the prompt's shot words pick its framings
@@ -80,6 +85,7 @@ pub mod queries;
 pub mod readiness;
 pub mod runtime;
 pub mod schedule;
+pub mod show;
 pub mod snapshot;
 pub mod trace;
 pub mod vision;
@@ -97,6 +103,7 @@ pub use detection_log::{PassRecord, PassSender};
 pub use queries::{PromptReader, build_query, default_presets, read_prompt, shot_presets};
 pub use readiness::{Readiness, SystemInspector};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};
+pub use show::{SHOW_VERSION, Show};
 pub use snapshot::{
     DirectorView, EngineSnapshot, KeepAwakeState, MatchView, OutputState, OutputView, PassOutcome,
     QueryView, ShotView, SourceView, SubjectView, SwitcherView, Tally, TimingView,
