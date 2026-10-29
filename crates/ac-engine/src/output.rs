@@ -31,25 +31,34 @@
 //! count, so the encoded timeline stays on the master clock. Program audio,
 //! when configured, is paced against that frame count by an [`AudioPacer`].
 //!
+//! While a session is live (from its start until it is finished or failed)
+//! the controller also holds the machine awake (macOS `caffeinate`), when
+//! the engine asked it to ([`OutputController::with_keep_awake`]); the hold
+//! is released after the encoder has finished, and it never affects the
+//! output.
+//!
 //! The controller's methods are split by their part in a session: the state
 //! machine above (start, stop, poll) here, pushing the program and reading
-//! the view in `tick`, and finishing encoders (in the background, at
-//! shutdown and on drop) in `finish`.
+//! the view in `tick`, finishing encoders (in the background, at shutdown
+//! and on drop) in `finish`, and the keep-awake hold in `awake`.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use ac_output::{AudioFormat, EncoderStats, OutputError, ProgramEncoder};
+use ac_output::{AudioFormat, AwakeMode, Caffeinate, EncoderStats, OutputError, ProgramEncoder};
 
 use crate::audio::AudioPacer;
 use crate::command::{CommandError, CommandReply};
 use crate::config::OutputSettings;
 use crate::snapshot::OutputState;
 
+mod awake;
 mod finish;
 mod tick;
+
+use awake::SessionAwake;
 
 /// Audio may lag video by this much before silence is inserted.
 const AUDIO_SLACK: Duration = Duration::from_millis(100);
@@ -105,6 +114,8 @@ pub struct OutputController {
     sender: Sender<Event>,
     /// Helper threads to join.
     helpers: Vec<JoinHandle<()>>,
+    /// The keep-awake hold of the live session.
+    awake: SessionAwake,
 }
 
 impl std::fmt::Debug for OutputController {
@@ -117,7 +128,8 @@ impl std::fmt::Debug for OutputController {
 }
 
 impl OutputController {
-    /// An idle controller.
+    /// An idle controller that leaves keeping the machine awake to its
+    /// caller (see [`OutputController::with_keep_awake`]).
     pub fn new(settings: OutputSettings) -> Self {
         let (sender, events) = channel();
         Self {
@@ -134,6 +146,7 @@ impl OutputController {
             events,
             sender,
             helpers: Vec::new(),
+            awake: SessionAwake::new(Caffeinate::Off, AwakeMode::System),
         }
     }
 
@@ -206,6 +219,7 @@ impl OutputController {
         self.record_path = record_path;
         self.frames_pushed = 0;
         self.stop_after_start = false;
+        self.awake.hold();
         Ok(CommandReply::OutputStarting)
     }
 
@@ -227,7 +241,8 @@ impl OutputController {
         }
     }
 
-    /// Collects helper results and notices a dead ffmpeg.
+    /// Collects helper results, notices a dead ffmpeg and releases the
+    /// keep-awake hold of a session that is over.
     pub fn poll(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
@@ -287,6 +302,7 @@ impl OutputController {
             }
         }
         self.helpers.retain(|h| !h.is_finished());
+        self.awake.check(self.live());
     }
 }
 
@@ -371,7 +387,7 @@ mod tests {
     }
 
     /// Final stats of a session that wrote `frames` frames.
-    fn stats(frames: u64) -> EncoderStats {
+    pub(super) fn stats(frames: u64) -> EncoderStats {
         EncoderStats {
             encoder: ac_output::EncoderChoice::Libx264,
             frames_in: frames,
@@ -387,6 +403,7 @@ mod tests {
             exit_code: Some(0),
             last_error: None,
             progress: Default::default(),
+            stream: None,
         }
     }
 

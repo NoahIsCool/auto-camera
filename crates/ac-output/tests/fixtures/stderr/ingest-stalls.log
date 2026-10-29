@@ -1,0 +1,36 @@
+[info] ffmpeg stats and -progress period set to 0.5.
+[info] Input #0, lavfi, from 'testsrc=size=640x360:rate=30,noise=alls=100:allf=t':
+[info]   Duration: N/A, start: 0.000000, bitrate: N/A
+[info]   Stream #0:0: Video: wrapped_avframe, gbrp, 640x360 [SAR 1:1 DAR 16:9], 30 fps, 30 tbr, 30 tbn
+[info] Stream mapping:
+[info]   Stream #0:0 -> #0:0 (wrapped_avframe (native) -> h264 (libx264))
+[libx264 @ 0x55b5733b1bc0] [info] using SAR=1/1
+[libx264 @ 0x55b5733b1bc0] [info] using cpu capabilities: MMX2 SSE2Fast SSSE3 SSE4.2 AVX FMA3 BMI2 AVX2 AVX512
+[libx264 @ 0x55b5733b1bc0] [info] profile High, level 4.1, 4:2:0, 8-bit
+[libx264 @ 0x55b5733b1bc0] [info] 264 - core 164 r3108 31e19f9 - H.264/MPEG-4 AVC codec - Copyleft 2003-2023 - http://www.videolan.org/x264.html - options: cabac=1 ref=1 deblock=1:0:0 analyse=0x3:0x113 me=hex subme=2 psy=1 psy_rd=1.00:0.00 mixed_ref=0 me_range=16 chroma_me=1 trellis=0 8x8dct=1 cqm=0 deadzone=21,11 fast_pskip=1 chroma_qp_offset=0 threads=4 lookahead_threads=4 sliced_threads=1 slices=4 nr=0 decimate=1 interlaced=0 bluray_compat=0 constrained_intra=0 bframes=0 weightp=1 keyint=30 keyint_min=16 scenecut=0 intra_refresh=0 rc_lookahead=0 rc=cbr mbtree=0 bitrate=20000 ratetol=1.0 qcomp=0.60 qpmin=0 qpmax=69 qpstep=4 vbv_maxrate=20000 vbv_bufsize=40000 nal_hrd=none filler=0 ip_ratio=1.40 aq=1:1.00
+[info] Output #0, tee, to ''[f=mp4:movflags=+frag_keyframe+empty_moov+default_base_moof]file:/rec/program.mp4'|'[f=flv:onfail=ignore:use_fifo=1:fifo_options=drop_pkts_on_overflow=1\:attempt_recovery=1\:recover_any_error=1\:recovery_wait_time=2\:restart_with_keyframe=1\:queue_size=60]rtmp://127.0.0.1:36411/live/test-stream-key'':
+[info]   Metadata:
+[info]     encoder         : Lavf60.16.100
+[info]   Stream #0:0: Video: h264, yuv420p(tv, progressive), 640x360 [SAR 1:1 DAR 16:9], q=2-31, 20000 kb/s, 30 fps, 30 tbn
+[info]     Metadata:
+[info]       encoder         : Lavc60.31.102 libx264
+[info]     Side data:
+[info]       cpb: bitrate max/min/avg: 20000000/0/20000000 buffer size: 40000000 vbv_delay: N/A
+[fifo @ 0x55b5736e8bc0] [warning] FIFO queue full
+[fifo @ 0x55b5736e8bc0] [info] FIFO queue flushed
+[flv @ 0x55b5736e96c0] [warning] Failed to update header with correct duration.
+[flv @ 0x55b5736e96c0] [warning] Failed to update header with correct filesize.
+[out#0/tee @ 0x55b5733b0280] [info] video:31296kB audio:0kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: unknown
+[info] frame=  360 fps= 31 q=26.0 Lsize=N/A time=00:00:11.96 bitrate=N/A speed=1.04x
+[libx264 @ 0x55b5733b1bc0] [info] frame I:12    Avg QP:24.10  size:123093
+[libx264 @ 0x55b5733b1bc0] [info] frame P:348   Avg QP:28.30  size: 87842
+[libx264 @ 0x55b5733b1bc0] [info] mb I  I16..4: 15.7% 25.4% 58.9%
+[libx264 @ 0x55b5733b1bc0] [info] mb P  I16..4: 24.7% 35.6% 30.6%  P16..4:  0.9%  2.3%  5.9%  0.0%  0.0%    skip: 0.0%
+[libx264 @ 0x55b5733b1bc0] [info] 8x8 transform intra:38.6% inter:23.5%
+[libx264 @ 0x55b5733b1bc0] [info] coded y,uvDC,uvAC intra: 99.9% 100.0% 100.0% inter: 100.0% 95.1% 87.6%
+[libx264 @ 0x55b5733b1bc0] [info] i16 v,h,dc,p:  0%  0% 96%  4%
+[libx264 @ 0x55b5733b1bc0] [info] i8 v,h,dc,ddl,ddr,vr,hd,vl,hu:  5%  5% 54%  8%  4%  4%  5%  7%  7%
+[libx264 @ 0x55b5733b1bc0] [info] i4 v,h,dc,ddl,ddr,vr,hd,vl,hu: 11%  6% 28% 11%  8%  8%  9%  9%  9%
+[libx264 @ 0x55b5733b1bc0] [info] i8c dc,h,v,p: 74%  7% 13%  5%
+[libx264 @ 0x55b5733b1bc0] [info] Weighted P-Frames: Y:0.0% UV:0.0%
+[libx264 @ 0x55b5733b1bc0] [info] kb/s:21364.06

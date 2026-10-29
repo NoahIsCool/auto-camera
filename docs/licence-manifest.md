@@ -22,6 +22,7 @@ id in backquotes (the check prints the ids it is missing), a licence, an
 | Id | Component | Licence | Licence source | Checked |
 |---|---|---|---|---|
 | `native:ffmpeg` | FFmpeg: the `ffmpeg` and `ffprobe` programs | LGPL-2.1-or-later; GPL-2.0-or-later when built with `--enable-gpl` (libx264 needs it); GPL-3.0-or-later with `--enable-version3` too | [FFmpeg `LICENSE.md`](https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md) | yes |
+| `native:caffeinate` | `caffeinate`, the macOS tool the app runs as `/usr/bin/caffeinate` to keep the Mac awake while program goes out | Part of macOS, under Apple's licence for macOS; Apple publishes its source under APSL-2.0 | [`caffeinate.c`](https://github.com/apple-oss-distributions/PowerManagement/blob/main/caffeinate/caffeinate.c), [PowerManagement `APPLE_LICENSE`](https://github.com/apple-oss-distributions/PowerManagement/blob/main/APPLE_LICENSE) | partly |
 | `native:onnxruntime` | ONNX Runtime 1.28.0, linked into the app with `--features onnx` | MIT, and the licences of the code it includes | [`LICENSE`](https://github.com/microsoft/onnxruntime/blob/v1.28.0/LICENSE), [`ThirdPartyNotices.txt`](https://github.com/microsoft/onnxruntime/blob/v1.28.0/ThirdPartyNotices.txt) | partly |
 | `native:python` | CPython, the interpreter the SAM sidecar's `command` names (the user's own, 3.10 or newer, unpinned) | PSF-2.0; the code it includes under its own licences | [CPython `LICENSE`](https://github.com/python/cpython/blob/main/LICENSE), [incorporated software, `Doc/license.rst`](https://github.com/python/cpython/blob/main/Doc/license.rst) | yes |
 | `model:owlv2-split-onnx` | OWLv2 base patch16 ensemble weights (Google), exported to ONNX, with their tokenizer | Apache-2.0 | [scenic OWL-ViT README, License](https://github.com/google-research/scenic/blob/main/scenic/projects/owl_vit/README.md#license), [`LICENSE`](https://github.com/google-research/scenic/blob/main/LICENSE) | partly |
@@ -65,6 +66,27 @@ where this was written, so that reading is from memory). A bundle that
 ships an ffmpeg binary must meet that build's licence: include its licence
 text, provide or offer its exact source and configure flags, and use a
 build without `--enable-nonfree`, whose binaries may not be redistributed.
+
+## caffeinate
+
+**What and where from.** On macOS the app keeps the system awake while
+program goes out, and for the whole of a headless run, by running
+`caffeinate` (`ac-output`'s `keep_awake`): the copy macOS installs at
+`/usr/bin/caffeinate`, by that path. It is part of the operating system;
+Auto Camera ships none, and runs nothing in its place elsewhere.
+
+**Licence.** The program comes with macOS, under Apple's licence for
+macOS. Apple publishes its source in the PowerManagement project:
+`caffeinate/caffeinate.c`, read on `main`, says that it is subject to the
+Apple Public Source License 2.0, and the project's `APPLE_LICENSE` is that
+licence (APSL-2.0).
+
+**Not verified:** Apple's licence for macOS itself, and which
+PowerManagement release the `caffeinate` of a given macOS version was
+built from.
+
+**Obligations.** None: the app runs the copy that comes with macOS as a
+separate program, and neither ships, links nor changes it.
 
 ## ONNX Runtime
 

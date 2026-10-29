@@ -22,6 +22,7 @@ COMPLETE = (
     "# Manifest\n\n"
     + HEADER
     + row("`native:ffmpeg`", "LGPL-2.1-or-later")
+    + row("`native:caffeinate`", "APSL-2.0", checked="partly")
     + row("`native:onnxruntime`")
     + row("`native:python`", "PSF-2.0")
     + row("`model:owl`, `model:sam`", "Apache-2.0", checked="partly")
@@ -58,6 +59,7 @@ class Tree:
         )
         self.write("crates/vision/Cargo.toml", '[dependencies]\nort = { version = "2" }\n')
         self.write("crates/sources/src/probe.rs", 'const TOOL: &str = "ffmpeg";\n')
+        self.write("crates/output/src/awake.rs", 'const AWAKE: &str = "/usr/bin/caffeinate";\n')
         self.write("docs/licence-manifest.md", COMPLETE)
 
     def found(self):
@@ -100,6 +102,7 @@ class LicenceManifestTest(unittest.TestCase):
             [
                 "model:owl",
                 "model:sam",
+                "native:caffeinate",
                 "native:ffmpeg",
                 "native:onnxruntime",
                 "native:python",
@@ -110,7 +113,7 @@ class LicenceManifestTest(unittest.TestCase):
         self.assertEqual(self.tree.problems(), [])
         status, out = self.tree.main()
         self.assertEqual(status, 0)
-        self.assertIn("6 non-crate components, each with a licence entry", out)
+        self.assertIn("7 non-crate components, each with a licence entry", out)
 
     def test_a_new_requirement_without_an_entry_fails(self):
         self.tree.write("sidecars/demo/requirements.txt", "mlx==0.32.3\nPillow>=10\n")
@@ -159,6 +162,21 @@ class LicenceManifestTest(unittest.TestCase):
         self.assertEqual(self.tree.missing(), [])
         self.tree.write("apps/app/src/ui/deep.rs", 'let tool = "ffprobe";\n')
         self.assertEqual(self.tree.missing(), ["native:ffmpeg"])
+
+    def test_a_caffeinate_literal_needs_an_entry(self):
+        self.tree.write(
+            "docs/licence-manifest.md",
+            COMPLETE.replace(row("`native:caffeinate`", "APSL-2.0", checked="partly"), ""),
+        )
+        self.assertEqual(self.tree.missing(), ["native:caffeinate"])
+        # Messages and stand-ins that only mention it do not run it.
+        self.tree.write(
+            "crates/output/src/awake.rs",
+            'let why = "caffeinate exists only on macOS";\nlet fake = "fake-caffeinate";\n',
+        )
+        self.assertEqual(self.tree.missing(), [])
+        self.tree.write("apps/app/src/hold.rs", 'Command::new("caffeinate");\n')
+        self.assertEqual(self.tree.missing(), ["native:caffeinate"])
 
     def test_a_detector_program_needs_an_entry_named_by_its_file(self):
         self.tree.write(
@@ -393,13 +411,13 @@ class LicenceManifestTest(unittest.TestCase):
         self.assertEqual(
             self.tree.problems(),
             [
-                "docs/licence-manifest.md:10: no id in backquotes in the Id column",
-                "docs/licence-manifest.md:11: `pypi:a b` is not kind:name "
+                "docs/licence-manifest.md:11: no id in backquotes in the Id column",
+                "docs/licence-manifest.md:12: `pypi:a b` is not kind:name "
                 "(kind pypi, model or native)",
-                "docs/licence-manifest.md:12: the Licence column is empty",
-                "docs/licence-manifest.md:13: the Licence source column has no https:// link",
-                "docs/licence-manifest.md:14: Checked is 'maybe', not one of yes, partly, no",
-                "docs/licence-manifest.md:15: `pypi:mlx` is already in the row on line 9",
+                "docs/licence-manifest.md:13: the Licence column is empty",
+                "docs/licence-manifest.md:14: the Licence source column has no https:// link",
+                "docs/licence-manifest.md:15: Checked is 'maybe', not one of yes, partly, no",
+                "docs/licence-manifest.md:16: `pypi:mlx` is already in the row on line 10",
             ],
         )
         self.assertEqual(self.tree.main()[0], 1)
@@ -410,7 +428,7 @@ class LicenceManifestTest(unittest.TestCase):
         self.tree.write(
             "docs/licence-manifest.md", COMPLETE.replace("\nNotes", "| `pypi:q` | x |\n\nNotes")
         )
-        self.assertEqual(self.tree.problems(), ["docs/licence-manifest.md:10: 2 cells, not 5"])
+        self.assertEqual(self.tree.problems(), ["docs/licence-manifest.md:11: 2 cells, not 5"])
 
     def test_the_table_must_have_the_documented_columns(self):
         self.tree.write(
@@ -432,7 +450,7 @@ class LicenceManifestTest(unittest.TestCase):
     def test_a_missing_manifest_fails(self):
         (self.tree.root / "docs/licence-manifest.md").unlink()
         self.assertEqual(self.tree.problems(), ["docs/licence-manifest.md: missing"])
-        self.assertEqual(len(self.tree.missing()), 6)
+        self.assertEqual(len(self.tree.missing()), 7)
         self.assertEqual(self.tree.main()[0], 1)
 
     def test_an_unused_entry_is_only_a_note(self):

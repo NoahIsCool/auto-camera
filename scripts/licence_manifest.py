@@ -3,11 +3,12 @@
 
 cargo-deny (`deny.toml`) checks the licence of every crate. It cannot see
 the parts the app runs, links or loads that do not come from crates.io: the
-ffmpeg programs, the ONNX Runtime library that `ort` links in, model
-weights, and the detector sidecar's interpreter and Python packages. Their
-licences are in `docs/licence-manifest.md`, and this check keeps that file
-complete: it finds each such component from what the repository itself
-declares, and every one must have a valid row in the manifest's table.
+ffmpeg programs, macOS's `caffeinate`, the ONNX Runtime library that `ort`
+links in, model weights, and the detector sidecar's interpreter and Python
+packages. Their licences are in `docs/licence-manifest.md`, and this check
+keeps that file complete: it finds each such component from what the
+repository itself declares, and every one must have a valid row in the
+manifest's table.
 
 A component is found, and named by an id, by these rules:
 
@@ -34,13 +35,18 @@ A component is found, and named by an id, by these rules:
   the binary).
 * `native:ffmpeg`: the string literal `"ffmpeg"` or `"ffprobe"` in a Rust
   source under `crates/*/src` or `apps/*/src` (the tools are run by name).
+* `native:caffeinate`: the string literal `"caffeinate"` or
+  `"/usr/bin/caffeinate"` in a Rust source under `crates/*/src` or
+  `apps/*/src` (macOS's tool, which keeps the system awake, is run by its
+  path).
 
 The first three rules find new components by themselves: every project
 pip would install from a sidecar's requirements is found or reported, and
 the check may find more than pip installs (pip reads only the first
 requirement, editable or include of a line, the check all of them). The
-last two cover the one native library the app links and the one program
-it runs under a fixed name today; a new one needs a rule here.
+last three cover the one native library the app links and the two
+programs it runs under a fixed name today (`FIXED_PROGRAMS`); a new one
+needs a rule here.
 
 The manifest's table is the one whose header row starts with `Id`, and its
 columns are exactly `COLUMNS` (cells may not contain `|`). A row is valid
@@ -113,8 +119,12 @@ EGG = re.compile(r"[#&]egg=([^&]*)")
 URL = re.compile(r"(?:http|https|file):", re.IGNORECASE)
 #: The file name of a Python interpreter: `python`, `python3`, `python3.13`.
 PYTHON = re.compile(r"python[0-9.]*")
-#: String literals naming the ffmpeg tools in Rust source.
-FFMPEG_LITERAL = re.compile(r'"(?:ffmpeg|ffprobe)"')
+#: The programs the app runs under a fixed name: each id, and the string
+#: literals in Rust source that name the program.
+FIXED_PROGRAMS = (
+    ("native:ffmpeg", re.compile(r'"(?:ffmpeg|ffprobe)"')),
+    ("native:caffeinate", re.compile(r'"(?:/usr/bin/)?caffeinate"')),
+)
 #: An id in backquotes in the Id column; group 1 is the id.
 ID_IN_CELL = re.compile(r"`([^`]*)`")
 #: A well-formed id: a kind, a colon and a name without spaces or colons.
@@ -363,8 +373,10 @@ def components(root, problems):
         if depends_on_ort(manifest):
             add("native:onnxruntime", path)
     for path in sorted([*root.glob("crates/*/src/**/*.rs"), *root.glob("apps/*/src/**/*.rs")]):
-        if FFMPEG_LITERAL.search(path.read_text(encoding="utf-8", errors="replace")):
-            add("native:ffmpeg", path)
+        source = path.read_text(encoding="utf-8", errors="replace")
+        for component, literal in FIXED_PROGRAMS:
+            if literal.search(source):
+                add(component, path)
     return {component: sorted(paths) for component, paths in found.items()}
 
 

@@ -13,12 +13,21 @@
 //!
 //! Shared defaults: jump-cut IoU 0.4, challenger margin δ = 0.1 held for
 //! 0.75 s, fallback when program quality is below 0.3 for 0.5 s, and the
-//! [`ScoreWeights`] defaults.
+//! [`ScoreWeights`] defaults (wide weight 0.75, 0.05 per priority level, a
+//! variety penalty of 0.3 decaying over 60 s; see [`crate::candidate`]).
+//!
+//! The operator's side has its own parameters, the same for both profiles:
+//! a shot the operator skips is left out of the suggestions for 30 s, and
+//! what the operator's own switching does while the director runs in Auto
+//! mode is the [`Takeover`] setting: by default the director drops to
+//! Suggest, so the operator's key press is never fought; the pause setting
+//! holds the director's takes for 10 s after each manual action instead.
 //!
 //! Invariant: a [`DirectorConfig`] accepted by [`DirectorConfig::validate`]
-//! has finite, non-negative weights, thresholds inside `0.0..=1.0`, and a
-//! minimum dwell no longer than either maximum dwell. The director relies on
-//! this to keep every score finite.
+//! has finite, non-negative weights, thresholds inside `0.0..=1.0`, a
+//! minimum dwell no longer than either maximum dwell, and a skip window and
+//! a pause longer than zero. The director relies on this to keep every
+//! score finite and every skip and pause able to end.
 
 use std::time::Duration;
 
@@ -39,6 +48,26 @@ pub enum DirectorMode {
     Suggest,
     /// Proposes and also takes, for unattended use (opt-in).
     Auto,
+}
+
+/// What the operator's own switching (staging, Cut, Cut now, Auto, the
+/// T-bar) does while the director runs in [`DirectorMode::Auto`]; see
+/// [`Director::take_over`](crate::Director::take_over). In the other modes
+/// the operator switches anyway and the director takes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Takeover {
+    /// The director drops to Suggest: it goes on proposing shots and the
+    /// operator takes them.
+    #[default]
+    Suggest,
+    /// The director stays in Auto but takes nothing for
+    /// [`DirectorConfig::pause`] after each manual action; meanwhile it
+    /// proposes as in Suggest mode.
+    Pause,
+    /// Nothing changes: the director goes on staging and taking, and stages
+    /// its own suggestion over a shot the operator staged.
+    Director,
 }
 
 /// What kind of content is on air; selects the timing defaults.
@@ -116,6 +145,13 @@ pub struct DirectorConfig {
     pub fallback_quality: f32,
     /// How long program quality must stay low before falling back to a wide.
     pub fallback_after: Duration,
+    /// What the operator's own switching does in Auto mode.
+    pub takeover: Takeover,
+    /// How long each manual action holds auto-takes with
+    /// [`Takeover::Pause`].
+    pub pause: Duration,
+    /// How long a shot the operator skipped is left out of the suggestions.
+    pub skip: Duration,
 }
 
 impl DirectorConfig {
@@ -132,6 +168,9 @@ impl DirectorConfig {
             scoring: ScoreWeights::default(),
             fallback_quality: 0.3,
             fallback_after: Duration::from_millis(500),
+            takeover: Takeover::default(),
+            pause: Duration::from_secs(10),
+            skip: Duration::from_secs(30),
         }
     }
 
@@ -147,8 +186,10 @@ impl DirectorConfig {
         unit("fallback_quality", f64::from(self.fallback_quality))?;
         non_negative("margin", f64::from(self.margin))?;
         non_negative("wide_weight", f64::from(self.scoring.wide_weight))?;
+        non_negative("priority_weight", f64::from(self.scoring.priority_weight))?;
         non_negative("variety_penalty", f64::from(self.scoring.variety_penalty))?;
-        Ok(())
+        positive("pause", self.pause)?;
+        positive("skip", self.skip)
     }
 }
 
@@ -181,6 +222,19 @@ fn non_negative(name: &'static str, value: f64) -> Result<(), ConfigError> {
             value,
             range: "finite and >= 0",
         })
+    }
+}
+
+/// Rejects a zero duration.
+fn positive(name: &'static str, value: Duration) -> Result<(), ConfigError> {
+    if value.is_zero() {
+        Err(ConfigError::OutOfRange {
+            name,
+            value: 0.0,
+            range: "> 0 s",
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -232,6 +286,42 @@ mod tests {
         let c = DirectorConfig::default();
         assert_eq!(c.mode, DirectorMode::Suggest);
         assert_eq!(c.profile, ContentProfile::Talk);
+    }
+
+    #[test]
+    fn the_operator_side_defaults_to_dropping_to_suggest() {
+        for profile in [ContentProfile::Talk, ContentProfile::Music] {
+            let c = DirectorConfig::new(DirectorMode::Auto, profile);
+            assert_eq!(c.takeover, Takeover::Suggest);
+            assert_eq!(c.pause, Duration::from_secs(10));
+            assert_eq!(c.skip, Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn a_zero_pause_or_skip_window_is_rejected() {
+        let pause = DirectorConfig {
+            pause: Duration::ZERO,
+            ..DirectorConfig::default()
+        };
+        assert!(matches!(
+            pause.validate(),
+            Err(ConfigError::OutOfRange { name: "pause", .. })
+        ));
+        let skip = DirectorConfig {
+            skip: Duration::ZERO,
+            ..DirectorConfig::default()
+        };
+        assert!(matches!(
+            skip.validate(),
+            Err(ConfigError::OutOfRange { name: "skip", .. })
+        ));
+        let tiny = DirectorConfig {
+            pause: Duration::from_millis(1),
+            skip: Duration::from_millis(1),
+            ..DirectorConfig::default()
+        };
+        assert!(tiny.validate().is_ok());
     }
 
     #[test]
@@ -293,5 +383,29 @@ mod tests {
             ..DirectorConfig::default()
         };
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn priority_weight_must_be_finite_and_non_negative() {
+        let with = |priority_weight| DirectorConfig {
+            scoring: ScoreWeights {
+                priority_weight,
+                ..ScoreWeights::default()
+            },
+            ..DirectorConfig::default()
+        };
+        assert!((ScoreWeights::default().priority_weight - 0.05).abs() < 1e-6);
+        for bad in [-0.05, f32::NAN, f32::INFINITY] {
+            assert!(matches!(
+                with(bad).validate(),
+                Err(ConfigError::OutOfRange {
+                    name: "priority_weight",
+                    ..
+                })
+            ));
+        }
+        // Zero turns priorities off; a large weight is the operator's call.
+        assert!(with(0.0).validate().is_ok());
+        assert!(with(2.0).validate().is_ok());
     }
 }

@@ -4,9 +4,15 @@
 #
 #   cargo run -p auto-camera --features onnx -- --config config/file-source.example.toml
 #
+# `--check` in place of a run lists every missing file or tool without
+# starting the studio (see the README's "Readiness check").
+#
 # Copy this file, then point `path`, `model` and `tokenizer` at real files
 # (see crates/ac-vision/README.md for exporting OWLv2 to ONNX). Relative paths
 # are resolved against this file's directory.
+
+# The layout this file is written in (README, "Studio configuration").
+schema = 1
 
 [[sources]]
 id = "cam-1"
@@ -56,10 +62,17 @@ audio = true
 # reach are drawn at the ceiling and marked limited. On a guitarist half the
 # frame high, the second query's Full is now a 1.8x crop instead of the wide,
 # and its Tight needs about 9x, so it is drawn at its 6x ceiling and marked.
+#
+# A query's `priority` (1 to 5, higher first) ranks its subjects for the
+# director: at equal quality it suggests the higher one's shot. Without any
+# `priority` the list order ranks them (5, 4, 3, ...); here the Speaker has 4
+# and the two queries without one have 3. Only differences count, so queries
+# that all share one priority change nothing.
 [[queries]]
 name = "Speaker"
 prompt = "a person speaking at a lectern"
 presets = ["medium", "close"]
+priority = 4
 
 [[queries]]
 name = "Guitarist"
@@ -118,4 +131,7 @@ fps = 30
 # Program audio comes from this source's embedded audio track.
 audio_source = "cam-1"
 # rtmp_url = "rtmp://live.example.com/app/STREAM-KEY"
-record_path = "../recordings/show.mp4"
+# Unlike the paths above, a relative recording path is taken from the
+# working folder (the repository root, run as above), as one typed at Start
+# Output is; so is a relative `ffmpeg` path. `--check` says where.
+record_path = "recordings/show.mp4"
