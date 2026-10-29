@@ -92,9 +92,10 @@ fn a_device_delivers_a_second_of_blocks_with_rising_pts() {
     assert_eq!(input.state(), SourceState::Running, "{:?}", input.error());
     let frames: usize = blocks.iter().map(AudioBlock::frames).sum();
     eprintln!(
-        "{} blocks, {frames} frames in 1 s; {} discontinuities; error {:?}",
+        "{} blocks, {frames} frames in 1 s; {} discontinuities, {} overloads; error {:?}",
         blocks.len(),
         input.discontinuities(),
+        input.overloads(),
         input.error()
     );
     assert!(blocks.len() > 10, "{} blocks", blocks.len());

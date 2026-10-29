@@ -198,6 +198,7 @@ fn an_input_opens_its_device_and_stamps_capture_times_on_the_clock() {
     }
     assert_eq!(input.state(), SourceState::Running);
     assert_eq!((input.error(), input.discontinuities()), (None, 0));
+    assert_eq!(input.overloads(), 0);
     assert_eq!(input.dropped(), 0);
     assert!(!cb.dropped.load(Ordering::SeqCst));
     input.stop();
@@ -276,17 +277,73 @@ fn discontinuities_are_counted_and_shown_while_the_input_runs() {
     );
     assert_eq!(input.state(), SourceState::Running, "it keeps delivering");
     assert_eq!(got[2].pts, ms(50), "the gap is kept");
+    // An overload that lost nothing: shown, on its own count.
     cb.events.overload();
-    assert!(eventually(|| input.discontinuities() == 2));
-    assert!(
-        input
-            .error()
-            .unwrap()
-            .starts_with("audio discontinuity (2 so far): the device reported an overload")
-    );
+    assert!(eventually(|| input.error().as_deref()
+        == Some(
+            "the device reported an overload (1 so far; 1 audio discontinuity): its I/O \
+             cycle ran late, so its audio may have a gap"
+        )));
+    assert_eq!((input.discontinuities(), input.overloads()), (1, 1));
     play(&mut cb.sink, start + ms(30), 54);
     drain_until(&input, &mut got, 55);
     assert_eq!(input.state(), SourceState::Running);
+    input.stop();
+}
+
+#[test]
+fn an_overload_that_loses_audio_is_one_overload_and_one_discontinuity() {
+    let start = Duration::from_secs(5);
+    let backend = FakeDevices::new(table(), start);
+    let mut input = open(
+        &backend,
+        DeviceOptions::default(),
+        Arc::new(VirtualClock::new()),
+    )
+    .unwrap();
+    let mut cb = backend.callbacks();
+    let mut got = Vec::new();
+    let (mut k, mut late) = (0u64, Duration::ZERO);
+    for round in 1..=5u64 {
+        for _ in 0..3 {
+            play(&mut cb.sink, start + late, k);
+            k += 1;
+        }
+        // The device's cycle ran late and lost a block's audio: it reports
+        // an overload, and the next block comes 10 ms later than due.
+        cb.events.overload();
+        assert!(eventually(|| input.overloads() == round));
+        if round == 1 {
+            assert!(eventually(|| input.error().as_deref()
+                == Some(
+                    "the device reported an overload (1 so far): its I/O cycle ran late, \
+                     so its audio may have a gap"
+                )));
+        }
+        late += ms(10);
+        let jumped = k;
+        // On past the gap's window.
+        for _ in 0..55 {
+            play(&mut cb.sink, start + late, k);
+            k += 1;
+        }
+        drain_until(&input, &mut got, k as usize);
+        let notice = format!(
+            "audio discontinuity ({round} so far; the device reported {round} overload{}): \
+             10.0 ms of audio missing before block {jumped} (its host time jumped ahead)",
+            if round == 1 { "" } else { "s" }
+        );
+        assert!(
+            eventually(|| input.error().as_deref() == Some(notice.as_str())),
+            "{:?}, not {notice}",
+            input.error()
+        );
+        assert_eq!(
+            (input.discontinuities(), input.overloads()),
+            (round, round),
+            "counted once each"
+        );
+    }
     input.stop();
 }
 

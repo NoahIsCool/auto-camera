@@ -10,16 +10,28 @@
 //! (`ac-audio-dev-<id>`) owns the stream from then on. Every
 //! [`HANDOFF_POLL`] it
 //!
+//! * turns new overloads the stream reported into the input's notice
+//!   ([`AudioInput::error`] while it runs) and a log line;
 //! * takes every filled buffer from the hand-off, stamps it, gives the
 //!   buffer back to the pool and queues the block in the input's
-//!   [`AudioRing`] (the first one makes the input `Running`);
-//! * turns new overloads the stream reported, and the discontinuities the
-//!   stamper found, into the input's notice ([`AudioInput::error`] while
-//!   it runs, with the count) and a log line;
+//!   [`AudioRing`] (the first one makes the input `Running`), and makes
+//!   each discontinuity the stamper found the notice and a log line;
 //! * stops the input with an error once the stream reports the device
 //!   lost, or when no block came for the stall timeout (the open timeout
 //!   before the first block), measured in real time: the device runs in
 //!   real time whatever clock the studio is paced by.
+//!
+//! # Counting
+//!
+//! What the stamper measured and what the device reported are counted
+//! apart, and each notice carries both counts: `audio discontinuity (3 so
+//! far; the device reported 2 overloads): ...`. An overload that lost
+//! audio is measured too, as the gap the stamper finds in the stream after
+//! it, so counting the two together would count it twice; an overload that
+//! lost nothing is still shown, on its own count. Within a poll the
+//! overloads are noted first, so a discontinuity measured in the same poll
+//! is the notice that stays: it says what was lost, the overload only that
+//! something may have been.
 //!
 //! Polling, rather than waiting on the hand-off, is what keeps the
 //! device's callback free of locks (see [`mod@super::handoff`]); a few
@@ -102,9 +114,11 @@ struct Shared {
     ring: AudioRing,
     /// Blocks the hand-off dropped.
     handoff_lost: Arc<AtomicU64>,
-    /// Discontinuities so far.
+    /// Discontinuities the stamper measured so far.
     discontinuities: AtomicU64,
-    /// The newest discontinuity, as the input's notice.
+    /// Overloads the device reported so far.
+    overloads: AtomicU64,
+    /// The newest notice: a discontinuity or an overload.
     notice: Mutex<Option<String>>,
 }
 
@@ -176,6 +190,7 @@ impl DeviceInput {
             ring: AudioRing::new(options.queue_blocks),
             handoff_lost: reader.lost_counter(),
             discontinuities: AtomicU64::new(0),
+            overloads: AtomicU64::new(0),
             notice: Mutex::new(None),
         });
         let worker = Worker {
@@ -210,9 +225,15 @@ impl DeviceInput {
         &self.device
     }
 
-    /// Discontinuities so far; see [`Discontinuity`].
+    /// Discontinuities the stamper measured so far; see [`Discontinuity`].
     pub fn discontinuities(&self) -> u64 {
         self.shared.discontinuities.load(Ordering::Relaxed)
+    }
+
+    /// Overloads the device reported so far, counted apart from the
+    /// discontinuities (see the module docs).
+    pub fn overloads(&self) -> u64 {
+        self.shared.overloads.load(Ordering::Relaxed)
     }
 }
 
@@ -261,8 +282,8 @@ impl Drop for DeviceInput {
     }
 }
 
-/// Decides which discontinuities are logged: one line per [`LOG_QUIET`]
-/// at most, the ones held back counted on the next.
+/// Decides which notices are logged: one line per [`LOG_QUIET`] at most,
+/// the ones held back counted on the next.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct QuietLog {
     /// When the newest line was logged.
@@ -272,8 +293,8 @@ pub(crate) struct QuietLog {
 }
 
 impl QuietLog {
-    /// `Some(held back since the last line)` when a discontinuity at `now`
-    /// is to be logged, else `None` (and it is counted).
+    /// `Some(held back since the last line)` when a notice at `now` is to
+    /// be logged, else `None` (and it is counted).
     pub(crate) fn admit(&mut self, now: Instant) -> Option<u64> {
         match self.last {
             Some(last) if now.saturating_duration_since(last) < LOG_QUIET => {
@@ -319,6 +340,12 @@ impl Worker {
             if shared.stopping() {
                 break None;
             }
+            // Overloads first: see the module docs.
+            let overloads = self.events.overloads();
+            for _ in self.overloads..overloads {
+                self.note_overload(shared);
+            }
+            self.overloads = overloads;
             let mut got = false;
             while let Some(captured) = self.reader.take() {
                 let (block, found) = self.stamper.stamp(&captured);
@@ -330,11 +357,6 @@ impl Worker {
                 shared.status.advance(SourceState::Running);
                 got = true;
             }
-            let overloads = self.events.overloads();
-            for _ in self.overloads..overloads {
-                self.note(shared, Discontinuity::Overload);
-            }
-            self.overloads = overloads;
             if let Some(why) = self.events.lost_reason() {
                 break Some(format!("audio device {:?} went away: {why}", self.name));
             }
@@ -365,11 +387,42 @@ impl Worker {
         shared.status.advance(SourceState::Stopped);
     }
 
-    /// Counts `d`, makes it the input's notice and logs it unless a line
-    /// was logged within [`LOG_QUIET`].
+    /// Counts the discontinuity `d` and publishes its notice, with the
+    /// overloads reported so far.
     fn note(&mut self, shared: &Shared, d: Discontinuity) {
         let n = shared.discontinuities.fetch_add(1, Ordering::Relaxed) + 1;
-        let notice = format!("audio discontinuity ({n} so far): {d}");
+        let reported = match shared.overloads.load(Ordering::Relaxed) {
+            0 => String::new(),
+            1 => "; the device reported 1 overload".into(),
+            m => format!("; the device reported {m} overloads"),
+        };
+        self.publish(
+            shared,
+            format!("audio discontinuity ({n} so far{reported}): {d}"),
+        );
+    }
+
+    /// Counts an overload the device reported and publishes its notice,
+    /// with the discontinuities measured so far.
+    fn note_overload(&mut self, shared: &Shared) {
+        let m = shared.overloads.fetch_add(1, Ordering::Relaxed) + 1;
+        let measured = match shared.discontinuities.load(Ordering::Relaxed) {
+            0 => String::new(),
+            1 => "; 1 audio discontinuity".into(),
+            n => format!("; {n} audio discontinuities"),
+        };
+        self.publish(
+            shared,
+            format!(
+                "the device reported an overload ({m} so far{measured}): its I/O cycle ran \
+                 late, so its audio may have a gap"
+            ),
+        );
+    }
+
+    /// Makes `notice` the input's notice and logs it unless a line was
+    /// logged within [`LOG_QUIET`].
+    fn publish(&mut self, shared: &Shared, notice: String) {
         if let Some(held) = self.log.admit(Instant::now()) {
             let more = match held {
                 0 => String::new(),

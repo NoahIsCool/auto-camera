@@ -1,5 +1,7 @@
 //! A device's blocks on the input's timeline: host capture times mapped to
-//! PTS, sequence numbers, and the discontinuities a device's stream has.
+//! PTS, sequence numbers, and the discontinuities measured in a device's
+//! stream (an overload the device reports is the input's to count, see
+//! [`super::input`]).
 //!
 //! # Host time and the engine's clock
 //!
@@ -160,9 +162,6 @@ pub enum Discontinuity {
         /// Their duration at the nominal rate.
         lasting: Duration,
     },
-    /// The device reported an overload: its I/O cycle ran late, so its
-    /// audio may have a gap.
-    Overload,
 }
 
 impl fmt::Display for Discontinuity {
@@ -197,9 +196,6 @@ impl fmt::Display for Discontinuity {
                  the input fell behind its device",
                 ms(lasting)
             ),
-            Discontinuity::Overload => {
-                f.write_str("the device reported an overload (its audio may have a gap)")
-            }
         }
     }
 }

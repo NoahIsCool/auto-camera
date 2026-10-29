@@ -240,11 +240,6 @@ fn dropped_blocks_skip_their_numbers_and_their_time_and_are_reported_at_once() {
         [(51, Discontinuity::Gap { seq: 6, by: ms(40) })],
         "510 ms of audio after the jump"
     );
-    assert!(
-        Discontinuity::Overload
-            .to_string()
-            .contains("reported an overload")
-    );
 }
 
 #[test]
