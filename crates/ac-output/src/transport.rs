@@ -2,9 +2,18 @@
 //!
 //! Each pipe has exactly one owner thread: the video writer owns ffmpeg's
 //! stdin, the audio writer owns the audio socket, and two readers own stdout
-//! (progress) and stderr (errors). The engine talks to the writers only
-//! through bounded channels; the threads publish counters and snapshots into
-//! [`Shared`], whose locks are held for a copy and never across I/O.
+//! (progress and mux statistics) and stderr (errors and the stream monitor);
+//! the readers are in the `readers` child module. The engine talks to the
+//! writers only through bounded channels; the threads publish counters and
+//! snapshots into [`Shared`], whose locks are held for a copy and never
+//! across I/O.
+//!
+//! # Errors
+//!
+//! [`Shared`] keeps the newest error line, and apart from it the newest one
+//! that was not the stream's ([`ErrorLog`]). A reconnection of the stream
+//! drops the stream's error, so a stream that recovered shows no error and
+//! an older error of something else shows again.
 //!
 //! # Drops keep the clock
 //!
@@ -31,17 +40,20 @@
 //! with an error rather than hanging once ffmpeg is gone. The listener only
 //! accepts one connection, from the local host.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::redact;
-use crate::progress::{Progress, ProgressParser, average_kbps};
+use crate::progress::Progress;
+use crate::stream::StreamMonitor;
+
+mod readers;
+
+pub use readers::{progress_reader, stderr_reader};
 
 /// Frames the engine may queue ahead of the video writer.
 pub const VIDEO_QUEUE_FRAMES: usize = 4;
@@ -67,6 +79,17 @@ const SILENCE_CHUNK: usize = 4096;
 /// Locks `m`, ignoring poisoning (the data are plain snapshots).
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The newest error lines; see the module docs.
+#[derive(Debug, Default)]
+pub struct ErrorLog {
+    /// The newest error line.
+    newest: Option<String>,
+    /// `newest` was the stream's.
+    newest_is_stream: bool,
+    /// The newest error line that was not the stream's.
+    other: Option<String>,
 }
 
 /// State shared between the encoder handle and its threads.
@@ -104,10 +127,14 @@ pub struct Shared {
     pub stop: AtomicBool,
     /// Set when ffmpeg's stdout reached end of file (it has exited).
     pub stdout_closed: AtomicBool,
-    /// Newest error line from ffmpeg or a writer, redacted.
-    pub last_error: Mutex<Option<String>>,
+    /// Newest error lines from ffmpeg or a writer, redacted.
+    pub last_error: Mutex<ErrorLog>,
     /// Newest complete progress report.
     pub progress: Mutex<Progress>,
+    /// Bitrate ffmpeg muxed over the newest window, from mux statistics.
+    pub muxed_kbps: Mutex<Option<f64>>,
+    /// Copy of the stderr reader's stream monitor; `None` without a stream.
+    pub stream: Mutex<Option<StreamMonitor>>,
     /// Spare frame buffers.
     pub pool: Mutex<Vec<Vec<u8>>>,
 }
@@ -115,8 +142,24 @@ pub struct Shared {
 impl Shared {
     /// Records `msg` as the newest error, truncated to a sane length.
     pub fn record_error(&self, msg: &str) {
+        self.record(msg, false);
+    }
+
+    /// Records `msg`, an error of the stream, as the newest error; the
+    /// stream's next reconnection clears it ([`Shared::clear_stream_error`]).
+    pub fn record_stream_error(&self, msg: &str) {
+        self.record(msg, true);
+    }
+
+    /// Records `msg` as the newest error, the stream's or not.
+    fn record(&self, msg: &str, stream: bool) {
         let msg: String = msg.chars().take(MAX_ERROR_CHARS).collect();
-        *lock(&self.last_error) = Some(msg);
+        let mut log = lock(&self.last_error);
+        if !stream {
+            log.other = Some(msg.clone());
+        }
+        log.newest = Some(msg);
+        log.newest_is_stream = stream;
     }
 
     /// Records a pipe failure unless an error is already known.
@@ -125,15 +168,39 @@ impl Shared {
     /// line says why, and stderr lines always win, so the symptom never
     /// hides the cause regardless of which thread notices first.
     pub fn record_pipe_error(&self, msg: &str) {
-        let mut last = lock(&self.last_error);
-        if last.is_none() {
-            *last = Some(msg.chars().take(MAX_ERROR_CHARS).collect());
+        if lock(&self.last_error).newest.is_none() {
+            self.record(msg, false);
+        }
+    }
+
+    /// Drops the newest error if it was the stream's, so the newest other
+    /// error (if any) shows again: the stream reconnected.
+    pub fn clear_stream_error(&self) {
+        let mut log = lock(&self.last_error);
+        if log.newest_is_stream {
+            log.newest = log.other.clone();
+            log.newest_is_stream = false;
         }
     }
 
     /// The newest error line.
     pub fn last_error(&self) -> Option<String> {
-        lock(&self.last_error).clone()
+        lock(&self.last_error).newest.clone()
+    }
+
+    /// The bitrate ffmpeg muxed over the newest window, when measured.
+    pub fn muxed_kbps(&self) -> Option<f64> {
+        *lock(&self.muxed_kbps)
+    }
+
+    /// The newest copy of the stream monitor.
+    pub fn stream(&self) -> Option<StreamMonitor> {
+        *lock(&self.stream)
+    }
+
+    /// Publishes a copy of the stream monitor.
+    pub fn publish_stream(&self, monitor: StreamMonitor) {
+        *lock(&self.stream) = Some(monitor);
     }
 
     /// The newest progress report.
@@ -314,252 +381,5 @@ fn repay_audio(out: &mut impl Write, shared: &Shared, bytes: &mut Vec<u8>) -> io
     Ok(())
 }
 
-/// Calls `f` with each line of `input` (lossily decoded) until end of file.
-fn for_each_line(input: impl Read, mut f: impl FnMut(&str)) {
-    let mut reader = BufReader::new(input);
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => f(&String::from_utf8_lossy(&line)),
-        }
-    }
-}
-
-/// Parses ffmpeg's `-progress` stream from stdout into [`Shared::progress`].
-///
-/// When ffmpeg reports no bitrate (the tee case) and a recording exists,
-/// the bitrate is the recording's average so far.
-pub fn progress_reader(stdout: impl Read, shared: Arc<Shared>, record_path: Option<PathBuf>) {
-    let mut parser = ProgressParser::new();
-    for_each_line(stdout, |line| {
-        if let Some(mut report) = parser.feed(line) {
-            if report.bitrate_kbps.is_none()
-                && let (Some(path), Some(t)) = (&record_path, report.out_time)
-                && let Ok(meta) = std::fs::metadata(path)
-            {
-                report.bitrate_kbps = average_kbps(meta.len(), t);
-            }
-            *lock(&shared.progress) = report;
-        }
-    });
-    shared.stdout_closed.store(true, Ordering::SeqCst);
-}
-
-/// Keeps the newest non-empty stderr line, with the stream key redacted.
-pub fn stderr_reader(stderr: impl Read, shared: Arc<Shared>, rtmp_url: Option<String>) {
-    for_each_line(stderr, |line| {
-        for piece in line.split('\r').map(str::trim).filter(|p| !p.is_empty()) {
-            shared.record_error(&redact(piece, rtmp_url.as_deref()));
-        }
-    });
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::mpsc::sync_channel;
-
-    /// A writer that fails after `ok` successful writes.
-    struct FailAfter {
-        /// Writes left before failing.
-        ok: usize,
-        /// Bytes accepted so far.
-        written: Vec<u8>,
-    }
-
-    impl Write for FailAfter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            if self.ok == 0 {
-                return Err(io::ErrorKind::BrokenPipe.into());
-            }
-            self.ok -= 1;
-            self.written.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// Runs the video writer over `frames` with `debt` dropped frames owed
-    /// up front, returning the bytes written and the shared state.
-    fn run_video(frames: &[&[u8]], debt: u64, stopping: bool) -> (Vec<u8>, Arc<Shared>) {
-        let shared = Arc::new(Shared::default());
-        let (tx, rx) = sync_channel(frames.len().max(1));
-        for f in frames {
-            shared.video_queued.fetch_add(1, Ordering::SeqCst);
-            tx.send(f.to_vec()).unwrap();
-        }
-        drop(tx);
-        shared.video_debt.store(debt, Ordering::SeqCst);
-        shared.stop.store(stopping, Ordering::SeqCst);
-        let mut out = Vec::new();
-        video_writer(rx, &mut out, shared.clone());
-        (out, shared)
-    }
-
-    #[test]
-    fn video_writer_repays_drops_with_the_previous_frame() {
-        let (out, shared) = run_video(&[&[1, 1], &[2, 2]], 2, false);
-        // Nothing to repeat before frame 1; the debt is paid before frame 2.
-        assert_eq!(out, [1, 1, 1, 1, 1, 1, 2, 2]);
-        assert_eq!(shared.frames_written.load(Ordering::SeqCst), 4);
-        assert_eq!(shared.frames_repeated.load(Ordering::SeqCst), 2);
-        assert_eq!(shared.video_queued.load(Ordering::SeqCst), 0);
-        assert!(shared.video_closed.load(Ordering::SeqCst));
-        assert_eq!(shared.last_error(), None);
-    }
-
-    #[test]
-    fn video_writer_settles_debt_at_close_unless_stopping() {
-        let (out, _) = run_video(&[&[7]], 2, false);
-        assert_eq!(out, [7, 7, 7]);
-        let (out, shared) = run_video(&[&[7]], 2, true);
-        assert_eq!(out, [7]);
-        assert_eq!(shared.frames_repeated.load(Ordering::SeqCst), 0);
-        // No frame at all: nothing written, nothing to repeat.
-        let (out, _) = run_video(&[], 3, false);
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn video_writer_records_pipe_errors() {
-        let shared = Arc::new(Shared::default());
-        let (tx, rx) = sync_channel(4);
-        shared.video_queued.store(2, Ordering::SeqCst);
-        tx.send(vec![1u8]).unwrap();
-        tx.send(vec![2u8]).unwrap();
-        let sink = FailAfter {
-            ok: 1,
-            written: Vec::new(),
-        };
-        video_writer(rx, sink, shared.clone());
-        assert!(shared.last_error().unwrap().starts_with("video pipe:"));
-        assert!(shared.video_closed.load(Ordering::SeqCst));
-        // The receiver is gone, so further sends fail.
-        assert!(tx.try_send(vec![3]).is_err());
-    }
-
-    #[test]
-    fn samples_are_little_endian_and_sanitised() {
-        let mut out = Vec::new();
-        let mut bytes = Vec::new();
-        write_samples(&mut out, &[1.0, f32::NAN, -0.5, f32::INFINITY], &mut bytes).unwrap();
-        let back: Vec<f32> = out
-            .chunks(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-            .collect();
-        assert_eq!(back, [1.0, 0.0, -0.5, 0.0]);
-    }
-
-    #[test]
-    fn audio_debt_becomes_silence() {
-        let shared = Shared::default();
-        shared
-            .audio_debt
-            .store(SILENCE_CHUNK as u64 + 3, Ordering::SeqCst);
-        let mut out = Vec::new();
-        repay_audio(&mut out, &shared, &mut Vec::new()).unwrap();
-        assert_eq!(out.len(), (SILENCE_CHUNK + 3) * 4);
-        assert!(out.iter().all(|&b| b == 0));
-        assert_eq!(
-            shared.audio_silence_samples.load(Ordering::SeqCst),
-            SILENCE_CHUNK as u64 + 3
-        );
-        assert_eq!(shared.audio_debt.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn debt_saturates_at_cap() {
-        let d = AtomicU64::new(0);
-        add_debt(&d, 3, 5);
-        add_debt(&d, 3, 5);
-        assert_eq!(d.load(Ordering::SeqCst), 5);
-        add_debt(&d, u64::MAX, u64::MAX);
-        assert_eq!(d.load(Ordering::SeqCst), u64::MAX);
-    }
-
-    #[test]
-    fn audio_writer_streams_over_loopback() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let shared = Arc::new(Shared::default());
-        let (tx, rx) = sync_channel(4);
-        tx.send(vec![0.25f32, -0.25]).unwrap();
-        drop(tx);
-        let s = shared.clone();
-        let writer = thread::spawn(move || audio_writer(rx, listener, s, Duration::from_secs(5)));
-        let mut client = TcpStream::connect(addr).unwrap();
-        let mut got = Vec::new();
-        client.read_to_end(&mut got).unwrap();
-        writer.join().unwrap();
-        assert_eq!(got.len(), 8);
-        assert_eq!(f32::from_le_bytes(got[..4].try_into().unwrap()), 0.25);
-        assert!(shared.audio_connected.load(Ordering::SeqCst));
-        assert_eq!(shared.audio_samples_written.load(Ordering::SeqCst), 2);
-        assert_eq!(shared.last_error(), None);
-    }
-
-    #[test]
-    fn audio_accept_times_out_or_aborts() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let shared = Arc::new(Shared::default());
-        let (_tx, rx) = sync_channel::<Vec<f32>>(1);
-        audio_writer(rx, listener, shared.clone(), Duration::from_millis(20));
-        assert!(shared.last_error().unwrap().contains("did not connect"));
-        assert!(shared.audio_closed.load(Ordering::SeqCst));
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let shared = Arc::new(Shared::default());
-        shared.stdout_closed.store(true, Ordering::SeqCst);
-        let (_tx, rx) = sync_channel::<Vec<f32>>(1);
-        audio_writer(rx, listener, shared.clone(), Duration::from_secs(30));
-        assert!(shared.last_error().unwrap().contains("exited before"));
-    }
-
-    #[test]
-    fn readers_publish_progress_and_redacted_errors() {
-        let shared = Arc::new(Shared::default());
-        let progress = b"frame=5\nfps=30\nout_time_us=166666\nprogress=end\n";
-        progress_reader(&progress[..], shared.clone(), None);
-        let p = shared.progress();
-        assert_eq!(p.frame, 5);
-        assert!(p.ended);
-        assert_eq!(p.bitrate_kbps, None);
-        assert!(shared.stdout_closed.load(Ordering::SeqCst));
-
-        let url = "rtmp://host/live/super-secret";
-        let stderr = b"first\r\n[fifo] Error opening rtmp://host/live/super-secret: refused\n\n";
-        stderr_reader(&stderr[..], shared.clone(), Some(url.into()));
-        let err = shared.last_error().unwrap();
-        assert_eq!(
-            err,
-            "[fifo] Error opening rtmp://host/live/<redacted>: refused"
-        );
-    }
-
-    #[test]
-    fn pipe_errors_never_hide_ffmpeg_errors() {
-        let shared = Shared::default();
-        shared.record_pipe_error("video pipe: broken");
-        assert_eq!(shared.last_error().as_deref(), Some("video pipe: broken"));
-        shared.record_error("ffmpeg: the cause");
-        shared.record_pipe_error("audio pipe: broken");
-        assert_eq!(shared.last_error().as_deref(), Some("ffmpeg: the cause"));
-    }
-
-    #[test]
-    fn errors_are_truncated_and_buffers_pooled() {
-        let shared = Shared::default();
-        shared.record_error(&"x".repeat(10 * MAX_ERROR_CHARS));
-        assert_eq!(shared.last_error().unwrap().len(), MAX_ERROR_CHARS);
-        assert!(shared.take_buffer().is_empty());
-        for _ in 0..POOL_FRAMES + 3 {
-            shared.recycle(vec![0u8; 4]);
-        }
-        assert_eq!(lock(&shared.pool).len(), POOL_FRAMES);
-        assert_eq!(shared.take_buffer().len(), 4);
-    }
-}
+mod tests;

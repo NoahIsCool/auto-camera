@@ -225,6 +225,78 @@ fn output_text_covers_every_state_and_stat() {
     );
 }
 
+#[test]
+fn the_stream_line_names_the_state_bitrate_and_outages() {
+    let mut s = StreamHealth {
+        state: StreamState::Connected,
+        stalled: false,
+        outages: 0,
+        reconnects: 0,
+        bitrate_kbps: Some(811.6),
+    };
+    assert_eq!(stream_line(&s), "stream connected · 812 kbit/s");
+    assert_eq!(stream_tone(&s), Tone::Plain);
+    s.bitrate_kbps = None;
+    assert_eq!(stream_line(&s), "stream connected · – kbit/s");
+
+    s.state = StreamState::Reconnecting { attempt: 3 };
+    s.outages = 1;
+    assert_eq!(
+        stream_line(&s),
+        "stream reconnecting (attempt 3) · 1 outage"
+    );
+    assert_eq!(stream_tone(&s), Tone::Warning);
+    s.state = StreamState::Connected;
+    s.stalled = true;
+    s.outages = 2;
+    assert_eq!(
+        stream_line(&s),
+        "stream connected · – kbit/s · stalled, dropping packets · 2 outages"
+    );
+    assert_eq!(stream_tone(&s), Tone::Warning, "a stall is a warning");
+
+    s = StreamHealth {
+        state: StreamState::Connecting,
+        ..s
+    };
+    assert_eq!(
+        stream_line(&s),
+        "stream connecting… · no answer · 2 outages"
+    );
+    s.stalled = false;
+    assert_eq!(stream_tone(&s), Tone::Weak);
+    s.state = StreamState::Down;
+    assert_eq!(stream_tone(&s), Tone::Warning);
+}
+
+#[test]
+fn the_stream_line_shows_only_while_a_streaming_session_is_live() {
+    let mut out = OutputView {
+        state: OutputState::Running,
+        ..recording("/tmp/show.mp4")
+    };
+    assert_eq!(stream_status(&out), None, "no stats yet");
+    out.stats = Some(encoder_stats());
+    assert_eq!(stream_status(&out), None, "this session only records");
+    let mut stats = encoder_stats();
+    stats.stream = Some(StreamHealth {
+        state: StreamState::Reconnecting { attempt: 1 },
+        stalled: false,
+        outages: 1,
+        reconnects: 0,
+        bitrate_kbps: Some(0.0),
+    });
+    out.stats = Some(stats);
+    let line = "stream reconnecting (attempt 1) · 1 outage".to_owned();
+    assert_eq!(stream_status(&out), Some((line.clone(), Tone::Warning)));
+    out.state = OutputState::Stopping;
+    assert_eq!(stream_status(&out), Some((line, Tone::Warning)));
+    for state in [OutputState::Idle, OutputState::Finished] {
+        out.state = state;
+        assert_eq!(stream_status(&out), None, "ffmpeg is gone");
+    }
+}
+
 /// A live query for `prompt`, read with the built-in lexicon for a
 /// detector that does not see actions (OWLv2), framed by `sizes` (the shot
 /// words' sizes, or medium and close, when `None`).

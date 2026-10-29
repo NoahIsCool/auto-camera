@@ -118,6 +118,7 @@ pub fn encoder_stats() -> EncoderStats {
             speed: Some(1.0),
             ended: false,
         },
+        stream: None,
     }
 }
 
