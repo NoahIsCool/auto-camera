@@ -1,9 +1,12 @@
 //! Headless runs on small synthetic studios (real time, about a second each).
 
+mod keep_awake;
 mod summary;
+mod trace;
 
 use super::report::round;
 use super::*;
+use crate::testing::{have, temp_path};
 use ac_core::{ShotSize, TrackState};
 use ac_engine::{
     DetectorSettings, EngineCore, OutputView, PresetSpec, QuerySettings, ShotView, SidecarSettings,
@@ -32,6 +35,7 @@ fn studio() -> StudioConfig {
         prompt: "person".into(),
         presets: Some(vec![PresetSpec::Size(ShotSize::Medium)]),
         literal: false,
+        priority: None,
     });
     c.output.width = 320;
     c.output.height = 180;
@@ -43,7 +47,11 @@ fn studio() -> StudioConfig {
 
 /// Run options.
 fn options(seconds: f64, record: Option<PathBuf>) -> HeadlessOptions {
-    HeadlessOptions { seconds, record }
+    HeadlessOptions {
+        seconds,
+        record,
+        trace: None,
+    }
 }
 
 /// The snapshot of [`studio`] before its first tick, built by a real core:
@@ -64,32 +72,6 @@ fn first_snapshot(config: &StudioConfig) -> Arc<EngineSnapshot> {
     };
     let core = EngineCore::new(config, vec![info], &[true]).unwrap();
     Arc::new(core.snapshot(OutputView::default(), TimingView::default(), true))
-}
-
-/// True when `tool -version` succeeds. When it does not and
-/// `AC_REQUIRE_FFMPEG` is set (CI), panics instead of letting the caller
-/// skip.
-pub(crate) fn have(tool: &str) -> bool {
-    let found = std::process::Command::new(tool)
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    let required = std::env::var_os("AC_REQUIRE_FFMPEG").is_some_and(|v| !v.is_empty() && v != "0");
-    assert!(
-        found || !required,
-        "{tool} is not installed, and AC_REQUIRE_FFMPEG says it must be"
-    );
-    found
-}
-
-/// A fresh, unique path in the temp directory (not created).
-pub(crate) fn temp_path(name: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    std::env::temp_dir().join(format!("auto-camera-{}-{nanos}-{name}", std::process::id()))
 }
 
 #[test]
@@ -161,23 +143,27 @@ fn a_run_with_the_auto_director_switches_by_itself() {
 
 #[test]
 fn unusable_setups_fail_with_a_summary() {
-    let missing = StudioConfig::with_source(
+    // A missing file only keeps its source offline (see `no_picture`); a
+    // pattern that cannot be made stops the start.
+    let unusable = StudioConfig::with_source(
         "f",
-        SourceConfig::File {
-            path: "/nonexistent/auto-camera/clip.mp4".into(),
-            loop_playback: false,
-            max_width: None,
-            audio: false,
+        SourceConfig::Synthetic {
+            width: 320,
+            height: 180,
+            fps: 0.0,
+            subjects: 1,
         },
     );
     let s = run(
-        missing,
+        unusable,
         Path::new("x.toml"),
         &options(1.0, None),
         &QuitSignal::new(),
     );
     assert!(!s.ok);
-    assert!(s.error.unwrap().contains("did not start"));
+    let error = s.error.unwrap();
+    assert!(error.contains("did not start"), "{error}");
+    assert!(error.contains("frame rate"), "{error}");
     assert!(s.sources.is_empty());
 
     let existing = temp_path("existing.mp4");
@@ -242,6 +228,7 @@ fn a_run_whose_engine_dies_fails_at_once_with_the_reason() {
             ..EngineOptions::default()
         },
         &QuitSignal::new(),
+        awake::log,
     );
     assert!(!s.ok);
     let error = s.error.as_deref().unwrap_or_default();
@@ -333,6 +320,8 @@ fn the_summary_is_json() {
     );
     assert!(v["output"].is_null());
     let source = &v["sources"][0];
+    assert_eq!(source["state"], "running");
+    assert!(source["error"].is_null());
     assert_eq!(source["discovery_preparing"], false);
     assert!(source["detector_ready_s"].is_number());
     let wide = &v["shots"][0];
@@ -599,4 +588,99 @@ fn a_termination_signal_ends_the_run_early_and_still_shuts_down() {
         started.elapsed()
     );
     assert!(s.threads_joined > 0, "the engine was shut down: {s:?}");
+}
+
+#[test]
+fn no_picture_says_what_keeps_each_source_offline() {
+    let mut snap = (*first_snapshot(&studio())).clone();
+    assert_eq!(no_picture(&snap), "no source delivered a picture in time");
+    snap.sources[0].error = Some("cannot open source: cannot open later.mkv".into());
+    assert_eq!(
+        no_picture(&snap),
+        "no source delivered a picture in time; \
+         source stage: cannot open source: cannot open later.mkv"
+    );
+}
+
+#[test]
+fn never_delivered_names_each_source_that_stayed_off_the_air() {
+    let mut snap = (*first_snapshot(&studio())).clone();
+    assert_eq!(
+        never_delivered(&snap).as_deref(),
+        Some("source stage never delivered a picture")
+    );
+    let mut later = snap.sources[0].clone();
+    later.id = ac_core::SourceId("later".into());
+    later.error = Some("cannot open source: cannot open later.mkv".into());
+    snap.sources.push(later);
+    snap.sources[0].frames = 1;
+    assert_eq!(
+        never_delivered(&snap).as_deref(),
+        Some("source later never delivered a picture: cannot open source: cannot open later.mkv")
+    );
+    snap.sources[0].frames = 0;
+    assert_eq!(
+        never_delivered(&snap).as_deref(),
+        Some(
+            "source stage never delivered a picture; \
+             source later never delivered a picture: cannot open source: cannot open later.mkv"
+        )
+    );
+    for s in &mut snap.sources {
+        s.frames = 1;
+    }
+    assert_eq!(never_delivered(&snap), None, "every source delivered");
+}
+
+/// A run with one of two sources missing runs the other, but nobody would
+/// notice the missing one, so the run fails, saying which source never
+/// delivered and why, and its summary shows that source offline.
+#[test]
+fn a_run_with_a_source_that_never_delivers_fails_and_says_why() {
+    let mut config = studio();
+    // The synthetic detector needs every source synthetic.
+    config.detector = DetectorSettings::None;
+    config.sources.push(ac_engine::SourceEntry {
+        id: "later".into(),
+        name: None,
+        input: SourceConfig::File {
+            path: temp_path("missing.mkv"),
+            loop_playback: false,
+            max_width: None,
+            audio: false,
+        },
+    });
+    let s = run(
+        config,
+        Path::new("x.toml"),
+        &options(0.5, None),
+        &QuitSignal::new(),
+    );
+    assert!(!s.ok);
+    let error = s.error.unwrap();
+    assert!(
+        error.starts_with("source later never delivered a picture: ")
+            && error.contains("missing.mkv"),
+        "{error}"
+    );
+    let later = &s.sources[1];
+    assert!(
+        matches!(later.state.as_str(), "offline" | "reconnecting"),
+        "{}",
+        later.state
+    );
+    let why = later.error.as_deref().unwrap_or_default();
+    assert!(why.contains("missing.mkv"), "{why}");
+    assert_eq!(later.frames, 0);
+    let stage = &s.sources[0];
+    assert_eq!(
+        (stage.state.as_str(), stage.error.as_deref()),
+        ("running", None)
+    );
+    assert!(stage.frames > 0);
+    assert_eq!(
+        s.program.last.as_deref(),
+        Some("stage/wide"),
+        "the stage ran"
+    );
 }

@@ -90,6 +90,7 @@ fn two_queries() -> StudioConfig {
         prompt: "body".into(),
         presets: Some(vec![PresetSpec::Size(ShotSize::Full)]),
         literal: false,
+        priority: None,
     });
     c
 }
@@ -171,6 +172,7 @@ fn a_kept_shot_frames_with_the_new_query_s_preset() {
         prompt: "body".into(),
         presets: Some(vec![PresetSpec::Size(ShotSize::Close)]),
         literal: false,
+        priority: None,
     });
     let mut rig = Rig::new(c);
     rig.run(31);

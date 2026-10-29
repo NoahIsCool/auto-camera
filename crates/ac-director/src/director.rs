@@ -20,13 +20,14 @@
 //! 4. **Pool.** In fallback, or with nothing on program, the pool is the
 //!    eligible wides (all eligible shots if there is no eligible wide).
 //!    Otherwise it is every eligible shot.
-//! 5. **Hysteresis.** If the current suggestion is not in the pool it is
-//!    replaced by the best-scoring pool member at once. Otherwise it changes
-//!    only after the best challenger has led it by at least `margin`
-//!    continuously for `hold`; the timer tracks the lead, not the challenger's
-//!    identity, so near-equal challengers swapping places cannot starve a
-//!    switch away from a clearly worse incumbent. Ties go to the earlier
-//!    candidate in the input list.
+//! 5. **Hysteresis.** Each pool member is scored with [`score`] (quality,
+//!    prompt priority and recency). If the current suggestion is not in the
+//!    pool it is replaced by the best-scoring pool member at once. Otherwise
+//!    it changes only after the best challenger has led it by at least
+//!    `margin` continuously for `hold`; the timer tracks the lead, not the
+//!    challenger's identity, so near-equal challengers swapping places
+//!    cannot starve a switch away from a clearly worse incumbent. Ties go to
+//!    the earlier candidate in the input list.
 //! 6. **Take (Auto only, never during a transition or while the operator's
 //!    switching pauses it, [`operator`]).** With nothing on
 //!    program, or in fallback, the suggestion is taken at once (fallback with
@@ -53,6 +54,8 @@ mod operator;
 
 #[cfg(test)]
 mod operator_tests;
+#[cfg(test)]
+mod priority_tests;
 #[cfg(test)]
 mod proptests;
 #[cfg(test)]

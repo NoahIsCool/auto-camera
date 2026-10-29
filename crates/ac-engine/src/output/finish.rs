@@ -8,9 +8,9 @@
 //! reads; stats read just before finishing stand in when the finish fails.
 //! [`OutputController::shutdown`] instead
 //! finishes on the calling thread and joins every helper, including the one
-//! still starting an encoder, which it then finishes too; dropping the
-//! controller does the same. So no ffmpeg process or helper thread outlives
-//! the controller.
+//! still starting an encoder, which it then finishes too, and then releases
+//! the keep-awake hold; dropping the controller does the same. So no ffmpeg
+//! or `caffeinate` process and no helper thread outlives the controller.
 
 use super::{Event, OutputController};
 use crate::snapshot::OutputState;
@@ -42,8 +42,9 @@ impl OutputController {
         }
     }
 
-    /// Finishes a running encoder synchronously and joins every helper.
-    /// Returns the number of helper threads joined.
+    /// Finishes a running encoder synchronously, joins every helper and
+    /// then releases the keep-awake hold. Returns the number of helper
+    /// threads joined.
     pub fn shutdown(&mut self) -> usize {
         if let Some(encoder) = self.encoder.take() {
             let before = Box::new(encoder.stats());
@@ -78,6 +79,7 @@ impl OutputController {
             let _ = h.join();
             joined += 1;
         }
+        self.awake.release();
         joined
     }
 }

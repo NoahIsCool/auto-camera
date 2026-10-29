@@ -267,8 +267,12 @@ pub struct SourceView {
     pub id: SourceId,
     /// Operator-facing name.
     pub name: String,
-    /// Health reported by the source.
+    /// Health reported by the source: `Offline` or `Reconnecting` while a
+    /// source that lost its input (or was missing at start) is retried.
     pub state: SourceState,
+    /// Why the source is not delivering, when an error is the reason (what
+    /// keeps it offline, or what stopped it); `None` while it delivers.
+    pub error: Option<String>,
     /// Picture width.
     pub width: u32,
     /// Picture height.
@@ -314,6 +318,24 @@ pub enum OutputState {
     Failed(String),
 }
 
+/// Whether the machine is held awake for the output session (macOS
+/// `caffeinate`, see [`ac_output::keep_awake`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum KeepAwakeState {
+    /// No session is live, so nothing is held.
+    #[default]
+    Idle,
+    /// `caffeinate` runs, with this process id.
+    Held(u32),
+    /// The engine's own hold is turned off ([`ac_output::Caffeinate::Off`])
+    /// because its caller holds the machine awake, as a headless run does
+    /// for the whole run.
+    HeldByCaller,
+    /// The session is live but not held awake, and why: another platform,
+    /// or `caffeinate` could not start or ended early.
+    NotHeld(String),
+}
+
 /// Program output state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OutputView {
@@ -329,6 +351,8 @@ pub struct OutputView {
     pub audio: Option<AudioPacerStats>,
     /// Program frames handed to the encoder this session.
     pub frames_pushed: u64,
+    /// Whether the machine is held awake for the session.
+    pub keep_awake: KeepAwakeState,
 }
 
 /// Master-clock timing.

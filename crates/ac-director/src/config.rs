@@ -13,7 +13,8 @@
 //!
 //! Shared defaults: jump-cut IoU 0.4, challenger margin δ = 0.1 held for
 //! 0.75 s, fallback when program quality is below 0.3 for 0.5 s, and the
-//! [`ScoreWeights`] defaults.
+//! [`ScoreWeights`] defaults (wide weight 0.75, 0.05 per priority level, a
+//! variety penalty of 0.3 decaying over 60 s; see [`crate::candidate`]).
 //!
 //! The operator's side has its own parameters, the same for both profiles:
 //! a shot the operator skips is left out of the suggestions for 30 s, and
@@ -185,6 +186,7 @@ impl DirectorConfig {
         unit("fallback_quality", f64::from(self.fallback_quality))?;
         non_negative("margin", f64::from(self.margin))?;
         non_negative("wide_weight", f64::from(self.scoring.wide_weight))?;
+        non_negative("priority_weight", f64::from(self.scoring.priority_weight))?;
         non_negative("variety_penalty", f64::from(self.scoring.variety_penalty))?;
         positive("pause", self.pause)?;
         positive("skip", self.skip)
@@ -381,5 +383,29 @@ mod tests {
             ..DirectorConfig::default()
         };
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn priority_weight_must_be_finite_and_non_negative() {
+        let with = |priority_weight| DirectorConfig {
+            scoring: ScoreWeights {
+                priority_weight,
+                ..ScoreWeights::default()
+            },
+            ..DirectorConfig::default()
+        };
+        assert!((ScoreWeights::default().priority_weight - 0.05).abs() < 1e-6);
+        for bad in [-0.05, f32::NAN, f32::INFINITY] {
+            assert!(matches!(
+                with(bad).validate(),
+                Err(ConfigError::OutOfRange {
+                    name: "priority_weight",
+                    ..
+                })
+            ));
+        }
+        // Zero turns priorities off; a large weight is the operator's call.
+        assert!(with(0.0).validate().is_ok());
+        assert!(with(2.0).validate().is_ok());
     }
 }

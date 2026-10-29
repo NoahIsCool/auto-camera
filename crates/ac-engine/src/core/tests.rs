@@ -22,9 +22,11 @@ use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 mod feedback;
 mod framing;
 mod operator;
+mod priority;
 mod protection;
 mod shared;
 mod switching;
+mod trace;
 mod vision;
 
 /// Source and output width.
@@ -61,6 +63,7 @@ fn config(subjects: u32) -> StudioConfig {
             PresetSpec::Size(ShotSize::Close),
         ]),
         literal: false,
+        priority: None,
     });
     c.output.width = W;
     c.output.height = H;
@@ -148,6 +151,8 @@ impl Rig {
             state: SourceState::Running,
             frame: Some(frame),
             detector_loading: self.loading,
+            error: None,
+            info: None,
         };
         let results = std::mem::take(&mut self.pending);
         let out = self.core.tick(now, &[feed], results);

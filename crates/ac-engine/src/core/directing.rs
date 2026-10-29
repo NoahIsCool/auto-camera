@@ -43,6 +43,38 @@
 //! on the tick that ends it, or on the next tick when a command (the T-bar
 //! or Cut) ends it.
 //!
+//! # Priority
+//!
+//! Each candidate carries a priority level, the `p` of the director's
+//! score ([`ac_director::candidate`]): how many levels the priority of its
+//! subject's primary query stands above the *floor*, the lowest priority
+//! among the primary queries of the subjects that have shots.
+//!
+//! - **The subject's primary query, not its aliases.** Priority belongs to
+//!   the subject, so all its shots carry one level, whichever query's
+//!   preset made each of them. Aliases do not raise it: the store adds an
+//!   alias on one overlapping box and keeps it until the subject retires,
+//!   so one stray low-score "pastor" box on a band member would otherwise
+//!   put the band member level with the pastor for the rest of the show,
+//!   the "wrong subject" failure priority is there to help with. The cost
+//!   is the other way round and milder: a subject found first through a
+//!   low-priority prompt stays at that prompt's level when a higher one
+//!   also finds it, and so loses a bonus rather than wins one wrongly.
+//!   When the operator removes the primary query and the store promotes an
+//!   alias, the level follows the new primary query.
+//! - **The floor counts queries that have subjects.** Wides, and orphans
+//!   (subjects whose primary query was removed, kept while on air), stand
+//!   at the floor, level 0. A query that finds no one, such as one just
+//!   added, does not move the floor, so it cannot shift every other
+//!   prompt's shots against the wides. The floor moves when subjects of a
+//!   lower-priority query appear or go, lost ones included until they
+//!   retire.
+//!
+//! Counting from the floor makes only differences matter: with every query
+//! at one priority, or only one query's subjects on screen, every level is
+//! 0 and the director scores exactly as it did before it weighed
+//! priorities.
+//!
 //! [`EngineCommand::SetPreview`]: crate::command::EngineCommand::SetPreview
 //! [`EngineCommand::ReleasePreview`]: crate::command::EngineCommand::ReleasePreview
 
@@ -53,6 +85,7 @@ use ac_director::{DirectorInput, DirectorMode, ShotCandidate};
 use ac_switcher::TransitionKind;
 
 use super::EngineCore;
+use crate::catalog::ShotEntry;
 
 impl EngineCore {
     /// Book-keeps program changes: on-air time, last use and change count.
@@ -92,14 +125,17 @@ impl EngineCore {
         }
     }
 
-    /// Runs the director and acts on its decision for the current mode.
-    pub(super) fn run_director(&mut self) {
-        self.refresh_hold();
-        let candidates: Vec<ShotCandidate> = self
-            .catalog
-            .entries()
+    /// The director's view of the catalog: one candidate per shot, in
+    /// display order, with its priority level (see the module docs).
+    pub(super) fn director_candidates(&self) -> Vec<ShotCandidate> {
+        let entries = self.catalog.entries();
+        let priorities: Vec<Option<u8>> =
+            entries.iter().map(|e| self.subject_priority(e)).collect();
+        let floor = priorities.iter().flatten().min().copied().unwrap_or(0);
+        entries
             .iter()
-            .map(|e| ShotCandidate {
+            .zip(priorities)
+            .map(|(e, priority)| ShotCandidate {
                 id: e.shot.id.clone(),
                 source: self.sources[e.source].id.clone(),
                 kind: (&e.shot.target).into(),
@@ -107,8 +143,22 @@ impl EngineCore {
                 quality: e.quality,
                 available: e.available,
                 recently_used_at: e.last_on_program,
+                priority: priority.map_or(0, |p| p.saturating_sub(floor)),
             })
-            .collect();
+            .collect()
+    }
+
+    /// The priority of the primary query of shot `e`'s subject; `None` for
+    /// a wide, and for an orphan, whose primary query is no longer live.
+    fn subject_priority(&self, e: &ShotEntry) -> Option<u8> {
+        let record = self.sources[e.source].vision.store().record(e.subject?)?;
+        self.priorities.get(&record.subject.query).copied()
+    }
+
+    /// Runs the director and acts on its decision for the current mode.
+    pub(super) fn run_director(&mut self) {
+        self.refresh_hold();
+        let candidates = self.director_candidates();
         let input = DirectorInput {
             now: self.now,
             program: self.switcher.program(),

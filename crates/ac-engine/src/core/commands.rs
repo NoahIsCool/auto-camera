@@ -109,6 +109,7 @@ impl EngineCore {
                 };
                 // Removed first, so results already in flight are filtered.
                 self.queries.remove(pos);
+                self.priorities.remove(query);
                 for s in &mut self.sources {
                     s.vision.remove_query(query);
                     s.discovery.matches.remove(query);
@@ -225,7 +226,8 @@ impl EngineCore {
 
     /// Reads the prompt once with the studio's reader (its lexicon and
     /// what its detector sees), settles the presets ([`crate::queries`])
-    /// and adds the query.
+    /// and adds the query, ranked as if listed last
+    /// ([`crate::config::Ranking::appended`]).
     fn add_query(
         &mut self,
         name: &str,
@@ -239,7 +241,10 @@ impl EngineCore {
         if self.queries.iter().any(|q| q.id == id) {
             return Err(CommandError::DuplicateQuery(id));
         }
+        let last = self.queries.last().and_then(|q| self.priorities.get(&q.id));
+        let priority = self.ranking.appended(last.copied());
         self.queries.push(query);
+        self.priorities.insert(id.clone(), priority);
         Ok(CommandReply::QueryAdded { id })
     }
 

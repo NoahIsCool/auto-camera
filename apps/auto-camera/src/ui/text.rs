@@ -13,6 +13,7 @@ use ac_engine::{
     EngineSnapshot, MatchView, OutputState, OutputView, PassOutcome, QueryView, ShotStatus,
     ShotView, SourceView, TimingView,
 };
+use ac_media::SourceState;
 use ac_output::EncoderStats;
 
 /// Shown for a value that is not known.
@@ -327,21 +328,32 @@ pub fn match_lines(snap: &EngineSnapshot, q: &QueryView) -> Vec<(String, Tone, S
 }
 
 /// One source's health for the status bar at master-clock `media_time`:
-/// frames, the newest successful detector pass's time, and how many
-/// requests failed, came back too late or got no answer.
+/// frames (the measured rate over the nominal one, which a source that has
+/// not opened yet does not know), the newest successful detector pass's
+/// time, and how many requests failed, came back too late or got no answer.
 ///
 /// While the source's detector is still loading the line says so, with how
 /// long it has been loading: a detector prepares from the engine's start,
 /// at media time zero, so that is `media_time` itself.
+///
+/// A source without a picture says why: `OFFLINE` or `RECONNECTING` while
+/// its input is retried, `NO SIGNAL` otherwise, followed by the error that
+/// keeps it off the air when there is one (a missing file, a lost device),
+/// which is where a source that cannot be opened is reported.
 pub fn source_line(source: &SourceView, media_time: Duration) -> String {
     let fps = if source.frames == 0 {
         NONE.to_owned()
     } else {
         format!("{:.1}", source.fps)
     };
+    let nominal = if source.nominal_fps > 0.0 {
+        format!("{:.0}", source.nominal_fps)
+    } else {
+        NONE.to_owned()
+    };
     let mut line = format!(
-        "{} {fps}/{:.0} fps · {} missed",
-        source.name, source.nominal_fps, source.missed
+        "{} {fps}/{nominal} fps · {} missed",
+        source.name, source.missed
     );
     let d = &source.discovery;
     if let Some(latency) = d.last_latency {
@@ -359,15 +371,29 @@ pub fn source_line(source: &SourceView, media_time: Duration) -> String {
     if d.preparing {
         line.push_str(&format!(" · preparing detector {}", clock(media_time)));
     }
-    if !source.available {
-        line.push_str(" · NO SIGNAL");
+    match source.state {
+        SourceState::Offline => line.push_str(" · OFFLINE"),
+        SourceState::Reconnecting => line.push_str(" · RECONNECTING"),
+        _ if !source.available => line.push_str(" · NO SIGNAL"),
+        _ => {}
+    }
+    if let Some(error) = source.error.as_ref().filter(|_| !source.available) {
+        line.push_str(&format!(": {error}"));
     }
     line
 }
 
-/// How a source's status-bar line is drawn: amber while its newest
-/// detector request failed, came back too late or got no answer.
+/// How a source's status-bar line is drawn: amber while the source is
+/// offline, reconnecting or kept off the air by an error, or while its
+/// newest detector request failed, came back too late or got no answer.
 pub fn source_tone(source: &SourceView) -> Tone {
+    let retried = matches!(
+        source.state,
+        SourceState::Offline | SourceState::Reconnecting
+    );
+    if retried || (!source.available && source.error.is_some()) {
+        return Tone::Warning;
+    }
     match source.discovery.last_outcome {
         Some(PassOutcome::Failed | PassOutcome::Stale | PassOutcome::TimedOut) => Tone::Warning,
         Some(PassOutcome::Applied) | None => Tone::Plain,

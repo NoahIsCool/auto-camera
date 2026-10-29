@@ -46,6 +46,8 @@
 //! where `(dx, dy)` and `w*` compare the current crop with the ideal one, in
 //! units of the current crop size. A shot that is still travelling to its
 //! subject is therefore a worse choice to cut to than one already framed.
+//! Each entry keeps that ideal crop ([`ShotEntry::ideal`]) beside its crop,
+//! so the per-tick trace can score the framing error offline.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -239,6 +241,12 @@ pub struct ShotEntry {
     framer: Option<ShotFramer>,
     /// Current crop in normalized source coordinates.
     pub crop: Rect,
+    /// The ideal crop of the newest step, in the same coordinates: what
+    /// [`ShotFramer::aim`] gave for the subject's box while it tracks (the
+    /// crop follows it, within the framer's dead zones), `None` while it is
+    /// lost (the framer holds with nothing to aim at), and the crop itself
+    /// for wides.
+    pub ideal: Option<Rect>,
     /// How close the crop is to its ideal, in `0..=1`.
     pub settled: f64,
     /// The preset's zoom ceiling keeps the shot looser than its size (the
@@ -407,6 +415,7 @@ impl Catalog {
                     let target = framer.aim(&f.bbox, extent, preset, dt);
                     let current = framer.step(Some(target), dt);
                     e.crop = current.rect(src.aspect, output_aspect);
+                    e.ideal = Some(target.rect(src.aspect, output_aspect));
                     e.limited_by_zoom = current.limited_by_zoom;
                     e.settled = settledness(current, target, src.aspect, output_aspect);
                     e.quality = (f.confidence.clamp(0.0, 1.0) as f64 * e.settled) as f32;
@@ -415,6 +424,7 @@ impl Catalog {
                 (Some(framer), _, _) => {
                     let current = framer.step(None, dt);
                     e.crop = current.rect(src.aspect, output_aspect);
+                    e.ideal = None;
                     e.limited_by_zoom = current.limited_by_zoom;
                     e.settled = 0.0;
                     e.quality = 0.0;
@@ -422,6 +432,7 @@ impl Catalog {
                 }
                 (None, _, _) => {
                     e.crop = wide_crop(src.aspect, output_aspect);
+                    e.ideal = Some(e.crop);
                     e.limited_by_zoom = false;
                     e.settled = 1.0;
                     e.quality = 1.0;
@@ -489,6 +500,7 @@ fn new_entry(
         basis: spec.basis,
         framer,
         crop,
+        ideal: Some(crop),
         settled: 1.0,
         limited_by_zoom,
         same_picture_as: None,

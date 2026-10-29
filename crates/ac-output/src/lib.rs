@@ -36,6 +36,11 @@
 //! * **No orphans.** [`ProgramEncoder::finish`] closes both inputs, waits with
 //!   a timeout and then kills; dropping an unfinished encoder kills ffmpeg.
 //!   Either way the child is reaped before the call returns.
+//! * **Awake while live.** On macOS, [`Caffeinate::hold`] runs `caffeinate`
+//!   as a supervised child, so neither the system nor (when program feeds
+//!   one) the display sleeps while a session runs. The caller owns the
+//!   [`KeepAwake`]; it is killed and reaped like ffmpeg, and `-w` ends it
+//!   with the app. See [`keep_awake`].
 //!
 //! # Limitations
 //!
@@ -49,6 +54,7 @@
 pub mod args;
 pub mod config;
 pub mod encoder;
+pub mod keep_awake;
 pub mod progress;
 mod transport;
 
@@ -64,6 +70,7 @@ pub use config::{
 pub use encoder::{
     DEFAULT_FINISH_TIMEOUT, EncoderStats, ProgramEncoder, Push, detect_encoder, encoder_works,
 };
+pub use keep_awake::{AwakeMode, Caffeinate, KeepAwake, NotHeld, caffeinate_args};
 pub use progress::Progress;
 
 /// Errors from configuring, running or stopping the program encoder.
