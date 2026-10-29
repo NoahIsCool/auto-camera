@@ -136,16 +136,18 @@ B8 fails, the sidecar stays. CLAUDE.md's decision line is Noah's to update.
   in amber, with the reason on hover, and counts errors, stale results and
   timeouts in the status bar. Sources, tracking,
   switching and output keep running whatever the sidecar does.
+- **Status and log.** The engine snapshot carries the host's status
+  (`EngineSnapshot::sidecar`: state and reason, process id, the hello,
+  counters), filled in every tick and final after shutdown, and the
+  headless summary reports it (`sidecar`: state, pid, model, starts,
+  `restarts`, failures and the other counters), so Phase 2's "0 sidecar
+  restarts" is read, not inferred. The app's log gets every line the
+  sidecar prints on stderr (at the severity Python's logging gave it) and
+  a line for each start, hello, loss (with the retry wait) and shutdown.
 - **Scores.** SAM and OWLv2 score on different scales, so the sidecar has
   its own `score_threshold` (0.5 by default), and the subject store's floor
   follows it when it is lower than the store's 0.35.
 - **Not yet built** (design §4.6 and §5): checking the weights' SHA-256
   against an expected value, the bundled-image self-check in `hello`, a uv
-  lock file, most of the sidecar's state in the engine snapshot and the
-  headless summary: only its first start is there, as each source's
-  `preparing` and ready time (`discovery_preparing`, `detector_ready_s`);
-  its restarts, its process and what its hello named are not
-  (`ac_sidecar::HostStatus` has them, but Phase 2's "0 sidecar restarts"
-  can only be inferred from discovery errors and timeouts today),
-  capabilities declared in the hello (the engine takes every sidecar to
-  see actions, from its kind), per-query thresholds, and TCP.
+  lock file, capabilities declared in the hello (the engine takes every
+  sidecar to see actions, from its kind), per-query thresholds, and TCP.

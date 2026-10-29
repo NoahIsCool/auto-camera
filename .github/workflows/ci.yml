@@ -4,26 +4,54 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+# A newer push or label on the same pull request cancels the older run;
+# pushes to main each run to the end.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Every job only reads the repository.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   # ffmpeg is installed below, so tests that need it must run, not skip.
   AC_REQUIRE_FFMPEG: "1"
 
+# Actions are pinned to full commit SHAs, the release tag in the comment
+# after each, so a moved tag cannot change what runs. To update one, resolve
+# the new tag's commit (`git ls-remote https://github.com/<owner>/<repo>
+# 'refs/tags/<tag>*'`, taking the `^{}` line of an annotated tag) and
+# replace both. dtolnay/rust-toolchain has no releases: it is pinned to a
+# commit of its master branch and always given an explicit `toolchain`.
+# Every job has a timeout, so a hung test or encoder fails instead of
+# holding a runner for GitHub's six-hour default.
+#
+# macOS minutes count ten times against the account's Actions allowance
+# (they were about 87% of October's use), so a pull request runs the
+# check, onnx and release jobs on Linux only. Pushes to main, manual runs
+# (workflow_dispatch) and pull requests labelled `macos-ci` add the macOS
+# legs. The three matrices carry the same expression, marked `# OS_MATRIX`.
+
 jobs:
   check:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }} # OS_MATRIX
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.97.0"
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install ffmpeg (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -45,18 +73,22 @@ jobs:
   # module. Standard library only, so no toolchain is needed.
   module-size:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: python3 -B scripts/module_size.py
-      - run: python3 -B -m unittest discover -s scripts
+      - run: python3 -B -m unittest discover -s scripts -p test_module_size.py
 
   # The workspace promises rust-version 1.92; build everything with it.
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.92
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.92"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo check --locked --workspace --all-targets
 
   # The ONNX Runtime backend is behind a feature; lint the whole workspace
@@ -65,14 +97,128 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }} # OS_MATRIX
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.97.0"
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --locked --workspace --features auto-camera/onnx --all-targets -- -D warnings
       - run: cargo test --locked -p ac-vision --features onnx
+
+  # The SAM sidecar's lint and format settings (sidecars/sam3-mlx/ruff.toml),
+  # with the Ruff version pinned so a new release's rules cannot fail an
+  # unchanged tree. The checksum is that of Ruff's x86_64 Linux build.
+  ruff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: ruff check
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
+        with:
+          version: "0.16.8"
+          checksum: c4a8c7c152532bcb7e7ede4bd6ccd440dcacddffcdcdd79b90090ac6021f41c2
+          src: sidecars/sam3-mlx
+          args: check
+      - name: ruff format --check
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
+        with:
+          version: "0.16.8"
+          checksum: c4a8c7c152532bcb7e7ede4bd6ccd440dcacddffcdcdd79b90090ac6021f41c2
+          src: sidecars/sam3-mlx
+          args: format --check
+
+  # Licences and advisories. cargo-deny checks every crate against deny.toml
+  # (no AGPL, GPL or LGPL; RustSec advisories), with the MSRV toolchain so
+  # cargo reads the workspace as the msrv job builds it. The licence
+  # manifest check covers what is not a crate (docs/licence-manifest.md).
+  supply-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Licence manifest of the parts that are not crates
+        run: python3 -B scripts/licence_manifest.py
+      - run: python3 -B -m unittest discover -s scripts -p test_licence_manifest.py
+      - name: cargo deny check advisories licenses
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: "1.92.0"
+          arguments: --all-features --locked
+          command: check
+          command-arguments: advisories licenses
+      # The policy's own test: a package that depends on an AGPL-3.0 crate
+      # (.github/deny-probe) must be rejected. The same package with the
+      # dependency relicensed as MIT must then pass, so the rejection is the
+      # licence's and not a broken fixture's.
+      - name: Licence check of an AGPL dependency (must fail)
+        id: agpl-probe
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: .github/deny-probe/Cargo.toml
+          arguments: --all-features --locked --config deny.toml
+          command: check
+          command-arguments: licenses
+      - name: Relicense the probe's dependency as MIT
+        run: |
+          sed -i 's/^license = "AGPL-3.0-only"$/license = "MIT"/' .github/deny-probe/probe-dep/Cargo.toml
+          grep -qx 'license = "MIT"' .github/deny-probe/probe-dep/Cargo.toml
+      - name: Licence check of the same dependency under MIT (must pass)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: .github/deny-probe/Cargo.toml
+          arguments: --all-features --locked --config deny.toml
+          command: check
+          command-arguments: licenses
+      - name: The AGPL dependency was rejected
+        if: steps.agpl-probe.outcome != 'failure'
+        run: |
+          echo "::error::cargo-deny accepted a dependency licensed AGPL-3.0-only (outcome: ${{ steps.agpl-probe.outcome }})"
+          exit 1
+
+  # What a user runs: an optimized build of the app, and a few seconds of
+  # the headless demo studio (config/demo.toml: synthetic camera, ground
+  # truth detector) recorded to MP4, which must finish with "ok": true,
+  # frames written and an H.264 recording.
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }} # OS_MATRIX
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - run: cargo build --release --locked -p auto-camera
+      - name: Headless demo
+        timeout-minutes: 5
+        run: |
+          status=0
+          target/release/auto-camera --headless --seconds 3 --record "$RUNNER_TEMP/demo.mp4" > "$RUNNER_TEMP/summary.json" || status=$?
+          python3 -B -c '
+          import json, sys
+          summary = json.load(open(sys.argv[1]))
+          output = summary.get("output") or {}
+          print(json.dumps({k: summary.get(k) for k in ("ok", "error", "ticks", "program", "timing")}))
+          print(json.dumps(output))
+          assert summary.get("ok"), summary.get("error")
+          assert output.get("state") == "finished" and output.get("frames_written", 0) > 0, output
+          ' "$RUNNER_TEMP/summary.json"
+          test "$status" -eq 0
+          test "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$RUNNER_TEMP/demo.mp4")" = h264

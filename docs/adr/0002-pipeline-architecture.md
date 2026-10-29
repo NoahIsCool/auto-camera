@@ -33,6 +33,8 @@ channels, and the operator sees it only through immutable snapshots.
 | `ac-discovery-<source>` | `DiscoveryWorker`, one per source with a detector | Loads the detector (a CoreML compile can take minutes), then runs it on the newest frame it was handed. The OWL detector returns whole people, each tagged with the query whose object they hold (`ac_vision::matching`). |
 | `ac-output-start`, `ac-output-finish` | `OutputController` | Start ffmpeg (probing encoders) and finish it (flushing the recording) off the engine thread, since both can take seconds. |
 | `ac-output-video/-audio/-progress/-stderr` and the `ffmpeg` child | `ProgramEncoder` | Feed and watch the single program encode (RTMP and MP4 from one encode, ADR 0001). |
+| `ac-trace`, with `--trace` | `apps/auto-camera` `TraceFile` | Writes the engine's per-tick trace records to the trace file as JSON Lines; nothing else writes to that file. |
+| the `caffeinate` child (macOS) | `KeepAwake`, held by the `OutputController` while a session is live, or by the headless runner for the whole run | Keeps the system (and, when the monitors show program, the display) awake; killed and reaped when the session or run ends, and tied to the app by `-w`. |
 | rayon pool | process | Data-parallel per-pixel kernels (tracker pyramid, compositor) *inside* a tick; holds no state. |
 
 ### Mailboxes and channels
@@ -47,6 +49,7 @@ channels, and the operator sees it only through immutable snapshots.
 | engine → operator | `mailbox::Latest<Arc<EngineSnapshot>>` | Newest snapshot only, with a version counter; readers never block the engine. |
 | engine → encoder | `ProgramEncoder` bounded queues | Never blocks: a full queue drops the frame and the writer repeats the last one, keeping a constant frame rate. |
 | output helpers → engine | `mpsc` channel | Start and finish results, collected by `OutputController::poll` each tick. |
+| engine → trace writer | bounded `sync_channel` (`EngineOptions::trace`; the app's holds 1024 records) | Never waits: a full channel drops the record (the gap shows in the records' tick numbers), and a closed one ends tracing for the run. |
 
 Nothing between threads is an unbounded queue of frames, and no lock is
 held across I/O. The only locks are inside the mailboxes themselves, held
@@ -145,8 +148,9 @@ started from then on carries its audio.
 engine thread stop the discovery workers (joining them after a pass in
 progress; a worker still loading its model is detached and exits when the
 load ends), shut the output down (finishing a running recording
-synchronously, joining every helper, reaping ffmpeg), stop the sources
-(joining their workers) and publish a final snapshot with `running = false`.
+synchronously, joining every helper, reaping ffmpeg and `caffeinate`), stop
+the sources (joining their workers) and publish a final snapshot with
+`running = false`.
 `Engine::shutdown` then joins the engine thread and reports the ticks run and
 threads joined. A Linux test checks that no `ac-*` thread and no child
 process remain.

@@ -116,26 +116,38 @@ impl SidecarSettings {
         }
     }
 
-    /// Checks the command, the size, the deadlines and the threshold; the
-    /// message names the key.
+    /// Checks the command, the size, the deadlines and the threshold,
+    /// failing on the first of [`Self::problems`].
     pub fn validate(&self) -> Result<(), String> {
-        let Some(program) = self.command.first() else {
-            return Err(
+        self.problems().into_iter().next().map_or(Ok(()), Err)
+    }
+
+    /// Every problem with the command, the size, the deadlines and the
+    /// threshold, each message naming its key. An empty element of the
+    /// command is named once: the program as the program, any other by its
+    /// index.
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        match self.command.first() {
+            None => out.push(
                 "detector.command must name the sidecar's program and its arguments, \
                  as in [\"../models/sam3/.venv/bin/python\", \"../sidecars/sam3-mlx/server.py\", \
                  \"--model\", \"../models/sam31-mlx\"] (paths with a \"/\" are relative to \
                  the config file)"
                     .into(),
-            );
-        };
-        if program.trim().is_empty() {
-            return Err("detector.command[0], the program, is empty".into());
+            ),
+            Some(program) if program.trim().is_empty() => {
+                out.push("detector.command[0], the program, is empty".into());
+            }
+            Some(_) => {}
         }
-        if let Some(i) = self.command.iter().position(String::is_empty) {
-            return Err(format!("detector.command[{i}] is empty"));
+        for (i, arg) in self.command.iter().enumerate().skip(1) {
+            if arg.is_empty() {
+                out.push(format!("detector.command[{i}] is empty"));
+            }
         }
         if !(1..=MAX_SEND_SIDE).contains(&self.send_side) {
-            return Err(format!(
+            out.push(format!(
                 "detector.send_side {} must be in 1..={MAX_SEND_SIDE}",
                 self.send_side
             ));
@@ -145,14 +157,14 @@ impl SidecarSettings {
             ("request_timeout_s", self.request_timeout_s, MAX_REQUEST_S),
         ] {
             if !(v.is_finite() && v > 0.0 && v <= max) {
-                return Err(format!("detector.{name} {v} must be in (0, {max}] seconds"));
+                out.push(format!("detector.{name} {v} must be in (0, {max}] seconds"));
             }
         }
         let t = self.score_threshold;
         if !(t.is_finite() && (0.0..=1.0).contains(&t)) {
-            return Err(format!("detector.score_threshold {t} must be in 0..=1"));
+            out.push(format!("detector.score_threshold {t} must be in 0..=1"));
         }
-        Ok(())
+        out
     }
 
     /// Makes the relative paths in `command` relative to `dir`; see the
@@ -320,5 +332,30 @@ mod tests {
         edge.send_side = 4096;
         edge.request_timeout_s = 600.0;
         edge.validate().unwrap();
+    }
+
+    #[test]
+    fn every_bad_value_is_listed_and_an_empty_program_once() {
+        let mut s = mac();
+        s.command[0] = String::new();
+        s.command[3] = String::new();
+        s.send_side = 0;
+        s.startup_timeout_s = -1.0;
+        s.score_threshold = 2.0;
+        assert_eq!(
+            s.problems(),
+            [
+                "detector.command[0], the program, is empty",
+                "detector.command[3] is empty",
+                "detector.send_side 0 must be in 1..=4096",
+                "detector.startup_timeout_s -1 must be in (0, 3600] seconds",
+                "detector.score_threshold 2 must be in 0..=1",
+            ]
+        );
+        assert_eq!(
+            s.validate(),
+            Err("detector.command[0], the program, is empty".into())
+        );
+        assert!(mac().problems().is_empty());
     }
 }

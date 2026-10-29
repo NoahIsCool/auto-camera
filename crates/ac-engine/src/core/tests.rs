@@ -21,9 +21,12 @@ use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
 
 mod feedback;
 mod framing;
+mod operator;
+mod priority;
 mod protection;
 mod shared;
 mod switching;
+mod trace;
 mod vision;
 
 /// Source and output width.
@@ -60,6 +63,7 @@ fn config(subjects: u32) -> StudioConfig {
             PresetSpec::Size(ShotSize::Close),
         ]),
         literal: false,
+        priority: None,
     });
     c.output.width = W;
     c.output.height = H;
@@ -188,6 +192,23 @@ impl Rig {
         self.core.apply(&cmd)
     }
 
+    /// The preview bus as an operator sees it now.
+    fn preview(&self) -> Option<ShotId> {
+        self.core.switcher().preview().cloned()
+    }
+
+    /// Cut by an operator who sees the current preview.
+    fn cut(&mut self) -> Result<CommandReply, CommandError> {
+        let preview = self.preview();
+        self.apply(EngineCommand::Cut { preview })
+    }
+
+    /// Auto by an operator who sees the current preview.
+    fn auto(&mut self) -> Result<CommandReply, CommandError> {
+        let preview = self.preview();
+        self.apply(EngineCommand::Auto { preview })
+    }
+
     /// The core's snapshot, without output or timing.
     fn snapshot(&self) -> EngineSnapshot {
         self.core
@@ -204,7 +225,10 @@ fn shot(id: &str) -> ShotId {
 fn preview_and_cut(rig: &mut Rig, id: &str) {
     rig.apply(EngineCommand::SetPreview { shot: shot(id) })
         .unwrap();
-    rig.apply(EngineCommand::Cut).unwrap();
+    rig.apply(EngineCommand::Cut {
+        preview: Some(shot(id)),
+    })
+    .unwrap();
 }
 
 #[test]
@@ -270,7 +294,7 @@ fn a_stalled_source_makes_its_shots_unavailable() {
     })
     .unwrap();
     assert_eq!(
-        rig.apply(EngineCommand::Cut),
+        rig.cut(),
         Err(CommandError::Switch(SwitchError::Unavailable(shot(
             "cam/wide"
         ))))
@@ -278,7 +302,7 @@ fn a_stalled_source_makes_its_shots_unavailable() {
     rig.advancing = true;
     rig.run(2);
     assert!(rig.snapshot().sources[0].available);
-    rig.apply(EngineCommand::Cut).unwrap();
+    rig.cut().unwrap();
     // Repeats are not misses; a jump in sequence numbers is.
     assert_eq!(rig.snapshot().sources[0].missed, 0);
     rig.seq += 4;
@@ -427,7 +451,10 @@ fn suggest_mode_stages_the_suggestion_without_taking() {
     assert_eq!(snap.switcher.preview, Some(shot("cam/wide")));
     assert_eq!(snap.switcher.program, None);
     assert!(!snap.director.reason_text.is_empty());
-    rig.apply(EngineCommand::AcceptSuggestion).unwrap();
+    rig.apply(EngineCommand::AcceptSuggestion {
+        shot: shot("cam/wide"),
+    })
+    .unwrap();
     rig.run_secs(1.0);
     assert_eq!(rig.snapshot().switcher.program, Some(shot("cam/wide")));
     rig.apply(EngineCommand::SetDirectorMode {
@@ -436,7 +463,9 @@ fn suggest_mode_stages_the_suggestion_without_taking() {
     .unwrap();
     rig.step();
     assert_eq!(
-        rig.apply(EngineCommand::AcceptSuggestion),
+        rig.apply(EngineCommand::AcceptSuggestion {
+            shot: shot("cam/wide")
+        }),
         Err(CommandError::NoSuggestion)
     );
 }

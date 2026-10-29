@@ -5,7 +5,13 @@
 //! setup fails with a message instead of hanging:
 //!
 //! 1. **Start** the engine on the wall clock with monitors and multiview
-//!    tiles off (nobody is watching).
+//!    tiles off (nobody is watching), and with `--trace` its trace writer
+//!    first, so that the trace has every tick from the first. From here
+//!    until the engine has shut down, the run holds the system awake (macOS
+//!    `caffeinate`, see [`crate::awake`]), the detector load and the
+//!    recording included; while it holds, the engine's own hold for the
+//!    output is turned off. Elsewhere, or when `caffeinate` cannot start,
+//!    the hold is skipped with a note on stderr.
 //! 2. **Signal**: wait for a wide shot to become available. A headless run
 //!    has no operator, so unless the director is in Auto mode (which
 //!    establishes a shot by itself) the first wide is cut to program. A
@@ -29,9 +35,11 @@
 //!    changes, the largest subject count and each shot's crop size range.
 //! 6. **Stop** the output and wait for the recording to be finalized, check
 //!    that every source delivered a picture at some point, then shut the
-//!    engine down, which joins every thread and reaps ffmpeg. Nobody watches
-//!    a headless run, so a source that stayed off the air throughout (a
-//!    file that never appeared) fails it, with what kept it offline
+//!    engine down, which joins every thread and reaps ffmpeg, wait for the
+//!    trace writer to write the last record, and end the hold, which reaps
+//!    `caffeinate` (and notes one that had ended early). Nobody watches a
+//!    headless run, so a source that stayed off the air throughout (a file
+//!    that never appeared) fails it, with what kept it offline
 //!    ([`never_delivered`]), instead of passing unseen.
 //!
 //! A termination signal (Ctrl-C, `SIGTERM`, `SIGHUP`) ends whichever phase
@@ -50,6 +58,19 @@
 //! together than that show as one, and a crop range can miss a single
 //! tick's extreme.
 //!
+//! With `--trace`, the summary's `trace` gives the lines written, one per
+//! tick, so it equals `ticks` unless the writer fell behind (`missing`);
+//! a trace that cannot be created or written fails the run. A run whose
+//! engine does not start removes its empty trace file and reports no
+//! `trace`, so that the path is free when the command is run again. A run
+//! whose source never delivered a picture did start, so it reports and
+//! keeps its trace, as every run that ticked does.
+//!
+//! `--record-detections` works the same way ([`crate::detections`]): the
+//! summary's `detections` gives the passes written, one per pass the
+//! engine applied, so it equals the sources' `applied` passes in all
+//! unless the writer fell behind (`missing`).
+//!
 //! This module runs the phases; the run's flags ([`HeadlessOptions`]) are
 //! in `flags`, and the summary's types in [`summary`] and its building
 //! from the run's snapshots in `report`.
@@ -59,22 +80,28 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::awake;
+use crate::detections;
 use crate::signals::QuitSignal;
+use crate::trace::{self, TraceFile};
 use ac_core::{Rect, ShotId};
 use ac_director::{CandidateKind, DirectorMode};
 use ac_engine::{
     DetectorSettings, Engine, EngineCommand, EngineHandle, EngineOptions, EngineSnapshot,
     MonitorSettings, OutputState, StudioConfig,
 };
+use ac_output::AwakeMode;
 
 mod flags;
 mod report;
+mod sidecar;
 mod summary;
 
 pub use flags::HeadlessOptions;
 pub use summary::{
-    DirectorSummary, MatchSummary, OutputSummary, ProgramSummary, QuerySummary, ShotSummary,
-    SourceSummary, SubjectSummary, Summary, TimingSummary,
+    DetectionsSummary, DirectorSummary, LoudnessSummary, MatchSummary, OutputSummary,
+    ProgramSummary, QuerySummary, ShotSummary, SourceSummary, StreamSummary, SubjectSummary,
+    Summary, TimingSummary, TraceSummary,
 };
 
 use report::{Totals, failed_to_start, summarize};
@@ -99,30 +126,71 @@ pub fn run(
     options: &HeadlessOptions,
     quit: &QuitSignal,
 ) -> Summary {
-    run_with(config, path, options, EngineOptions::default(), quit)
+    run_with(
+        config,
+        path,
+        options,
+        EngineOptions::default(),
+        quit,
+        awake::log,
+    )
 }
 
-/// [`run`] with explicit engine options (tests use a faster clock).
+/// [`run`] with explicit engine options (tests use a faster clock or a
+/// stand-in `caffeinate`, which the run holds instead of the engine), and
+/// with the run's notes passed to `log` instead of stderr.
 pub fn run_with(
     mut config: StudioConfig,
     path: &Path,
     options: &HeadlessOptions,
-    engine_options: EngineOptions,
+    mut engine_options: EngineOptions,
     quit: &QuitSignal,
+    mut log: impl FnMut(&str),
 ) -> Summary {
     let started = Instant::now();
     config.monitors = MonitorSettings::disabled();
+    let mode = AwakeMode::for_display(config.monitors.feeds_display());
+    let awake = awake::hold_for_run(&mut engine_options.keep_awake, mode, &mut log);
     let limit = detector_limit(&config.detector);
+    let (trace, engine_options) = match trace::attach(options.trace.as_deref(), engine_options) {
+        Ok(t) => t,
+        Err(e) => return failed_to_start(path, options, started, e),
+    };
+    let passes = options.record_detections.as_deref();
+    let (detections, engine_options) = match detections::attach(passes, engine_options) {
+        Ok(d) => d,
+        Err(e) => {
+            // The trace's sender went with the options: its file is empty.
+            let _ = trace.map(TraceFile::discard_if_empty);
+            return failed_to_start(path, options, started, e);
+        }
+    };
     let engine = match Engine::start_with(config, engine_options) {
         Ok(e) => e,
-        Err(e) => return failed_to_start(path, options, started, e.to_string()),
+        Err(e) => {
+            // Nothing ticked, so the trace is empty: remove it, so that the
+            // same command works once the cause is fixed.
+            let error = match trace.and_then(|t| t.discard_if_empty().error) {
+                Some(why) => format!("{e}; the trace failed: {why}"),
+                None => e.to_string(),
+            };
+            let error = match detections.and_then(|d| d.discard_if_empty().error) {
+                Some(why) => format!("{error}; the detection log failed: {why}"),
+                None => error,
+            };
+            return failed_to_start(path, options, started, error);
+        }
     };
+    let _watch = crate::logs::watch(engine.handle());
     let mut sampler = Sampler::default();
     let error = drive(&engine, options, limit, &mut sampler, quit).err();
     let (ticks, threads_joined, final_snapshot, error) = match engine.shutdown() {
         Ok(r) => (r.ticks, r.threads_joined, Some(r.final_snapshot), error),
         Err(e) => (0, 0, None, error.or(Some(e.to_string()))),
     };
+    let (trace, error) = finish_trace(trace, ticks, error);
+    let (detections, error) = finish_detections(detections, final_snapshot.as_deref(), error);
+    awake::end_of_run(awake, &mut log);
     let last = sampler.last.clone().or(final_snapshot.clone());
     summarize(
         path,
@@ -132,11 +200,61 @@ pub fn run_with(
         Totals {
             ticks,
             threads_joined,
+            trace,
+            detections,
         },
         last.as_deref(),
         final_snapshot.as_deref(),
         &sampler,
     )
+}
+
+/// Waits for the trace writer, once the engine has stopped (its sender went
+/// with its thread), and sums the trace up against the `ticks` run. A write
+/// error fails the run unless it had already failed (`error`).
+fn finish_trace(
+    file: Option<TraceFile>,
+    ticks: u64,
+    error: Option<String>,
+) -> (Option<TraceSummary>, Option<String>) {
+    let Some(file) = file else {
+        return (None, error);
+    };
+    let path = file.path().to_owned();
+    let report = file.finish();
+    let summary = TraceSummary {
+        path,
+        records: report.lines,
+        missing: ticks.saturating_sub(report.lines),
+    };
+    let error = error.or(report.error.map(|e| format!("the trace failed: {e}")));
+    (Some(summary), error)
+}
+
+/// Waits for the detection log's writer, once the engine has stopped, and
+/// sums the log up against the passes applied by the engine of `end`, its
+/// final snapshot. A write error fails the run unless it had already
+/// failed (`error`).
+fn finish_detections(
+    file: Option<TraceFile<ac_engine::PassRecord>>,
+    end: Option<&EngineSnapshot>,
+    error: Option<String>,
+) -> (Option<DetectionsSummary>, Option<String>) {
+    let Some(file) = file else {
+        return (None, error);
+    };
+    let path = file.path().to_owned();
+    let report = file.finish();
+    let applied: u64 = end.map_or(0, |s| s.sources.iter().map(|v| v.discovery.applied).sum());
+    let summary = DetectionsSummary {
+        path,
+        records: report.lines,
+        missing: applied.saturating_sub(report.lines),
+    };
+    let error = error.or(report
+        .error
+        .map(|e| format!("the detection log failed: {e}")));
+    (Some(summary), error)
 }
 
 /// `why`, or why the engine died when it did (a dead engine also makes
@@ -222,8 +340,12 @@ fn drive(
     sampler.record(&snap);
     if snap.director.mode != DirectorMode::Auto && snap.switcher.program.is_none() {
         let wide = first_wide(&snap).expect("checked above");
-        h.send(EngineCommand::SetPreview { shot: wide })
-            .and_then(|_| h.send(EngineCommand::Cut))
+        h.send(EngineCommand::SetPreview { shot: wide.clone() })
+            .and_then(|_| {
+                h.send(EngineCommand::Cut {
+                    preview: Some(wide),
+                })
+            })
             .map_err(|e| format!("cannot put a wide on program: {e}"))?;
     }
     await_detectors(|| h.snapshot(), sampler, detector_limit, quit)?;
@@ -329,6 +451,9 @@ struct Sampler {
     log: Vec<(f64, String)>,
     /// Crop size range of every shot seen, by shot id.
     crops: HashMap<String, CropRange>,
+    /// The stream's health in the newest snapshot whose output was running
+    /// (once ffmpeg has exited the stream is down by definition).
+    stream: Option<ac_output::StreamHealth>,
 }
 
 impl Sampler {
@@ -348,6 +473,11 @@ impl Sampler {
                 .entry(shot.id.0.clone())
                 .and_modify(|r| r.widen(shot.crop))
                 .or_insert_with(|| CropRange::new(shot.crop));
+        }
+        if snap.output.state == OutputState::Running
+            && let Some(stream) = snap.output.stats.as_ref().and_then(|s| s.stream)
+        {
+            self.stream = Some(stream);
         }
         self.last = Some(snap.clone());
     }

@@ -11,7 +11,29 @@
 //! back to the start abandons the transition. The UI therefore keeps the
 //! lever position itself ([`SwitchState::tbar`]) and only sends positions.
 //! The selected transition is likewise UI state, sent when it changes.
+//!
+//! Cut and Auto stay live while a transition runs, as the switcher takes
+//! presses then too ([`ac_switcher`]): a shot staged meanwhile waits for the
+//! end, Auto queues a take of it, and Cut cuts the transition short, landing
+//! the shot the preview monitor shows. The preview caption names the
+//! waiting shot and says whether a take of it is queued ([`queue_caption`]),
+//! so the operator sees what will happen when the transition ends. While
+//! the T-bar holds a transition the switcher refuses Cut, since the lever
+//! would be left mid-travel, so CUT is disabled and says why
+//! ([`cut_enabled`]); the lever finishes or abandons the transition.
+//!
+//! CUT and AUTO carry the preview the operator saw, which the console
+//! works out ([`super::console`]), so the engine refuses them when preview
+//! changed in between. While the director runs in Auto mode the program
+//! monitor carries a red AUTO badge in the top left corner of its picture
+//! ([`auto_badge`]), counting down while the operator's switching pauses
+//! the director's takes; its hover text says what the operator's own
+//! switching does to it (the takeover setting). Like a multiview tile, the
+//! badge is painted, so it tells the accessibility tree its name itself
+//! ([`auto_badge_name`]).
 
+use ac_core::ShotId;
+use ac_director::{DirectorMode, Takeover};
 use ac_engine::{EngineCommand, EngineSnapshot};
 use ac_switcher::{Transition, TransitionKind};
 use eframe::egui::{
@@ -30,6 +52,11 @@ const CONTROLS_WIDTH: f32 = 130.0;
 const DURATION_RANGE: std::ops::RangeInclusive<f64> = 0.1..=5.0;
 /// T-bar moves smaller than this are not sent.
 const TBAR_STEP: f64 = 1e-3;
+/// Font size of the AUTO badge, in points.
+const BADGE_FONT: f32 = 13.0;
+/// Padding around the AUTO badge's text, and its gap to the picture's
+/// edges, in points.
+const BADGE_PAD: f32 = 5.0;
 
 /// Transition kinds with their button labels.
 pub const KINDS: [(TransitionKind, &str); 3] = [
@@ -92,10 +119,12 @@ impl SwitchState {
     }
 }
 
-/// Draws the monitors and controls; returns the commands to send.
+/// Draws the monitors and controls; returns the commands to send. CUT and
+/// AUTO carry `seen`, the preview the operator saw.
 pub fn show(
     ui: &mut Ui,
     snap: &EngineSnapshot,
+    seen: &Option<ShotId>,
     state: &mut SwitchState,
     textures: &mut Textures,
     aspect: f32,
@@ -108,7 +137,7 @@ pub fn show(
         monitor(ui, snap, textures, Monitor::Preview, size);
         ui.vertical(|ui| {
             ui.set_width(CONTROLS_WIDTH);
-            controls(ui, snap, state, size.y, &mut commands);
+            controls(ui, snap, seen, state, size.y, &mut commands);
         });
         monitor(ui, snap, textures, Monitor::Program, size);
     });
@@ -153,6 +182,11 @@ fn monitor(
         {
             caption.push_str(&format!("  ·  transition {}", percent(*opacity)));
         }
+        if which == Monitor::Preview
+            && let Some(queued) = queue_caption(snap)
+        {
+            caption.push_str(&format!("  ·  {queued}"));
+        }
         ui.label(RichText::new(caption).strong().color(color));
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
         let painter = ui.painter_at(rect.expand(3.0));
@@ -180,39 +214,137 @@ fn monitor(
             Stroke::new(3.0, color),
             StrokeKind::Outside,
         );
+        if which == Monitor::Program
+            && let Some(text) = auto_badge(snap)
+        {
+            draw_auto_badge(ui, rect, &text, snap);
+        }
     });
 }
 
-/// Cut, Auto, the transition selector and the T-bar.
+/// The AUTO badge's text while the director runs in Auto mode: `AUTO`, or
+/// `AUTO · paused 7 s` while the operator's switching pauses its takes
+/// (whole seconds, rounded up); `None` in the other modes.
+pub fn auto_badge(snap: &EngineSnapshot) -> Option<String> {
+    let d = &snap.director;
+    if d.mode != DirectorMode::Auto {
+        return None;
+    }
+    Some(match d.paused {
+        Some(left) => format!("AUTO · paused {:.0} s", left.as_secs_f64().ceil()),
+        None => "AUTO".into(),
+    })
+}
+
+/// The accessible name of the AUTO badge whose text is `text`, which says
+/// whose badge it is ("program AUTO"), so it is not taken for the AUTO
+/// button.
+pub fn auto_badge_name(text: &str) -> String {
+    format!("program {text}")
+}
+
+/// The AUTO badge's hover text: what the operator's own switching does to
+/// the director, by the takeover setting.
+pub fn auto_badge_hover(snap: &EngineSnapshot) -> String {
+    let d = &snap.director;
+    let what = match d.takeover {
+        Takeover::Suggest => "Any switching of yours (a key, a click, the T-bar) drops it to \
+                              Suggest."
+            .to_owned(),
+        Takeover::Pause => format!(
+            "Any switching of yours pauses its takes for {:.0} s.",
+            d.pause.as_secs_f64()
+        ),
+        Takeover::Director => "It goes on switching whatever you do, and stages its own \
+                               shot over yours."
+            .to_owned(),
+    };
+    format!("The auto-director takes shots by itself. {what}")
+}
+
+/// Paints the AUTO badge `text` in the top left corner of the program
+/// `picture` and names it for the accessibility tree.
+fn draw_auto_badge(ui: &Ui, picture: Rect, text: &str, snap: &EngineSnapshot) {
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        FontId::proportional(BADGE_FONT),
+        Color32::WHITE,
+    );
+    let badge = Rect::from_min_size(
+        picture.left_top() + Vec2::splat(BADGE_PAD),
+        galley.size() + Vec2::splat(2.0 * BADGE_PAD),
+    );
+    let painter = ui.painter_at(picture);
+    painter.rect_filled(badge, CornerRadius::same(3), PROGRAM_RED);
+    painter.galley(badge.min + Vec2::splat(BADGE_PAD), galley, Color32::WHITE);
+    let response = ui.interact(badge, ui.id().with("auto-badge"), Sense::hover());
+    let name = auto_badge_name(text);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &name));
+    response.on_hover_text(auto_badge_hover(snap));
+}
+
+/// The preview caption's note on the shot waiting for the running
+/// transition to end, if one is (`next Speaker 1 Medium · take queued`).
+pub fn queue_caption(snap: &EngineSnapshot) -> Option<String> {
+    let queued = snap.switcher.queued.as_ref()?;
+    let name = shot_name(snap, Some(&queued.shot));
+    Some(if queued.take {
+        format!("next {name} · take queued")
+    } else {
+        format!("next {name}")
+    })
+}
+
+/// Hover text of a CUT button disabled because the T-bar holds the
+/// transition.
+const TBAR_HOLDS: &str = "The T-bar holds the transition: finish it or pull it back";
+
+/// Whether CUT can be pressed: something is on preview and the T-bar does
+/// not hold the running transition (see the module docs).
+pub fn cut_enabled(snap: &EngineSnapshot) -> bool {
+    snap.switcher.preview.is_some() && !snap.switcher.tbar_held
+}
+
+/// Cut, Auto (both carrying `seen`), the transition selector and the
+/// T-bar.
 fn controls(
     ui: &mut Ui,
     snap: &EngineSnapshot,
+    seen: &Option<ShotId>,
     state: &mut SwitchState,
     height: f32,
     commands: &mut Vec<EngineCommand>,
 ) {
     ui.add_space(20.0);
-    let ready = snap.switcher.preview.is_some() && !snap.switcher.in_transition;
+    // During a transition the preview holds its incoming shot, so both stay
+    // enabled: the switcher queues or cuts short (see the module docs).
+    let ready = snap.switcher.preview.is_some();
     let big = vec2(CONTROLS_WIDTH, 30.0);
-    if ui
+    let mut cut = ui
         .add_enabled(
-            ready,
+            cut_enabled(snap),
             egui::Button::new(RichText::new("CUT").strong()).min_size(big),
         )
-        .on_hover_text("Space")
-        .clicked()
-    {
-        commands.push(EngineCommand::Cut);
+        .on_hover_text("Space · during a transition, cuts it short");
+    if snap.switcher.tbar_held {
+        cut = cut.on_disabled_hover_text(TBAR_HOLDS);
+    }
+    if cut.clicked() {
+        commands.push(EngineCommand::Cut {
+            preview: seen.clone(),
+        });
     }
     if ui
         .add_enabled(
             ready,
             egui::Button::new(RichText::new("AUTO").strong()).min_size(big),
         )
-        .on_hover_text("Enter")
+        .on_hover_text("Enter · during a transition, queues a take of the next shot")
         .clicked()
     {
-        commands.push(EngineCommand::Auto);
+        commands.push(EngineCommand::Auto {
+            preview: seen.clone(),
+        });
     }
     ui.add_space(6.0);
     let mut kind = state.transition.kind;
@@ -263,6 +395,8 @@ fn label_of(kind: TransitionKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::ui::fixtures::snapshot;
+    use ac_core::ShotId;
+    use ac_switcher::Queued;
 
     /// A mix of 0.8 s, lever at rest.
     fn state() -> SwitchState {
@@ -321,6 +455,73 @@ mod tests {
     }
 
     #[test]
+    fn the_preview_caption_names_the_queued_shot() {
+        let mut snap = snapshot();
+        assert_eq!(queue_caption(&snap), None);
+        let wide = snap.shots[0].id.clone();
+        let name = shot_name(&snap, Some(&wide));
+        snap.switcher.queued = Some(Queued {
+            shot: wide.clone(),
+            take: false,
+        });
+        assert_eq!(queue_caption(&snap), Some(format!("next {name}")));
+        snap.switcher.queued = Some(Queued {
+            shot: wide,
+            take: true,
+        });
+        assert_eq!(
+            queue_caption(&snap),
+            Some(format!("next {name} · take queued"))
+        );
+        snap.switcher.queued = Some(Queued {
+            shot: ShotId("gone".into()),
+            take: true,
+        });
+        assert_eq!(
+            queue_caption(&snap).as_deref(),
+            Some("next gone · take queued"),
+            "a shot no longer listed is named by its id"
+        );
+    }
+
+    #[test]
+    fn cut_is_disabled_while_the_tbar_holds_the_transition() {
+        let mut snap = snapshot();
+        assert!(!cut_enabled(&snap), "nothing on preview");
+        snap.switcher.preview = Some(snap.shots[0].id.clone());
+        assert!(cut_enabled(&snap));
+        snap.switcher.in_transition = true;
+        assert!(cut_enabled(&snap), "an automatic transition is cut short");
+        snap.switcher.tbar_held = true;
+        assert!(!cut_enabled(&snap));
+    }
+
+    #[test]
+    fn the_auto_badge_shows_in_auto_mode_and_counts_a_pause_down() {
+        let mut snap = snapshot();
+        assert_eq!(snap.director.mode, DirectorMode::Suggest);
+        assert_eq!(auto_badge(&snap), None);
+        snap.director.mode = DirectorMode::Auto;
+        assert_eq!(auto_badge(&snap).as_deref(), Some("AUTO"));
+        assert_eq!(auto_badge_name("AUTO"), "program AUTO");
+        snap.director.paused = Some(std::time::Duration::from_millis(6200));
+        assert_eq!(auto_badge(&snap).as_deref(), Some("AUTO · paused 7 s"));
+        snap.director.mode = DirectorMode::Off;
+        assert_eq!(auto_badge(&snap), None);
+    }
+
+    #[test]
+    fn the_auto_badge_says_what_the_operators_switching_does() {
+        let mut snap = snapshot();
+        assert!(auto_badge_hover(&snap).contains("drops it to Suggest"));
+        snap.director.takeover = Takeover::Pause;
+        snap.director.pause = std::time::Duration::from_secs(12);
+        assert!(auto_badge_hover(&snap).contains("pauses its takes for 12 s"));
+        snap.director.takeover = Takeover::Director;
+        assert!(auto_badge_hover(&snap).contains("over yours"));
+    }
+
+    #[test]
     fn the_switching_area_renders_headless() {
         let ctx = egui::Context::default();
         let snap = snapshot();
@@ -328,7 +529,7 @@ mod tests {
         let mut textures = Textures::default();
         let mut commands = Vec::new();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            commands = show(ui, &snap, &mut s, &mut textures, 16.0 / 9.0, 300.0);
+            commands = show(ui, &snap, &None, &mut s, &mut textures, 16.0 / 9.0, 300.0);
         });
         assert!(commands.is_empty(), "{commands:?}");
         assert_eq!(textures.len(), 0, "no monitor pictures in this snapshot");

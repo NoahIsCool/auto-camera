@@ -15,9 +15,10 @@
 //!   ([`TickSchedule`](crate::schedule::TickSchedule));
 //! * one **discovery worker** per source with a detector
 //!   (`ac-discovery-<source>`);
-//! * whatever the sources, the sidecar service and the encoder spawn
+//! * whatever the sources, the sidecar service and the output spawn
 //!   internally (decoders, the sidecar process and its `ac-sam-*` threads,
-//!   ffmpeg pipes), owned by those objects.
+//!   ffmpeg pipes, and on macOS `caffeinate` while output runs), owned by
+//!   those objects.
 //!
 //! A source that cannot be opened at start (a file that is not there yet)
 //! does not stop the engine: it starts offline, described by its
@@ -42,12 +43,15 @@
 //! | caller → engine | `mpsc` channel of [`EngineCommand`] + reply channel | applied in order at tick start |
 //! | engine → callers | [`Latest`]`<Arc<EngineSnapshot>>` | newest snapshot only |
 //! | engine → encoder | bounded queues inside [`ac_output::ProgramEncoder`] | drop and repay |
+//! | engine → trace writer | bounded [`TraceSender`] of [`EngineOptions::trace`] | never waits: a full channel drops the record ([`crate::trace`]) |
+//! | engine → detection log writer | bounded [`PassSender`] of [`EngineOptions::detections`] | never waits: a full channel drops the pass ([`crate::detection_log`]) |
 //!
 //! No lock is shared between threads except inside these mailboxes, and none
 //! is held across I/O. [`Engine::shutdown`] (or dropping the [`Engine`])
 //! sends [`EngineCommand::Shutdown`]; the engine thread then stops the
 //! sidecar (interrupting a pass or a load in progress, so the workers end
-//! at once; see [`crate::detectors`]), stops and joins the workers,
+//! at once; see [`crate::detectors`]; its final status stays readable for
+//! the final snapshot), stops and joins the workers,
 //! finishes the encoder (the recording is finalized), stops every source,
 //! publishes a final snapshot with `running == false` and exits, and
 //! `shutdown` joins it. No thread or child process outlives the engine.
@@ -74,6 +78,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use ac_media::{SourceInfo, VideoSource};
+use ac_output::{AwakeMode, Caffeinate};
 use ac_sidecar::SidecarService;
 use ac_sources::{Backoff, Clock, WallClock, open_supervised};
 use thiserror::Error;
@@ -81,6 +86,7 @@ use thiserror::Error;
 use crate::command::{CommandError, CommandReply, EngineCommand};
 use crate::config::{ConfigError, StudioConfig};
 use crate::core::EngineCore;
+use crate::detection_log::{PassRecord, PassSender};
 use crate::detectors::Detectors;
 use crate::discovery::{DiscoveryResult, DiscoveryWorker};
 use crate::mailbox::Latest;
@@ -88,6 +94,7 @@ use crate::output::OutputController;
 use crate::presentation::{PresentationBuffer, buffers_for, stats_by_source};
 use crate::schedule::TickTimer;
 use crate::snapshot::{EngineSnapshot, OutputView, TimingView};
+use crate::trace::{TraceSender, Tracer};
 
 mod engine_thread;
 mod handle;
@@ -147,13 +154,33 @@ pub struct EngineOptions {
     pub clock: Arc<dyn Clock>,
     /// Falling further behind than this skips ticks instead of bursting.
     pub max_lag: Duration,
+    /// Where the engine thread sends one trace record per tick
+    /// ([`crate::trace`]); `None` for no trace. The engine's thread owns
+    /// this sender, so the channel closes when the engine stops, unless a
+    /// clone of these options still holds one.
+    pub trace: Option<TraceSender>,
+    /// Where the engine thread sends every discovery pass it applied
+    /// ([`crate::detection_log`]); `None` for no log. Owned like `trace`.
+    pub detections: Option<PassSender>,
+    /// How the machine is held awake while output runs (the display too
+    /// when the monitors show program): the system's `caffeinate` on macOS
+    /// ([`Caffeinate::system`]), a stand-in in tests, or [`Caffeinate::Off`]
+    /// when the caller holds it awake itself, as a headless run does for
+    /// the whole run (the output view then says
+    /// [`KeepAwakeState::HeldByCaller`](crate::KeepAwakeState::HeldByCaller)).
+    pub keep_awake: Caffeinate,
 }
 
 impl Default for EngineOptions {
+    /// Real time, a one-second lag limit, no trace, no detection log and
+    /// the system's `caffeinate` while output runs.
     fn default() -> Self {
         Self {
             clock: Arc::new(WallClock::new()),
             max_lag: Duration::from_secs(1),
+            trace: None,
+            detections: None,
+            keep_awake: Caffeinate::system(),
         }
     }
 }
@@ -162,6 +189,9 @@ impl std::fmt::Debug for EngineOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EngineOptions")
             .field("max_lag", &self.max_lag)
+            .field("trace", &self.trace.is_some())
+            .field("detections", &self.detections.is_some())
+            .field("keep_awake", &self.keep_awake)
             .finish_non_exhaustive()
     }
 }
@@ -231,6 +261,10 @@ struct Runtime {
     late: u64,
     /// Skipped ticks.
     skipped: u64,
+    /// Where each tick's trace record goes.
+    trace: Tracer,
+    /// Where each applied pass goes.
+    detections: Tracer<PassRecord>,
 }
 
 impl Engine {
@@ -282,14 +316,16 @@ impl Engine {
         );
         core.note_presentation(stats_by_source(&presenters));
         let snapshots = Arc::new(Latest::new());
-        let initial = Arc::new(core.snapshot(
+        let mut first = core.snapshot(
             OutputView::default(),
             TimingView {
                 budget_ms: config.frame_period().as_secs_f64() * 1e3,
                 ..TimingView::default()
             },
             true,
-        ));
+        );
+        first.sidecar = sidecar.as_ref().map(|s| s.status());
+        let initial = Arc::new(first);
         snapshots.publish(initial.clone());
         let (tx, commands) = channel();
         let runtime = Runtime {
@@ -301,7 +337,10 @@ impl Engine {
             results,
             commands,
             snapshots: snapshots.clone(),
-            output: OutputController::new(config.output.clone()),
+            output: OutputController::new(config.output.clone()).with_keep_awake(
+                options.keep_awake,
+                AwakeMode::for_display(config.monitors.feeds_display()),
+            ),
             audio_source,
             clock: options.clock,
             period: config.frame_period(),
@@ -309,6 +348,8 @@ impl Engine {
             timer: TickTimer::default(),
             late: 0,
             skipped: 0,
+            trace: Tracer::new(options.trace),
+            detections: Tracer::new(options.detections),
         };
         let last_words = snapshots.clone();
         let thread =

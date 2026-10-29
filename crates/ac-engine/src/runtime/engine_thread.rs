@@ -6,10 +6,13 @@
 //! [`WAIT_SLICE`] at a time. A tick applies the pending commands, feeds the
 //! core the newest frame of every source and the discovery results that
 //! arrived, hands the core's requests to the workers, pushes the program
-//! frame and audio to the output, and publishes a snapshot. The frame the
-//! tick read from the phase reference (the program audio source, else the
-//! first source) goes to the [`PhaseLock`], which delays the schedule when
-//! ticks collide with that source's frames (see [`crate::schedule`]).
+//! frame and audio to the output, sends the tick's trace record (when the
+//! engine traces; [`crate::trace`]) and the passes it applied (when it logs
+//! detections; [`crate::detection_log`]) and publishes a snapshot. The
+//! frame the tick read from the phase reference (the program audio source,
+//! else the first source) goes to the [`PhaseLock`], which delays the
+//! schedule when ticks collide with that source's frames (see
+//! [`crate::schedule`]).
 //!
 //! Only the phase reference is fed its newest frame as it is, though: every
 //! other source's newest frame is offered to its
@@ -108,6 +111,7 @@ impl Runtime {
             self.timer.record(started.elapsed());
             self.late += u64::from(late);
             self.skipped += skipped;
+            self.send_trace(late, skipped);
             self.publish(true);
         }
         self.shutdown()
@@ -215,6 +219,9 @@ impl Runtime {
                 worker.submit(request);
             }
         }
+        for pass in out.applied {
+            self.detections.send(pass);
+        }
         let mut program_audio = Vec::new();
         for (i, s) in self.sources.iter().enumerate() {
             let blocks = s.drain_audio();
@@ -226,6 +233,18 @@ impl Runtime {
         reference
     }
 
+    /// Sends the trace record of the tick just run, with the clock's word
+    /// on it: it started `late`, after `skipped` skipped ticks.
+    fn send_trace(&mut self, late: bool, skipped: u64) {
+        if !self.trace.is_on() {
+            return;
+        }
+        let mut record = self.core.trace_record();
+        record.late = late;
+        record.skipped = skipped;
+        self.trace.send(record);
+    }
+
     /// Publishes the current snapshot and returns it.
     fn publish(&self, running: bool) -> Arc<EngineSnapshot> {
         let timing = TimingView {
@@ -234,21 +253,24 @@ impl Runtime {
             late_ticks: self.late,
             skipped_ticks: self.skipped,
         };
-        let snapshot = Arc::new(self.core.snapshot(self.output.view(), timing, running));
+        let mut snapshot = self.core.snapshot(self.output.view(), timing, running);
+        snapshot.sidecar = self.sidecar.as_ref().map(|s| s.status());
+        let snapshot = Arc::new(snapshot);
         self.snapshots.publish(snapshot.clone());
         snapshot
     }
 
     /// Stops the sidecar, the workers, the output and the sources, and
-    /// publishes the final snapshot. The sidecar goes first: dropping its
+    /// publishes the final snapshot. The sidecar goes first: stopping its
     /// service interrupts a pass or a load in progress, so the workers can
-    /// be joined at once instead of after a request deadline.
+    /// be joined at once instead of after a request deadline. The stopped
+    /// service is kept, so the final snapshot carries its final status.
     fn shutdown(mut self) -> EngineReport {
         let mut joined = 0;
-        if let Some(service) = self.sidecar.take() {
+        if let Some(service) = &mut self.sidecar {
             // Ends the process (stdin closed, 2 s grace, kill, reap) and
             // joins the service thread.
-            drop(service);
+            service.stop();
             joined += 1;
         }
         for w in self.workers.iter_mut().flatten() {

@@ -73,7 +73,10 @@ fn a_second_source_is_presented_tracked_and_put_on_air() {
         shot: shot("side/1/medium"),
     })
     .unwrap();
-    h.send(EngineCommand::Cut).unwrap();
+    h.send(EngineCommand::Cut {
+        preview: Some(shot("side/1/medium")),
+    })
+    .unwrap();
     let snap = h
         .wait_until(WAIT, |s| s.switcher.program == Some(shot("side/1/medium")))
         .expect("on air");
@@ -154,6 +157,8 @@ fn a_source_whose_frames_stop_is_shown_stale_and_not_repeated() {
             loop_playback: false,
             max_width: None,
             audio: false,
+            start_s: None,
+            duration_s: None,
         },
     );
     // The synthetic detector needs every source synthetic.

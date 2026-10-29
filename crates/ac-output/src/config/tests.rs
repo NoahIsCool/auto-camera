@@ -140,6 +140,79 @@ fn rejects_bad_rtmp_urls() {
     }
     .validate()
     .unwrap();
+    assert_eq!(
+        validate_rtmp_url("rtmps://live.example.com/app/key"),
+        Ok(())
+    );
+    let msg = validate_rtmp_url("http://live.example.com/app/SECRET-KEY").unwrap_err();
+    assert!(
+        msg.contains("rtmp_url") && !msg.contains("SECRET"),
+        "names the key, not the URL: {msg}"
+    );
+}
+
+#[test]
+fn every_bad_field_is_listed_and_validate_reports_the_first() {
+    assert!(config().problems().is_empty());
+    let c = OutputConfig {
+        ffmpeg: PathBuf::new(),
+        width: 1921,
+        height: 2,
+        fps: 0,
+        video_bitrate_kbps: 50,
+        keyframe_seconds: 30,
+        rtmp_url: Some("http://example.com/live/key".into()),
+        record_path: Some(PathBuf::new()),
+        audio: Some(AudioFormat {
+            sample_rate: 1_000,
+            channels: 0,
+        }),
+        audio_bitrate_kbps: 1,
+        ..config()
+    };
+    assert_eq!(
+        c.problems(),
+        [
+            "ffmpeg path is empty",
+            "height = 2 is outside 16..=4320",
+            "1921x2 is odd; yuv420p needs even dimensions",
+            "fps = 0 is outside 1..=120",
+            "video_bitrate_kbps = 50 is outside 100..=100000",
+            "keyframe_seconds = 30 is outside 1..=10",
+            "rtmp_url must start with rtmp:// or rtmps://",
+            "record_path is empty",
+            "audio.sample_rate = 1000 is outside 8000..=192000",
+            "audio.channels = 0 is outside 1..=8",
+            "audio_bitrate_kbps = 1 is outside 32..=512",
+        ]
+    );
+    rejects(c, "ffmpeg path is empty");
+    // A side outside its range is not called odd as well; one within it is.
+    let wide = OutputConfig {
+        width: 7681,
+        height: 1081,
+        ..config()
+    };
+    assert_eq!(
+        wide.problems(),
+        [
+            "width = 7681 is outside 16..=7680",
+            "7681x1081 is odd; yuv420p needs even dimensions",
+        ]
+    );
+    let only_range = OutputConfig {
+        width: 15,
+        ..config()
+    };
+    assert_eq!(only_range.problems(), ["width = 15 is outside 16..=7680"]);
+    let none = OutputConfig {
+        record_path: None,
+        ..config()
+    };
+    assert_eq!(
+        none.problems(),
+        ["no destination: set rtmp_url, record_path or both"]
+    );
 }
 
 #[test]
