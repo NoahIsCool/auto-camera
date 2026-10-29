@@ -124,6 +124,51 @@ fn status_bar_lines_show_rates_timing_and_drops() {
 }
 
 #[test]
+fn source_line_says_why_a_source_is_off_the_air() {
+    let mut snap = snapshot();
+    let now = Duration::ZERO;
+    let src = &mut snap.sources[0];
+    // A file missing at start: no rate known yet, retried, and why.
+    src.nominal_fps = 0.0;
+    src.state = SourceState::Offline;
+    src.error = Some("cannot open source: cannot open later.mkv".into());
+    assert_eq!(
+        source_line(src, now),
+        "stage –/– fps · 0 missed · OFFLINE: cannot open source: cannot open later.mkv"
+    );
+    assert_eq!(source_tone(src), Tone::Warning);
+    src.state = SourceState::Reconnecting;
+    assert_eq!(
+        source_line(src, now),
+        "stage –/– fps · 0 missed · RECONNECTING: cannot open source: cannot open later.mkv"
+    );
+    assert_eq!(source_tone(src), Tone::Warning);
+    // Retried without a reason given, and stopped by an error.
+    src.error = None;
+    assert!(source_line(src, now).ends_with(" · RECONNECTING"));
+    src.state = SourceState::Stopped;
+    src.error = Some("the source supervisor panicked".into());
+    assert!(
+        source_line(src, now).ends_with(" · NO SIGNAL: the source supervisor panicked"),
+        "{}",
+        source_line(src, now)
+    );
+    assert_eq!(source_tone(src), Tone::Warning);
+    src.error = None;
+    assert!(source_line(src, now).ends_with(" · NO SIGNAL"));
+    assert_eq!(source_tone(src), Tone::Plain, "it ended");
+    // Back on air: its rate is known and no reason is shown.
+    src.state = SourceState::Running;
+    src.error = None;
+    src.available = true;
+    src.frames = 30;
+    src.fps = 30.0;
+    src.nominal_fps = 30.0;
+    assert_eq!(source_line(src, now), "stage 30.0/30 fps · 0 missed");
+    assert_eq!(source_tone(src), Tone::Plain);
+}
+
+#[test]
 fn source_line_says_the_detector_is_preparing_and_for_how_long() {
     let mut snap = preparing_snapshot();
     let src = &mut snap.sources[0];
@@ -178,6 +223,78 @@ fn output_text_covers_every_state_and_stat() {
         destinations(&out),
         "rtmp://example.com/app/<key> + /tmp/show.mp4"
     );
+}
+
+#[test]
+fn the_stream_line_names_the_state_bitrate_and_outages() {
+    let mut s = StreamHealth {
+        state: StreamState::Connected,
+        stalled: false,
+        outages: 0,
+        reconnects: 0,
+        bitrate_kbps: Some(811.6),
+    };
+    assert_eq!(stream_line(&s), "stream connected · 812 kbit/s");
+    assert_eq!(stream_tone(&s), Tone::Plain);
+    s.bitrate_kbps = None;
+    assert_eq!(stream_line(&s), "stream connected · – kbit/s");
+
+    s.state = StreamState::Reconnecting { attempt: 3 };
+    s.outages = 1;
+    assert_eq!(
+        stream_line(&s),
+        "stream reconnecting (attempt 3) · 1 outage"
+    );
+    assert_eq!(stream_tone(&s), Tone::Warning);
+    s.state = StreamState::Connected;
+    s.stalled = true;
+    s.outages = 2;
+    assert_eq!(
+        stream_line(&s),
+        "stream connected · – kbit/s · stalled, dropping packets · 2 outages"
+    );
+    assert_eq!(stream_tone(&s), Tone::Warning, "a stall is a warning");
+
+    s = StreamHealth {
+        state: StreamState::Connecting,
+        ..s
+    };
+    assert_eq!(
+        stream_line(&s),
+        "stream connecting… · no answer · 2 outages"
+    );
+    s.stalled = false;
+    assert_eq!(stream_tone(&s), Tone::Weak);
+    s.state = StreamState::Down;
+    assert_eq!(stream_tone(&s), Tone::Warning);
+}
+
+#[test]
+fn the_stream_line_shows_only_while_a_streaming_session_is_live() {
+    let mut out = OutputView {
+        state: OutputState::Running,
+        ..recording("/tmp/show.mp4")
+    };
+    assert_eq!(stream_status(&out), None, "no stats yet");
+    out.stats = Some(encoder_stats());
+    assert_eq!(stream_status(&out), None, "this session only records");
+    let mut stats = encoder_stats();
+    stats.stream = Some(StreamHealth {
+        state: StreamState::Reconnecting { attempt: 1 },
+        stalled: false,
+        outages: 1,
+        reconnects: 0,
+        bitrate_kbps: Some(0.0),
+    });
+    out.stats = Some(stats);
+    let line = "stream reconnecting (attempt 1) · 1 outage".to_owned();
+    assert_eq!(stream_status(&out), Some((line.clone(), Tone::Warning)));
+    out.state = OutputState::Stopping;
+    assert_eq!(stream_status(&out), Some((line, Tone::Warning)));
+    for state in [OutputState::Idle, OutputState::Finished] {
+        out.state = state;
+        assert_eq!(stream_status(&out), None, "ffmpeg is gone");
+    }
 }
 
 /// A live query for `prompt`, read with the built-in lexicon for a

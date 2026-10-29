@@ -37,11 +37,12 @@
 //!
 //! The engine thread owns the service ([`Detectors::sidecar`]) and is the
 //! only one that can end the process; loaders and detectors only queue
-//! work. At shutdown the engine drops the service *before* joining the
+//! work. At shutdown the engine stops the service *before* joining the
 //! workers: that interrupts a pass or a load in progress (the workers then
 //! get `Unavailable` at once), closes the sidecar's stdin, waits up to 2 s
 //! and kills and reaps it, so quitting never waits out a request deadline
-//! and no process outlives the engine.
+//! and no process outlives the engine. The stopped service still reports
+//! its final status, which the final snapshot carries.
 
 use std::path::Path;
 

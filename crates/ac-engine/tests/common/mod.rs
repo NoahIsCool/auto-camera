@@ -1,6 +1,10 @@
-//! Shared helpers for the engine's integration tests.
+//! Shared helpers for the engine's integration tests, and the harness of
+//! the one-test binaries that are also the fake sidecar ([`one_test`]).
 
 #![allow(dead_code)]
+
+#[cfg(unix)]
+pub mod one_test;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,6 +42,7 @@ pub fn studio(subjects: u32) -> StudioConfig {
             PresetSpec::Size(ShotSize::Close),
         ]),
         literal: false,
+        priority: None,
     });
     c.output.width = 320;
     c.output.height = 180;

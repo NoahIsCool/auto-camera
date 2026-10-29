@@ -14,19 +14,22 @@
 //!    director is in *fallback*. The timer restarts when program changes.
 //! 3. **Eligibility.** A candidate may be suggested only if it is available,
 //!    has a valid crop, has quality of at least `fallback_quality` (a weaker
-//!    shot would itself trigger fallback), is not the program shot, and is
-//!    not a jump cut from program.
+//!    shot would itself trigger fallback), is not the program shot, is not
+//!    a jump cut from program, and is not a shot the operator skipped
+//!    within the last `skip` ([`operator`]).
 //! 4. **Pool.** In fallback, or with nothing on program, the pool is the
 //!    eligible wides (all eligible shots if there is no eligible wide).
 //!    Otherwise it is every eligible shot.
-//! 5. **Hysteresis.** If the current suggestion is not in the pool it is
-//!    replaced by the best-scoring pool member at once. Otherwise it changes
-//!    only after the best challenger has led it by at least `margin`
-//!    continuously for `hold`; the timer tracks the lead, not the challenger's
-//!    identity, so near-equal challengers swapping places cannot starve a
-//!    switch away from a clearly worse incumbent. Ties go to the earlier
-//!    candidate in the input list.
-//! 6. **Take (Auto only, never during a transition).** With nothing on
+//! 5. **Hysteresis.** Each pool member is scored with [`score`] (quality,
+//!    prompt priority and recency). If the current suggestion is not in the
+//!    pool it is replaced by the best-scoring pool member at once. Otherwise
+//!    it changes only after the best challenger has led it by at least
+//!    `margin` continuously for `hold`; the timer tracks the lead, not the
+//!    challenger's identity, so near-equal challengers swapping places
+//!    cannot starve a switch away from a clearly worse incumbent. Ties go to
+//!    the earlier candidate in the input list.
+//! 6. **Take (Auto only, never during a transition or while the operator's
+//!    switching pauses it, [`operator`]).** With nothing on
 //!    program, or in fallback, the suggestion is taken at once (fallback with
 //!    a cut). Otherwise no take before the minimum dwell; after it, a take is
 //!    due when program reaches its maximum dwell (wide or shot) or when the
@@ -35,7 +38,8 @@
 //!    so what is taken is what the operator saw.
 //!
 //! A step of `now` backwards is treated as a clock discontinuity and restarts
-//! every timer. Off mode clears all state, so re-enabling starts fresh.
+//! every timer, a skip window and a pause included. Off mode clears all
+//! state, so re-enabling starts fresh.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -46,6 +50,12 @@ use crate::candidate::{CandidateKind, ShotCandidate, base_score, is_jump_cut, sc
 use crate::config::{ConfigError, DirectorConfig, DirectorMode};
 use crate::decision::{DirectorDecision, Reason, TakeRequest, TransitionHint};
 
+mod operator;
+
+#[cfg(test)]
+mod operator_tests;
+#[cfg(test)]
+mod priority_tests;
 #[cfg(test)]
 mod proptests;
 #[cfg(test)]
@@ -87,6 +97,12 @@ struct State {
     beaten_since: Option<Duration>,
     /// Since when program quality has been below the fallback threshold.
     low_since: Option<Duration>,
+    /// Since when the operator's own switching has paused auto-takes
+    /// ([`operator`]); kept only in Auto mode.
+    paused_since: Option<Duration>,
+    /// Shots the operator skipped and since when, each left out of the
+    /// suggestions for `skip` ([`operator`]).
+    skipped: Vec<(ShotId, Duration)>,
 }
 
 /// An eligible candidate and its score on this tick.
@@ -140,9 +156,10 @@ impl Director {
         Ok(())
     }
 
-    /// Changes the autonomy mode.
+    /// Changes the autonomy mode; a pause of auto-takes ends.
     pub fn set_mode(&mut self, mode: DirectorMode) {
         self.config.mode = mode;
+        self.state.paused_since = None;
     }
 
     /// The incumbent suggestion from the last tick.
@@ -162,6 +179,7 @@ impl Director {
             return DirectorDecision::off();
         }
         self.observe(input);
+        self.expire_operator_windows(input.now);
         let candidates = first_occurrences(input.candidates);
         let program = input
             .program
@@ -231,6 +249,7 @@ impl Director {
             s.challenged_since = None;
             s.beaten_since = None;
             s.low_since = None;
+            s.restart_operator_windows(input.now);
         }
         s.last_now = Some(input.now);
         if s.program.as_ref() != input.program {
@@ -271,6 +290,7 @@ impl Director {
             && c.quality() >= self.config.fallback_quality
             && program_id != Some(&c.id)
             && !program.is_some_and(|p| is_jump_cut(p, c, self.config.jump_cut_iou))
+            && !self.is_skipped(&c.id)
     }
 
     /// Applies hysteresis over `pool`, updating the incumbent suggestion.
@@ -329,6 +349,9 @@ impl Director {
         facts: TickFacts<'_>,
         base_reason: Reason,
     ) -> (Option<TakeRequest>, Reason) {
+        if let Some(remaining) = self.paused(input.now) {
+            return (None, Reason::Paused { remaining });
+        }
         if input.in_transition {
             return (None, Reason::TransitionInProgress);
         }

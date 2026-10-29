@@ -3,7 +3,9 @@
 //! [`OutputConfig`] describes one program encode: picture size and rate, the
 //! video and audio bitrates, the keyframe interval and where the result goes.
 //! [`OutputConfig::validate`] is pure and runs before anything is spawned, so
-//! a bad config is reported as a named field instead of an ffmpeg exit code.
+//! a bad config is reported as a named field instead of an ffmpeg exit code;
+//! [`OutputConfig::problems`] lists every bad field at once, for a check
+//! that should not stop at the first.
 //!
 //! Invariants after validation:
 //!
@@ -144,68 +146,92 @@ impl fmt::Debug for OutputConfig {
     }
 }
 
-/// Builds an [`OutputError::InvalidConfig`].
-fn invalid(msg: impl Into<String>) -> OutputError {
-    OutputError::InvalidConfig(msg.into())
-}
-
-/// Checks that `value` lies in `range`, naming `field` in the error.
-fn check_range(
-    field: &str,
-    value: u32,
-    range: std::ops::RangeInclusive<u32>,
-) -> Result<(), OutputError> {
-    if range.contains(&value) {
-        Ok(())
-    } else {
-        Err(invalid(format!(
+/// The problem with `value` when it lies outside `range`, naming `field`.
+fn range_problem(field: &str, value: u32, range: std::ops::RangeInclusive<u32>) -> Option<String> {
+    (!range.contains(&value)).then(|| {
+        format!(
             "{field} = {value} is outside {}..={}",
             range.start(),
             range.end()
-        )))
-    }
+        )
+    })
 }
 
 impl OutputConfig {
-    /// Checks every field; see the module docs for the invariants.
+    /// Checks every field, failing on the first of [`Self::problems`]; see
+    /// the module docs for the invariants.
     ///
     /// Pure: it does not touch the filesystem. `ProgramEncoder::start`
     /// additionally refuses a recording path whose parent directory is
     /// missing or which already exists.
     pub fn validate(&self) -> Result<(), OutputError> {
-        if self.ffmpeg.as_os_str().is_empty() {
-            return Err(invalid("ffmpeg path is empty"));
+        match self.problems().into_iter().next() {
+            Some(problem) => Err(OutputError::InvalidConfig(problem)),
+            None => Ok(()),
         }
-        check_range("width", self.width, 16..=7680)?;
-        check_range("height", self.height, 16..=4320)?;
-        if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
-            return Err(invalid(format!(
+    }
+
+    /// Every field's problem, each naming the field, in the order
+    /// [`Self::validate`] checks them; empty when the config is valid. A
+    /// side outside its range is named by its range alone, and oddness is a
+    /// problem of the sides within range. Pure, like `validate`.
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.ffmpeg.as_os_str().is_empty() {
+            out.push("ffmpeg path is empty".into());
+        }
+        let width = range_problem("width", self.width, 16..=7680);
+        let height = range_problem("height", self.height, 16..=4320);
+        let odd = (width.is_none() && !self.width.is_multiple_of(2))
+            || (height.is_none() && !self.height.is_multiple_of(2));
+        out.extend(width);
+        out.extend(height);
+        if odd {
+            out.push(format!(
                 "{}x{} is odd; yuv420p needs even dimensions",
                 self.width, self.height
-            )));
+            ));
         }
-        check_range("fps", self.fps, 1..=120)?;
-        check_range("video_bitrate_kbps", self.video_bitrate_kbps, 100..=100_000)?;
-        check_range("keyframe_seconds", self.keyframe_seconds, 1..=10)?;
+        out.extend(range_problem("fps", self.fps, 1..=120));
+        out.extend(range_problem(
+            "video_bitrate_kbps",
+            self.video_bitrate_kbps,
+            100..=100_000,
+        ));
+        out.extend(range_problem(
+            "keyframe_seconds",
+            self.keyframe_seconds,
+            1..=10,
+        ));
         if self.rtmp_url.is_none() && self.record_path.is_none() {
-            return Err(invalid("no destination: set rtmp_url, record_path or both"));
+            out.push("no destination: set rtmp_url, record_path or both".into());
         }
         if let Some(url) = &self.rtmp_url {
-            validate_rtmp_url(url)?;
+            out.extend(validate_rtmp_url(url).err());
         }
-        if let Some(path) = &self.record_path {
-            match path.to_str() {
-                None => return Err(invalid("record_path is not valid UTF-8")),
-                Some("") => return Err(invalid("record_path is empty")),
-                Some(_) => {}
-            }
+        match self.record_path.as_deref().map(|p| p.to_str()) {
+            Some(None) => out.push("record_path is not valid UTF-8".into()),
+            Some(Some("")) => out.push("record_path is empty".into()),
+            _ => {}
         }
         if let Some(audio) = self.audio {
-            check_range("audio.sample_rate", audio.sample_rate, 8_000..=192_000)?;
-            check_range("audio.channels", u32::from(audio.channels), 1..=8)?;
-            check_range("audio_bitrate_kbps", self.audio_bitrate_kbps, 32..=512)?;
+            out.extend(range_problem(
+                "audio.sample_rate",
+                audio.sample_rate,
+                8_000..=192_000,
+            ));
+            out.extend(range_problem(
+                "audio.channels",
+                u32::from(audio.channels),
+                1..=8,
+            ));
+            out.extend(range_problem(
+                "audio_bitrate_kbps",
+                self.audio_bitrate_kbps,
+                32..=512,
+            ));
         }
-        Ok(())
+        out
     }
 
     /// Frames between keyframes.
@@ -219,23 +245,23 @@ impl OutputConfig {
     }
 }
 
-/// Accepts `rtmp://` and `rtmps://` URLs with a host and no whitespace.
-fn validate_rtmp_url(url: &str) -> Result<(), OutputError> {
+/// Accepts `rtmp://` and `rtmps://` URLs with a host and no whitespace;
+/// the error names `rtmp_url` and never contains the URL, whose stream key
+/// is a secret.
+pub fn validate_rtmp_url(url: &str) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
     let rest = if let Some(rest) = lower.strip_prefix("rtmp://") {
         rest
     } else if let Some(rest) = lower.strip_prefix("rtmps://") {
         rest
     } else {
-        return Err(invalid("rtmp_url must start with rtmp:// or rtmps://"));
+        return Err("rtmp_url must start with rtmp:// or rtmps://".into());
     };
     if rest.is_empty() || rest.starts_with('/') {
-        return Err(invalid("rtmp_url has no host"));
+        return Err("rtmp_url has no host".into());
     }
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(invalid(
-            "rtmp_url contains whitespace or control characters",
-        ));
+        return Err("rtmp_url contains whitespace or control characters".into());
     }
     Ok(())
 }

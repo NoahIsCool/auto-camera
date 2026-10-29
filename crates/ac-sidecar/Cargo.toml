@@ -13,6 +13,7 @@ ac-media.workspace = true
 ac-vision.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 serde_json = "1.0"
 
 [lints]

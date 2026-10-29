@@ -36,6 +36,7 @@ pub(super) fn wide(name: &str, source: &str) -> ShotCandidate {
         quality: 1.0,
         available: true,
         recently_used_at: None,
+        priority: 0,
     }
 }
 
@@ -49,6 +50,7 @@ pub(super) fn subject(name: &str, source: &str, quality: f32) -> ShotCandidate {
         quality,
         available: true,
         recently_used_at: None,
+        priority: 0,
     }
 }
 

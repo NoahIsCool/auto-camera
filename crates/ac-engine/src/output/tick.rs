@@ -69,6 +69,7 @@ impl OutputController {
             audio: self.pacer.as_ref().map(AudioPacer::stats),
             loudness: self.meter.as_ref().map(LoudnessMeter::reading),
             frames_pushed: self.frames_pushed,
+            keep_awake: self.awake.state(),
         }
     }
 }

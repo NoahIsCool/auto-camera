@@ -48,23 +48,56 @@ impl MonitorSettings {
         }
     }
 
+    /// True when program is rendered for a display (the operator window's
+    /// program monitor), which must then not sleep while output runs.
+    pub fn feeds_display(&self) -> bool {
+        self.rate_hz > 0.0
+    }
+
     /// Checks sizes and rates.
     pub fn validate(&self) -> Result<(), String> {
-        let side = |v: u32| (16..=3840).contains(&v);
-        if !side(self.width) || !side(self.height) || !side(self.thumb_width) {
-            return Err("monitor sizes must be within 16..=3840".into());
-        }
-        if !side(self.thumb_height) {
-            return Err("monitor sizes must be within 16..=3840".into());
+        self.problems().into_iter().next().map_or(Ok(()), Err)
+    }
+
+    /// Every size and rate out of range, each message naming its key;
+    /// [`Self::validate`] fails on the first.
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (name, v) in [
+            ("width", self.width),
+            ("height", self.height),
+            ("thumb_width", self.thumb_width),
+            ("thumb_height", self.thumb_height),
+        ] {
+            if !(16..=3840).contains(&v) {
+                out.push(format!("monitors.{name} {v} must be within 16..=3840"));
+            }
         }
         for (name, v) in [
             ("rate_hz", self.rate_hz),
             ("thumb_rate_hz", self.thumb_rate_hz),
         ] {
             if !(v.is_finite() && (0.0..=120.0).contains(&v)) {
-                return Err(format!("monitors.{name} {v} must be in 0..=120"));
+                out.push(format!("monitors.{name} {v} must be in 0..=120"));
             }
         }
-        Ok(())
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn program_feeds_a_display_while_the_monitors_refresh() {
+        assert!(MonitorSettings::default().feeds_display());
+        assert!(!MonitorSettings::disabled().feeds_display());
+        // The multiview alone does not show program.
+        let tiles_only = MonitorSettings {
+            rate_hz: 0.0,
+            ..MonitorSettings::default()
+        };
+        assert!(!tiles_only.feeds_display());
     }
 }

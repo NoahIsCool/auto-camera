@@ -14,6 +14,7 @@ onnx = ["ac-vision/onnx"]
 
 [dependencies]
 ac-core.workspace = true
+ac-eval.workspace = true
 ac-media.workspace = true
 ac-sources.workspace = true
 ac-vision.workspace = true
@@ -34,9 +35,14 @@ toml = "1.1"
 # Only to name the global pool's threads in the shutdown test.
 rayon = "1.12"
 
-# One test that also serves as its own fake sidecar; see the file's docs.
+# Tests that also serve as their own fake sidecar; see
+# tests/common/one_test.rs.
 [[test]]
 name = "shutdown"
+harness = false
+
+[[test]]
+name = "restart"
 harness = false
 
 [lints]

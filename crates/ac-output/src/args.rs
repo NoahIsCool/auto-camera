@@ -1,12 +1,19 @@
 //! The ffmpeg command line for one program encode.
 //!
 //! [`build_ffmpeg_args`] is a pure function of the config, the resolved
-//! encoder and the audio input URL, so the whole contract with ffmpeg is
-//! unit-tested here without running it. The command has four parts:
+//! encoder, the audio input URL and whether ffmpeg can write mux
+//! statistics, so the whole contract with ffmpeg is unit-tested here
+//! without running it. The command has four parts:
 //!
 //! 1. **Reporting.** `-progress pipe:1` writes `key=value` blocks to stdout
-//!    every half second (parsed by the progress module); `-loglevel error`
-//!    keeps stderr to real errors; `-nostdin` because stdin carries video.
+//!    every half second (parsed by the progress module); `-nostdin` because
+//!    stdin carries video. `-loglevel repeat+level+info` tags every stderr
+//!    line with its severity and keeps repeated lines: the stderr reader
+//!    keeps the errors and gives every line to the stream monitor, whose
+//!    reconnection messages are info lines (see the logline and stream
+//!    modules). When the encode streams and ffmpeg can, `-stats_mux_pre`
+//!    adds a line per muxed packet to stdout, from which the stream's
+//!    bitrate is measured (see the progress module).
 //! 2. **Inputs.** Input 0 is `rawvideo` RGBA on `pipe:0` with a fixed
 //!    `-framerate`, so the frame count is the clock. Input 1, when audio is
 //!    configured, is `f32le` from the audio URL. Both use the minimum probe
@@ -31,7 +38,9 @@
 //!    `onfail=ignore`: the fifo runs the network I/O on its own thread with a
 //!    bounded queue that drops packets on overflow and reconnects with
 //!    `restart_with_keyframe`, so an unreachable, slow or dropped ingest never
-//!    blocks or ends the recording.
+//!    blocks or ends the recording. Its queue length is set explicitly
+//!    ([`FIFO_QUEUE_PACKETS`], ffmpeg's default) because the stream monitor
+//!    infers a working connection from the queue not overflowing.
 //!
 //! Tee slave strings are escaped for ffmpeg's two parsing levels: each slave
 //! is wrapped in single quotes for the `|`-separated list, and the `:` inside
@@ -40,9 +49,17 @@
 //! protocol.
 
 use crate::config::{EncoderChoice, OutputConfig};
+use crate::progress::MUX_STATS_FORMAT;
 
 /// Seconds between reconnection attempts to a failed RTMP ingest.
 pub const RTMP_RECOVERY_WAIT_SECONDS: u32 = 2;
+
+/// Packets the fifo muxer queues for the RTMP slave before it drops them.
+pub const FIFO_QUEUE_PACKETS: u32 = 60;
+
+/// ffmpeg's log level and flags: severity tags, no folding of repeated
+/// lines, and the info-level reconnection messages (see the module docs).
+const LOG_LEVEL: &str = "repeat+level+info";
 
 /// Video packets buffered by ffmpeg's input thread.
 const VIDEO_THREAD_QUEUE: &str = "4";
@@ -83,9 +100,16 @@ fn rtmp_slave(url: &str) -> String {
         "recover_any_error=1".to_owned(),
         format!("recovery_wait_time={RTMP_RECOVERY_WAIT_SECONDS}"),
         "restart_with_keyframe=1".to_owned(),
+        format!("queue_size={FIFO_QUEUE_PACKETS}"),
     ]
     .join(r"\:");
     format!("[f=flv:onfail=ignore:use_fifo=1:fifo_options={fifo}]{url}")
+}
+
+/// The index of the RTMP slave in the tee ([`tee_outputs`] puts the MP4
+/// slave first when there is one), which ffmpeg names when it abandons it.
+pub fn rtmp_slave_index(config: &OutputConfig) -> usize {
+    usize::from(config.record_path.is_some())
 }
 
 /// The tee output string: MP4 first, then RTMP, each quoted.
@@ -106,12 +130,15 @@ pub fn tee_outputs(config: &OutputConfig) -> String {
 ///
 /// Audio is encoded only when both `config.audio` and `audio_input` (an
 /// ffmpeg input URL such as `tcp://127.0.0.1:5000`) are present; otherwise
-/// the program is video-only (`-an`). The config should have passed
-/// [`OutputConfig::validate`]; this function never panics either way.
+/// the program is video-only (`-an`). Mux statistics are written when
+/// `mux_stats` (this ffmpeg supports them) and the config streams. The
+/// config should have passed [`OutputConfig::validate`]; this function
+/// never panics either way.
 pub fn build_ffmpeg_args(
     config: &OutputConfig,
     encoder: &EncoderChoice,
     audio_input: Option<&str>,
+    mux_stats: bool,
 ) -> Vec<String> {
     let audio = config.audio.zip(audio_input);
     let gop = config.gop_frames().to_string();
@@ -119,7 +146,8 @@ pub fn build_ffmpeg_args(
     let (rate, buffer) = (format!("{vkbps}k"), format!("{}k", vkbps.saturating_mul(2)));
     let mut a = ArgList::default();
 
-    a.put(&["-hide_banner", "-nostdin", "-loglevel", "error", "-nostats"]);
+    a.put(&["-hide_banner", "-nostdin", "-nostats"]);
+    a.put(&["-loglevel", LOG_LEVEL]);
     a.put(&["-progress", "pipe:1", "-stats_period", STATS_PERIOD]);
 
     // Input 0: raw RGBA video at a constant frame rate.
@@ -170,6 +198,10 @@ pub fn build_ffmpeg_args(
     }
 
     a.put(&["-flags", "+global_header", "-max_muxing_queue_size", "1024"]);
+    if mux_stats && config.rtmp_url.is_some() {
+        a.put(&["-stats_mux_pre", "pipe:1"]);
+        a.put(&["-stats_mux_pre_fmt", MUX_STATS_FORMAT]);
+    }
     a.put(&["-f", "tee", &tee_outputs(config)]);
     a.0
 }
@@ -226,7 +258,7 @@ mod tests {
 
     #[test]
     fn video_input_is_constant_rate_raw_rgba_on_stdin() {
-        let args = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, None);
+        let args = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, None, false);
         assert_eq!(value(&args, "-pixel_format"), "rgba");
         assert_eq!(value(&args, "-video_size"), "1280x720");
         assert_eq!(value(&args, "-framerate"), "60");
@@ -238,7 +270,7 @@ mod tests {
 
     #[test]
     fn x264_is_low_latency_with_fixed_gop_and_no_b_frames() {
-        let args = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, None);
+        let args = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, None, false);
         assert_eq!(value(&args, "-c:v"), "libx264");
         assert_eq!(value(&args, "-preset"), "veryfast");
         assert_eq!(value(&args, "-tune"), "zerolatency");
@@ -254,7 +286,7 @@ mod tests {
 
     #[test]
     fn videotoolbox_is_realtime_without_x264_options() {
-        let args = build_ffmpeg_args(&config(), &EncoderChoice::VideoToolbox, None);
+        let args = build_ffmpeg_args(&config(), &EncoderChoice::VideoToolbox, None, false);
         assert_eq!(value(&args, "-c:v"), "h264_videotoolbox");
         assert_eq!(value(&args, "-realtime"), "1");
         assert_eq!(value(&args, "-bf"), "0");
@@ -265,7 +297,7 @@ mod tests {
 
     #[test]
     fn picture_is_tagged_bt709_limited_range() {
-        let args = build_ffmpeg_args(&config(), &EncoderChoice::VideoToolbox, None);
+        let args = build_ffmpeg_args(&config(), &EncoderChoice::VideoToolbox, None, false);
         let vf = value(&args, "-vf");
         assert!(vf.contains("out_color_matrix=bt709"), "{vf}");
         assert!(vf.contains("out_range=tv"), "{vf}");
@@ -282,7 +314,7 @@ mod tests {
     #[test]
     fn audio_input_and_encode_when_configured() {
         let url = "tcp://127.0.0.1:5000";
-        let args = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, Some(url));
+        let args = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, Some(url), false);
         assert_eq!(values(&args, "-i"), ["pipe:0", url]);
         assert_eq!(values(&args, "-f")[..2], ["rawvideo", "f32le"]);
         assert_eq!(values(&args, "-ar"), ["44100", "48000"]);
@@ -304,7 +336,7 @@ mod tests {
             ..config()
         };
         for (c, input) in [(&silent, url), (&config(), None)] {
-            let args = build_ffmpeg_args(c, &EncoderChoice::Libx264, input);
+            let args = build_ffmpeg_args(c, &EncoderChoice::Libx264, input, false);
             assert_eq!(values(&args, "-i"), ["pipe:0"]);
             assert_eq!(values(&args, "-map"), ["0:v:0"]);
             assert!(args.contains(&"-an".to_owned()));
@@ -314,7 +346,7 @@ mod tests {
 
     #[test]
     fn tee_records_first_and_isolates_rtmp() {
-        let args = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, None);
+        let args = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, None, false);
         assert_eq!(values(&args, "-f").last(), Some(&"tee"));
         let tee = args.last().unwrap();
         let (mp4, rtmp) = tee.split_once('|').unwrap();
@@ -325,8 +357,47 @@ mod tests {
         );
         assert!(rtmp.starts_with("'[f=flv:onfail=ignore:use_fifo=1:fifo_options="));
         assert!(rtmp.contains(r"drop_pkts_on_overflow=1\:attempt_recovery=1\:"));
-        assert!(rtmp.contains(r"\:restart_with_keyframe=1]"));
+        assert!(rtmp.contains(r"\:restart_with_keyframe=1\:queue_size=60]"));
         assert!(rtmp.ends_with("]rtmp://live.example.com/app/key'"));
+    }
+
+    #[test]
+    fn stderr_is_tagged_and_unfolded() {
+        let args = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, None, false);
+        assert_eq!(value(&args, "-loglevel"), "repeat+level+info");
+        assert!(args.contains(&"-nostats".to_owned()));
+    }
+
+    #[test]
+    fn mux_statistics_only_when_supported_and_streaming() {
+        let args = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, None, true);
+        assert_eq!(value(&args, "-stats_mux_pre"), "pipe:1");
+        assert_eq!(value(&args, "-stats_mux_pre_fmt"), "mux {sidx} {t} {size}");
+        // An output option: before the tee output, which stays last.
+        let at = args.iter().position(|a| a == "-stats_mux_pre").unwrap();
+        assert!(at < args.iter().position(|a| a == "tee").unwrap());
+        assert!(args.last().unwrap().contains("rtmp://"));
+        let unsupported = build_ffmpeg_args(&config(), &EncoderChoice::Libx264, None, false);
+        let record_only = OutputConfig {
+            rtmp_url: None,
+            ..config()
+        };
+        let not_streaming = build_ffmpeg_args(&record_only, &EncoderChoice::Libx264, None, true);
+        for args in [unsupported, not_streaming] {
+            assert!(!args.contains(&"-stats_mux_pre".to_owned()));
+            assert!(!args.contains(&"-stats_mux_pre_fmt".to_owned()));
+        }
+    }
+
+    #[test]
+    fn the_rtmp_slave_follows_the_recording() {
+        assert_eq!(rtmp_slave_index(&config()), 1);
+        let stream_only = OutputConfig {
+            record_path: None,
+            ..config()
+        };
+        assert_eq!(rtmp_slave_index(&stream_only), 0);
+        assert!(tee_outputs(&stream_only).starts_with("'[f=flv"));
     }
 
     #[test]
@@ -375,7 +446,7 @@ mod tests {
             keyframe_seconds: 1,
             ..config()
         };
-        let args = build_ffmpeg_args(&c, &EncoderChoice::Libx264, None);
+        let args = build_ffmpeg_args(&c, &EncoderChoice::Libx264, None, false);
         assert_eq!(value(&args, "-g"), "30");
     }
 }

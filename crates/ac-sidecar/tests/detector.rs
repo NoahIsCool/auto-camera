@@ -413,3 +413,46 @@ fn dropping_the_service_interrupts_a_model_still_loading() {
     assert!(matches!(err, VisionError::Unavailable(_)), "{err}");
     assert_reaped(pid);
 }
+
+#[test]
+fn a_killed_sidecar_is_restarted_and_stop_keeps_the_count() {
+    let mut service = SidecarService::start(fake("ok", &[])).unwrap();
+    let mut detector = service.detector(DetectorConfig::default()).unwrap();
+    let queries = [PromptQuery::new("a", "a person")];
+    detector.detect(&frame(64, 36, 1), &queries).unwrap();
+    let first = pid_of(&service);
+    assert_eq!(service.status().stats.restarts(), 0);
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", &first.to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    // Passes fail until the host has seen the loss and, after its 50 ms
+    // backoff, started the fake again.
+    let mut seq = 1;
+    let restarted = eventually(PROMPT, || {
+        seq += 1;
+        let _ = detector.detect(&frame(64, 36, seq), &queries);
+        let status = service.status();
+        status.stats.restarts() == 1 && status.state == HostState::Ready
+    });
+    assert!(restarted, "{:?}", service.status());
+    assert_reaped(first);
+    let second = pid_of(&service);
+    assert_ne!(second, first);
+    service.stop();
+    service.stop();
+    let status = service.status();
+    assert_eq!((status.state, status.pid), (HostState::Stopped, None));
+    assert_eq!(
+        status.stats.restarts(),
+        1,
+        "the final status keeps the count"
+    );
+    assert!(status.stats.failures >= 1);
+    assert_reaped(second);
+    let err = detector
+        .detect(&frame(64, 36, seq + 1), &queries)
+        .unwrap_err();
+    assert!(matches!(err, VisionError::Unavailable(_)), "{err}");
+}
