@@ -8,7 +8,9 @@
 //!
 //! The code is split so that everything but the drawing is testable
 //! without a window: [`layout`] (tile grid and monitor geometry), [`keys`]
-//! (shortcut mapping), [`text`] (labels), [`textures`] (upload decisions),
+//! (shortcut mapping), [`text`] (labels), [`caption`] (the preview
+//! monitor's notes on a waiting take and a lost subject), [`textures`]
+//! (upload decisions),
 //! [`close_guard`] (asking before a live output is closed or stopped),
 //! [`notices`] (what the status bar's notice says, and for how long),
 //! [`alarms`] (its persistent list of what is wrong on air), the forms
@@ -25,6 +27,7 @@
 
 mod alarms;
 mod app;
+mod caption;
 mod close_guard;
 mod console;
 #[cfg(test)]

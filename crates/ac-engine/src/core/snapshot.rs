@@ -91,6 +91,7 @@ impl EngineCore {
             queued: self.switcher.queued().cloned(),
             dropped_takes: self.switcher.dropped_takes(),
             last_dropped: self.switcher.last_dropped().cloned(),
+            settle: self.settle.clone(),
         };
         let config = self.director.config();
         let director = DirectorView {

@@ -118,6 +118,25 @@ holds its takes for `pause_s` seconds after each action, counted down on
 the badge; with `"director"` it carries on and stages its shot over yours.
 A notice says which happened.
 
+Settle-before-take is off by default. With `[switcher.settle]`
+`enabled = true`, a Cut, Auto or Accept pressed while the preview crop is
+still travelling to its subject (its settledness below `threshold`, 0.6 by
+default) waits for it to settle, at most `max_wait_s` (0.5 s by default and
+at most), and the preview caption says `waiting for preview to settle`.
+Press again (`Space`, `Enter`, CUT, AUTO or Accept) to take it at once; a
+press in the half second after the take went on air by itself counts as
+that second press and does nothing (but `Space` lands a mix still
+running), so it never cuts straight back.
+Staging another shot puts the waiting take on air first, as it would have
+gone at once without the rule. A double click on another tile is a staging
+and then a Cut now, so the waiting shot is on air for the length of the
+double click before the tile cuts in. A T-bar move never waits and replaces
+a waiting take, unless it does nothing (the lever at its rest end). If
+preview changes while a take waits, it is dropped with the same notice as
+any fenced take. The director's own takes never wait. Whether or not it is
+on, the preview caption turns amber and says `subject N lost` when the
+preview shot's subject is lost; it only warns, and the take goes ahead.
+
 ## Headless mode
 
 ```sh
@@ -416,14 +435,14 @@ added in the window joins the end of the list (or gets 3 when priorities
 are given), and a priority outside 1 to 5 is a configuration error.
 
 Further sections tune the `tracker`, `subjects` (limits and lost/retire
-times), `framing`, `switcher` (default transition, `start_on_wide`),
-`monitors` (monitor and multiview tile sizes and rates) and `lexicon` (below);
-see `crates/ac-engine/src/config.rs`. Every value is checked when the file
-loads; the `output` table with the encoder's own ranges (even sizes up to
-7680x4320, 1–120 fps, `video_bitrate_kbps` 100–100000,
-`audio_bitrate_kbps` 32–512, `keyframe_seconds` 1–10, an `rtmp://` or
-`rtmps://` URL), so a bad value fails at load rather than when the output
-starts.
+times), `framing`, `switcher` (default transition, `start_on_wide`,
+settle-before-take), `monitors` (monitor and multiview tile sizes and
+rates) and `lexicon` (below); see `crates/ac-engine/src/config.rs`. Every
+value is checked when the file loads; the `output` table with the
+encoder's own ranges (even sizes up to 7680x4320, 1–120 fps,
+`video_bitrate_kbps` 100–100000, `audio_bitrate_kbps` 32–512,
+`keyframe_seconds` 1–10, an `rtmp://` or `rtmps://` URL), so a bad value
+fails at load rather than when the output starts.
 
 A source that cannot be opened when the engine starts (a file that is not
 there yet) does not stop it: the other sources run, the window's status
