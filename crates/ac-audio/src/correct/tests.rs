@@ -1,8 +1,11 @@
 //! Tests of the drift corrector: blocks in the dead band untouched, a
 //! drifting input put on the master clock without a seam, breaks that end
-//! the resampling, limits on the correction, and bad blocks and formats.
+//! the resampling, steps made up once confirmed (in an epoch's first
+//! second too) and stray timestamps left alone, limits on the correction,
+//! and bad blocks and formats.
 
 use super::*;
+use crate::drift::CONFIRM_BLOCKS;
 
 /// Sample rate of the tests.
 const RATE: u32 = 48_000;
@@ -266,9 +269,10 @@ fn step_at_a_minute(ppm: f64, step: f64) -> (DriftCorrector, f64) {
 }
 
 #[test]
-fn a_step_in_the_pts_is_made_up_at_once_and_not_taken_for_drift() {
+fn a_step_in_the_pts_is_made_up_once_and_not_taken_for_drift() {
     // 20 or 50 ms lost (the PTS step forward) is filled with that much
-    // silence; a PTS that steps back 30 ms has that much cut. Neither is
+    // silence, a few blocks on once the blocks after the step confirm it;
+    // a PTS that steps back 30 ms has that much cut. Neither is
     // read as drift: a drift-free input is not resampled, and one 100 ppm
     // fast is resampled as before, the silence through the resampler.
     for ppm in [0.0, 100.0] {
@@ -321,17 +325,24 @@ fn a_first_block_stamped_off_does_not_move_the_stream() {
 #[test]
 fn a_fill_and_a_cut_are_placed_exactly() {
     // Exact PTS, so the steps are exactly 25 ms (1200 frames): two seconds
-    // in, the PTS step forward, and the block comes after that much
-    // silence; a second later they step back, and as much is cut from the
-    // blocks that follow, two and a half of them.
+    // in, the PTS step forward, the blocks after that pass as they are
+    // until the step is confirmed, and the block that confirms it comes
+    // after that much silence; a second later they step back, and as much
+    // is cut from the blocks from the one that confirms it on, two and a
+    // half of them.
     let mut c = corrector();
     let at = |frame: usize| Duration::from_nanos(frame as u64 * 1_000_000_000 / u64::from(RATE));
+    let held = CONFIRM_BLOCKS as usize - 1;
     let mut frame = 0;
-    for k in 0..200 {
-        assert_eq!(c.process(at(frame), &samples(k)), Corrected::Unchanged);
+    for k in 0..200 + held {
+        let shift = if k >= 200 { 1_200 } else { 0 };
+        assert_eq!(
+            c.process(at(frame + shift), &samples(k)),
+            Corrected::Unchanged
+        );
         frame += BLOCK;
     }
-    let block = samples(200);
+    let block = samples(200 + held);
     let Corrected::Resampled(r) = c.process(at(frame + 1_200), &block) else {
         panic!("the silence comes first");
     };
@@ -340,14 +351,16 @@ fn a_fill_and_a_cut_are_placed_exactly() {
     assert!(r.samples[..2_400].iter().all(|&v| v == 0.0));
     assert_eq!(r.samples[2_400..], block[..]);
     frame += BLOCK;
-    for k in 201..300 {
+    for k in 201 + held..300 + held {
+        let shift = if k >= 300 { 0 } else { 1_200 };
         assert_eq!(
-            c.process(at(frame + 1_200), &samples(k)),
+            c.process(at(frame + shift), &samples(k)),
             Corrected::Unchanged
         );
         frame += BLOCK;
     }
-    for (k, behind) in [(300, -480.0), (301, -480.0), (302, -240.0)] {
+    let first = 300 + held;
+    for (k, behind) in [(first, -480.0), (first + 1, -480.0), (first + 2, -240.0)] {
         let block = samples(k);
         let Corrected::Resampled(r) = c.process(at(frame), &block) else {
             panic!("block {k} is cut");
@@ -359,7 +372,103 @@ fn a_fill_and_a_cut_are_placed_exactly() {
         );
         frame += BLOCK;
     }
-    assert_eq!(c.process(at(frame), &samples(303)), Corrected::Unchanged);
+    assert_eq!(
+        c.process(at(frame), &samples(first + 3)),
+        Corrected::Unchanged
+    );
     let stats = c.stats();
     assert_eq!((stats.steps, stats.resets, stats.resampling), (2, 0, false));
+}
+
+/// The frames that come out of ten minutes of a drift-free input whose
+/// PTS jitter by up to half a millisecond and are moved by `off(k)`
+/// seconds for block `k`, from the master-clock time the blocks cover
+/// once `lost` frames are lost after block 40 (0.4 s in), at their
+/// furthest from half a second on, in frames; and the corrector.
+fn lead_after(lost: usize, off: impl Fn(usize) -> f64) -> (f64, DriftCorrector) {
+    let mut c = corrector();
+    let mut noise = jitter(0.000_5);
+    let rate = f64::from(RATE);
+    let (mut out, mut worst) = (0usize, 0f64);
+    for k in 0..60_000 {
+        let frame = k * BLOCK + if k >= 40 { lost } else { 0 };
+        let t = 1.0 + frame as f64 / rate + noise() + off(k);
+        let block = sparse(k);
+        out += frames(&c.process(Duration::from_secs_f64(t), &block), &block);
+        if k >= 50 {
+            let held = if c.stats().resampling { HALF_TAPS } else { 0 };
+            let due = frame + BLOCK;
+            worst = worst.max(((out + held) as f64 - due as f64).abs());
+        }
+    }
+    (worst, c)
+}
+
+#[test]
+fn audio_lost_in_the_first_second_is_made_up_and_stays_made_up() {
+    // 20 or 60 ms lost 0.4 s into the epoch, before its timing reference:
+    // made up once with that much silence, and the reference is net of it,
+    // so the output keeps the PTS's timing for ten minutes, and a
+    // drift-free input is never resampled to take the silence back.
+    for lost in [960, 2_880] {
+        let (worst, c) = lead_after(lost, |_| 0.0);
+        let stats = c.stats();
+        assert!(
+            worst < 0.002 * f64::from(RATE),
+            "{lost}: {worst}, {stats:?}"
+        );
+        assert_eq!((stats.steps, stats.resets, stats.resampling), (1, 0, false));
+    }
+}
+
+/// A way a block's timestamps can stray, named: how far block `k`'s PTS
+/// is moved, in seconds (below zero earlier).
+type Stray = (&'static str, Box<dyn Fn(usize) -> f64>);
+
+#[test]
+fn a_stray_timestamp_leaves_the_audio_alone() {
+    // A drift-free input on exact PTS but for a block or two stamped 3 to
+    // 60 ms off, and for a block 30 ms late whose followers are stamped no
+    // earlier than it until their true times catch up: every block passes
+    // as it is, and nothing is told.
+    let length = BLOCK as f64 / f64::from(RATE);
+    let strays: [Stray; 5] = [
+        (
+            "one 3 ms late",
+            Box::new(|k| if k == 3_000 { 0.003 } else { 0.0 }),
+        ),
+        (
+            "one 30 ms early",
+            Box::new(|k| if k == 3_000 { -0.03 } else { 0.0 }),
+        ),
+        (
+            "two 60 ms late",
+            Box::new(|k| if k / 2 == 1_500 { 0.06 } else { 0.0 }),
+        ),
+        (
+            "three 5 ms early",
+            Box::new(|k| if k / 3 == 1_000 { -0.005 } else { 0.0 }),
+        ),
+        (
+            "one 30 ms late, held from going back",
+            Box::new(move |k| match k.checked_sub(3_000) {
+                Some(n) => (0.03 - n as f64 * length).max(0.0),
+                None => 0.0,
+            }),
+        ),
+    ];
+    let at = |frame: usize| frame as f64 / f64::from(RATE);
+    for (what, off) in strays {
+        let mut c = corrector();
+        for k in 0..6_000 {
+            let t = Duration::from_secs_f64(1.0 + at(k * BLOCK) + off(k));
+            assert_eq!(
+                c.process(t, &sparse(k)),
+                Corrected::Unchanged,
+                "{what}: {k}"
+            );
+        }
+        let stats = c.stats();
+        assert_eq!((stats.steps, stats.resets, stats.resampling), (0, 0, false));
+    }
 }

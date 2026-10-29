@@ -499,18 +499,21 @@ resampler whose ratio changes smoothly, up to 1000 ppm. In simulation a
 board 100 ppm off stays within 20 ms of the video for three hours with no
 silence inserted and nothing cut. A step in the timestamps is never taken
 for drift: up to 100 ms (audio a full ring dropped, a short loss) it is
-made up as soon as the audio after it comes, with that much silence (or,
-for timestamps that step back, that much cut), and the drift measurement
-carries on; beyond 100 ms (a reconnection, a long loss) it is a break: the
-pacing above fills the gap and the measurement starts again. What is not
-corrected: blocks within a dead band of 2 ppm pass through bit for bit, as
-a file input on the engine's clock always does; a source's embedded audio
-is never resampled, and drift of the video itself (a camera against the
-engine) is not corrected; drift beyond 1000 ppm is left to the fills and
-cuts. The window's output panel shows the program input's correction, its
-resets and the steps made up, and a headless summary reports them for
-every input (`audio_inputs`: `id`, `name`, `program`, `correction_ppm`,
-`drift_resets`, `drift_steps`).
+made up once the next few blocks confirm it, with that much silence (or,
+for timestamps that step back, that much cut), in a connection's first
+second as later, and the drift measurement carries on; beyond 100 ms (a
+reconnection, a long loss) it is a break: the pacing above fills the gap
+and the measurement starts again. A timestamp that strays for a block or a
+few and comes back (a glitch in the device's clock) is not a step: no
+block is edited for it. What is not corrected: blocks within a dead band
+of 2 ppm pass through bit for bit, as a file input on the engine's clock
+always does; a source's embedded audio is never resampled, and drift of
+the video itself (a camera against the engine) is not corrected; drift
+beyond 1000 ppm is left to the fills and cuts. The window's output panel
+shows the program input's correction, its resets and the steps made up,
+and a headless summary reports them for every input (`audio_inputs`:
+`id`, `name`, `program`, `correction_ppm`, `drift_resets`,
+`drift_steps`).
 
 A source's embedded audio is mixed to stereo by ffmpeg as it is decoded,
 with the matrix the encoder used on it before: a stereo track as it is, a

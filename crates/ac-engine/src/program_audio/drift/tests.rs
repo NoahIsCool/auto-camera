@@ -1,8 +1,9 @@
 //! Tests of drift correction in program audio, through the output's pacer:
 //! a board 100 ppm off the engine's clock kept in sync for three hours
 //! without silence or cuts, steps in its PTS taken for breaks or made up
-//! once and never taken for drift, and audio on the engine's clock (a file
-//! input, a camera's) passed on untouched.
+//! once (in a connection's first second too) and never taken for drift,
+//! timestamps that stray and come back left alone, and audio on the
+//! engine's clock (a file input, a camera's) passed on untouched.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,11 +55,14 @@ struct Board {
     clock: FakeFeed,
     /// The next block.
     next: u64,
-    /// Blocks completed in this window never come: a reconnection, lost
+    /// Blocks completed in these windows never come: a reconnection, lost
     /// audio.
-    lost: Option<(Duration, Duration)>,
+    lost: Vec<(Duration, Duration)>,
     /// Blocks completed in this window come at its end: a stall.
     held: Option<(Duration, Duration)>,
+    /// The PTS of the blocks in this range of block numbers are moved by
+    /// this many seconds (below zero earlier): timestamps that stray.
+    stray: Option<(std::ops::Range<u64>, f64)>,
     /// Most a block is delivered after it is complete.
     arrival: Duration,
     /// Most a block's PTS is off its first frame's time, either way.
@@ -93,8 +97,9 @@ impl Board {
         Self {
             clock: FakeFeed::new(SourceId("board".into()), plan).unwrap(),
             next: 0,
-            lost: None,
+            lost: Vec::new(),
             held: None,
+            stray: None,
             arrival: Duration::from_millis(3),
             stamp: Duration::from_micros(500),
             noise: Noise(0x2545_f491),
@@ -118,7 +123,7 @@ impl Board {
             let k = self.next;
             self.next += 1;
             let complete = self.clock.time_of((k + 1) * BLOCK);
-            if within(self.lost, complete) {
+            if self.lost.iter().any(|&w| within(Some(w), complete)) {
                 continue;
             }
             let ready = match self.held {
@@ -129,7 +134,12 @@ impl Board {
             let at = (ready + late).max(self.latest);
             let first = self.clock.time_of(k * BLOCK);
             let off = self.stamp.mul_f64(self.noise.next() * 2.0);
-            let pts = (first + off).saturating_sub(self.stamp);
+            let mut pts = (first + off).saturating_sub(self.stamp);
+            if let Some((blocks, by)) = &self.stray
+                && blocks.contains(&k)
+            {
+                pts = Duration::from_secs_f64(pts.as_secs_f64() + by);
+            }
             let samples = if k.is_multiple_of(100) {
                 self.tone.clone()
             } else {
@@ -247,7 +257,7 @@ fn a_step_in_the_pts_is_a_break_not_drift() {
     // reset, no correction, every block passed on as it came, and the
     // pacer fills the gap and is back in step.
     let mut board = Board::new(0.0);
-    board.lost = Some((Duration::from_secs(30), Duration::from_millis(30_500)));
+    board.lost = vec![(Duration::from_secs(30), Duration::from_millis(30_500))];
     let run = play(&mut board, 60, 31);
     assert_eq!(run.view.drift_resets, 1);
     assert_eq!((run.view.correction_ppm, run.resampled), (0.0, 0));
@@ -266,7 +276,7 @@ fn a_step_in_the_pts_is_a_break_not_drift() {
     // minutes: the correction starts again from zero, and the second epoch
     // is corrected like the first.
     let mut board = Board::new(100.0);
-    board.lost = Some((Duration::from_secs(300), Duration::from_secs(302)));
+    board.lost = vec![(Duration::from_secs(300), Duration::from_secs(302))];
     let run = play(&mut board, 600, 303);
     assert_eq!(run.view.drift_resets, 1);
     assert!(
@@ -435,7 +445,7 @@ fn audio_lost_up_to_the_slack_is_made_up_once() {
         for lost in [40, 90, 100] {
             let mut board = Board::new(ppm);
             let from = Duration::from_secs(30);
-            board.lost = Some((from, from + Duration::from_millis(lost)));
+            board.lost = vec![(from, from + Duration::from_millis(lost))];
             let run = play(&mut board, 240, 31);
             let what = format!("{ppm} ppm, {lost} ms lost: {:?}, {:?}", run.pacer, run.view);
             assert!(
@@ -450,6 +460,94 @@ fn audio_lost_up_to_the_slack_is_made_up_once() {
             let (steps, resets) = (run.view.drift_steps, run.view.drift_resets);
             assert_eq!(steps + resets, 1, "{what}");
             assert!(lost == 100 || steps == 1, "{what}");
+        }
+    }
+}
+
+#[test]
+fn audio_lost_in_a_connections_first_second_is_made_up_once() {
+    // A board, drift-free or 37 ppm fast, loses 60 ms 0.4 s after it
+    // connects, before its drift measurement has its timing reference:
+    // the corrector makes the gap up once, and the lead stays within the
+    // spec's bound for five minutes, the reference taken net of the step
+    // so the silence is never taken back.
+    for ppm in [0.0, 37.0] {
+        let mut board = Board::new(ppm);
+        board.lost = vec![(Duration::from_millis(400), Duration::from_millis(460))];
+        let run = play(&mut board, 300, 1);
+        let what = format!("{ppm} ppm: {:?}, {:?}", run.pacer, run.view);
+        assert!(
+            -SYNC_MS <= run.low && run.high <= SYNC_MS,
+            "{what}: lead from {} to {} ms",
+            run.low,
+            run.high
+        );
+        assert_eq!(
+            (run.view.drift_steps, run.view.drift_resets),
+            (1, 0),
+            "{what}"
+        );
+        assert_eq!((run.pacer.silence, run.pacer.dropped), (0, 0), "{what}");
+        let cancels = -ppm / (1.0 + ppm * 1e-6);
+        assert!((run.view.correction_ppm - cancels).abs() < 1.0, "{what}");
+    }
+}
+
+#[test]
+fn a_loss_half_a_second_after_a_break_is_made_up_once() {
+    // 150 ms lost at a minute, a break the pacer fills, and another 40 ms
+    // half a second later, in the new epoch's first second: the corrector
+    // makes that one up, and the lead is back within the spec's bound.
+    let mut board = Board::new(37.0);
+    board.lost = vec![
+        (Duration::from_secs(60), Duration::from_millis(60_150)),
+        (Duration::from_millis(60_650), Duration::from_millis(60_690)),
+    ];
+    let run = play(&mut board, 300, 62);
+    let what = format!("{:?}, {:?}", run.pacer, run.view);
+    assert!(
+        -SYNC_MS <= run.low && run.high <= SYNC_MS,
+        "{what}: lead from {} to {} ms",
+        run.low,
+        run.high
+    );
+    assert_eq!(
+        (run.view.drift_steps, run.view.drift_resets),
+        (1, 1),
+        "{what}"
+    );
+    assert!(run.pacer.silence > 0, "{what}");
+}
+
+#[test]
+fn a_stray_timestamp_leaves_the_boards_audio_alone() {
+    // One block stamped 3 ms late, one 30 ms early, three 8 ms late: a
+    // drift-free board's blocks all reach the pacer as the very blocks,
+    // nothing is made up, and the pacer has nothing to do; a board 100 ppm
+    // fast is corrected as ever, in sync, with nothing made up either.
+    for (blocks, by) in [
+        (3_000..3_001, 0.003),
+        (3_000..3_001, -0.03),
+        (3_000..3_003, 0.008),
+    ] {
+        for ppm in [0.0, 100.0] {
+            let mut board = Board::new(ppm);
+            board.stray = Some((blocks.clone(), by));
+            let run = play(&mut board, 120, 0);
+            let what = format!(
+                "{by} s at {blocks:?}, {ppm} ppm: {:?}, {:?}",
+                run.pacer, run.view
+            );
+            assert_eq!(
+                (run.view.drift_steps, run.view.drift_resets),
+                (0, 0),
+                "{what}"
+            );
+            assert_eq!((run.pacer.silence, run.pacer.dropped), (0, 0), "{what}");
+            assert!(-SYNC_MS <= run.low && run.high <= SYNC_MS, "{what}");
+            if ppm == 0.0 {
+                assert_eq!(run.resampled, 0, "{what}");
+            }
         }
     }
 }

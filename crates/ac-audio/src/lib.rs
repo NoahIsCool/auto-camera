@@ -64,14 +64,15 @@
 //! 100 ppm is a second. [`drift`] measures that drift from the blocks' PTS
 //! (master-clock times) against their sample counts, filtering the PTS's
 //! jitter and never taking a step in them for drift: a small one (audio
-//! lost) is timing error, a large one (a reconnection) a break.
+//! lost) is timing error, a large one (a reconnection) a break, and a
+//! timestamp that strays for a block or a few and comes back is neither.
 //! [`correct`] cancels the drift by resampling the input a few ppm with
 //! [`resample`]'s band-limited windowed-sinc resampler, whose ratio ramps
-//! and never jumps, makes up a small step at once with silence or a cut,
-//! and leaves the blocks bit for bit as they are while the drift is within
-//! a dead band, as it always is for a file played on the engine's clock.
-//! Like the meter, all of it is pure: samples, PTS and sample counts in,
-//! samples and estimates out.
+//! and never jumps, makes up a small step with silence or a cut once the
+//! blocks after it confirm it, and leaves the blocks bit for bit as they
+//! are while the drift is within a dead band, as it always is for a file
+//! played on the engine's clock. Like the meter, all of it is pure:
+//! samples, PTS and sample counts in, samples and estimates out.
 
 pub mod correct;
 pub mod drift;

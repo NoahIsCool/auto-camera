@@ -58,10 +58,14 @@
 //! measured against: a first block stamped 30 ms off would read as 30 ms
 //! of timing error for the whole epoch. Once the epoch has
 //! [`REFERENCE_AFTER`] of input (a second, a hundred 10 ms blocks) the
-//! fitted `û` is taken as the reference, and [`DriftEstimator::error`] is
-//! `û` less it from then on (zero until then). One block's error moves the
-//! fitted `û` at the far end of the fit by about twice its share, two
-//! percent of it at a hundred blocks.
+//! fitted `û`, less the steps told before then (below), is taken as the
+//! reference, and [`DriftEstimator::error`] is `û` less it from then on
+//! (zero until then). One block's error moves the fitted `û` at the far
+//! end of the fit by about twice its share, two percent of it at a hundred
+//! blocks. A second block already more than [`DriftSettings::step`] off
+//! the first (there is no scatter yet to go by) says the first block's
+//! PTS was off: the epoch starts again from the second block, with
+//! nothing made up and nothing counted.
 //!
 //! # Breaks and steps
 //!
@@ -76,18 +80,38 @@
 //!
 //! A smaller residual well clear of the PTS's jitter, beyond
 //! [`DriftSettings::step`] (2 ms) and [`STEP_SIGMAS`] times the blocks'
-//! scatter about their predictions, is a **step**
-//! ([`Observation::Step`]): audio lost in a stall or dropped by a full
-//! ring (the PTS step forward by its length), or PTS that went back. It is
-//! timing error, not drift. The fit is cut there into *segments* that share
-//! one slope and each have their own level: the segments before the step
-//! go on giving the slope, as sums centred on their own means, until they
-//! fade from its memory, and the level `û` is the newest segment's. So the
-//! whole step lands in `û` and none of it in `v̂`, which a straight line
-//! drawn through a step would read as hundreds of ppm. Steps are told only
-//! once the reference is taken, against a level a hundred blocks set; the
-//! first second's blocks all enter the fit. The corrector makes up a step
-//! at once ([`crate::correct`]).
+//! scatter about their predictions, may be a **step**: audio lost in a
+//! stall or dropped by a full ring (the PTS step forward by its length),
+//! or PTS that went back. It may also be a timestamp gone astray for a
+//! block or a few (a host-time glitch), which the blocks after it put
+//! right. So the block is first *held* ([`Observation::Held`]): kept out
+//! of the fit and of the scatter, the fit carried on along its line, and
+//! nothing is told yet. A block back within the threshold of the fit ends
+//! the hold: the held blocks strayed, nothing is made up, and the
+//! estimates are as if they had never come. Residuals that stay at one
+//! level (each within the threshold of the first of the run) for
+//! [`CONFIRM_BLOCKS`] blocks in a row, the first included, are a step
+//! ([`Observation::Step`]), told at the block that confirms it with that
+//! block's residual: a real loss is made up a few blocks late, at its full
+//! size, once. Residuals that move from level to level (the tail of an
+//! excursion whose PTS were held from going back) start the run again
+//! from each new level; held blocks that have neither settled nor come
+//! back after twice the discontinuity of input time are a break. Steps are
+//! told once an epoch has [`STEPS_AFTER`] of scored predictions (a tenth
+//! of a second, enough blocks for their scatter to be known); before then
+//! a block enters the fit as it is.
+//!
+//! A step is timing error, not drift. The fit is cut there into *segments*
+//! that share one slope and each have their own level: the segments
+//! before the step go on giving the slope, as sums centred on their own
+//! means, until they fade from its memory, and the level `û` is the newest
+//! segment's. So the whole step lands in `û` and none of it in `v̂`, which
+//! a straight line drawn through a step would read as hundreds of ppm. A
+//! step told before the reference is taken is left out of the reference,
+//! which is then the level the epoch had before it: the step shows in the
+//! timing error as one after the reference does, and the silence or cut
+//! that made it up is not taken back. The corrector makes up a step as
+//! soon as it is told ([`crate::correct`]).
 //!
 //! # Invariants
 //!
@@ -96,15 +120,28 @@
 //! * Every estimate is finite (the uncertainty is infinite until it can be
 //!   told, never NaN); a block with a PTS the fit cannot use (a residual
 //!   that is not finite) is a discontinuity, never a NaN.
-//! * A step moves the timing error by its size and the slope not at all.
+//! * A step moves the timing error by its size and the slope not at all;
+//!   held blocks that come back move neither.
 
 use std::time::Duration;
 
 use thiserror::Error;
 
+mod epoch;
+
+use epoch::{Epoch, Held, Verdict};
+
 /// Input time of an epoch after which its timing reference is taken from
-/// the fit and steps are told; see the module docs.
+/// the fit; see the module docs.
 pub const REFERENCE_AFTER: Duration = Duration::from_secs(1);
+
+/// Input time of an epoch's scored predictions after which steps are told:
+/// enough blocks for their scatter to be known; see the module docs.
+pub const STEPS_AFTER: Duration = Duration::from_millis(100);
+
+/// Blocks in a row at one level beyond the step threshold, the first
+/// included, that confirm a step; see the module docs.
+pub const CONFIRM_BLOCKS: u64 = 4;
 
 /// Multiples of the blocks' scatter about their predictions beyond which a
 /// residual is a step, not jitter; see the module docs.
@@ -130,11 +167,13 @@ pub enum DriftError {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DriftSettings {
     /// A block further than this from where the estimates put it starts a
-    /// new epoch.
+    /// new epoch, as do held blocks that neither settle nor come back
+    /// within twice this of input time.
     pub discontinuity: Duration,
     /// A block further than this (and than [`STEP_SIGMAS`] times the
     /// scatter) from where the estimates put it, but within
-    /// `discontinuity`, is a step.
+    /// `discontinuity`, is held, and a step once [`CONFIRM_BLOCKS`] in a
+    /// row agree.
     pub step: Duration,
     /// The timing filter's memory `τ`.
     pub smoothing: Duration,
@@ -206,165 +245,23 @@ impl DriftSettings {
 /// What a block was to the estimator.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Observation {
-    /// The first block: it starts the first epoch.
+    /// A block that starts an epoch without a break: the first block, or
+    /// the second of an epoch when it is more than a step off the first,
+    /// whose PTS was then off (see the module docs).
     Start,
     /// A block of the current epoch, which the estimates took in.
     Tracked,
-    /// A step: the block's timing error is this many seconds from where
-    /// the estimates put it, below zero when audio was lost (its PTS
-    /// stepped forward). The estimates took it in, its level and not its
-    /// slope; see the module docs.
+    /// A block further from where the estimates put it than a step, held
+    /// out of them until the blocks after it show whether the PTS stepped
+    /// or strayed; see the module docs.
+    Held,
+    /// A step, confirmed at this block: its timing error is this many
+    /// seconds from where the estimates put it before the step, below
+    /// zero when audio was lost (the PTS stepped forward). The estimates
+    /// took it in, its level and not its slope; see the module docs.
     Step(f64),
     /// A break: the block starts a new epoch (counted as a reset).
     Discontinuity,
-}
-
-/// One epoch's state: the running sums of its weighted fit, with input
-/// time `x` measured from the latest block's first frame. The sums `w` to
-/// `wwxx` are the current segment's (the blocks since the latest step);
-/// `cxx`, `cxu` and `cww` hold the earlier segments'.
-#[derive(Debug, Clone, Copy, Default)]
-struct Epoch {
-    /// PTS of its first block, from which `u` counts.
-    anchor: Duration,
-    /// Input frames from its first block to the next block's start.
-    frames: u64,
-    /// Frames of the latest block: the input time from its observation to
-    /// the next one.
-    latest: u64,
-    /// Blocks taken in.
-    blocks: u64,
-    /// `Σw`: the blocks' weights.
-    w: f64,
-    /// `Σw·x`.
-    wx: f64,
-    /// `Σw·x²`.
-    wxx: f64,
-    /// `Σw·u`.
-    wu: f64,
-    /// `Σw·x·u`.
-    wxu: f64,
-    /// `Σw²`, for the slope's standard error.
-    ww: f64,
-    /// `Σw²·x`.
-    wwx: f64,
-    /// `Σw²·x²`.
-    wwxx: f64,
-    /// `Σw·(x − x̄)²` of the earlier segments, each about its own mean.
-    cxx: f64,
-    /// `Σw·(x − x̄)·(u − ū)` of the earlier segments.
-    cxu: f64,
-    /// `Σw²·(x − x̄)²` of the earlier segments.
-    cww: f64,
-    /// `Σw·r²` over the residuals `r` of the blocks predicted by a fitted
-    /// line (from the third on, steps left out).
-    wrr: f64,
-    /// `Σw` over the same blocks.
-    wr: f64,
-    /// Fitted timing error `û` at the latest block, in seconds, from the
-    /// epoch's first block.
-    error: f64,
-    /// Fitted slope `v̂` of the timing error along input time.
-    slope: f64,
-    /// Standard error of `v̂`; infinite until it can be told.
-    spread: f64,
-    /// `error` when the epoch had [`REFERENCE_AFTER`] of input: what the
-    /// timing error is measured against.
-    reference: Option<f64>,
-}
-
-impl Epoch {
-    /// An epoch starting with a block at `pts` of `frames` frames.
-    fn new(pts: Duration, frames: u64, rate: f64) -> Self {
-        let mut epoch = Self {
-            anchor: pts,
-            spread: f64::INFINITY,
-            ..Self::default()
-        };
-        epoch.take(0.0, None, frames, rate);
-        epoch.frames = frames;
-        epoch.latest = frames;
-        epoch
-    }
-
-    /// The blocks' scatter about their predictions, in seconds: zero until
-    /// a prediction was scored.
-    fn scatter(&self) -> f64 {
-        if self.wr > 0.0 {
-            (self.wrr / self.wr).sqrt()
-        } else {
-            0.0
-        }
-    }
-
-    /// Ages the sums by `dx` seconds of input time (memory `smoothing`),
-    /// moving their origin to the new block's first frame.
-    fn age(&mut self, dx: f64, smoothing: f64) {
-        let fade = (-dx / smoothing).exp();
-        let fade2 = fade * fade;
-        // With x' = x − dx: Σw·x' = Σw·x − dx·Σw, and so on.
-        self.wxx = fade * (self.wxx - 2.0 * dx * self.wx + dx * dx * self.w);
-        self.wx = fade * (self.wx - dx * self.w);
-        self.wxu = fade * (self.wxu - dx * self.wu);
-        self.w *= fade;
-        self.wu *= fade;
-        self.wwxx = fade2 * (self.wwxx - 2.0 * dx * self.wwx + dx * dx * self.ww);
-        self.wwx = fade2 * (self.wwx - dx * self.ww);
-        self.ww *= fade2;
-        // Sums about a segment's own mean do not move with the origin.
-        self.cxx *= fade;
-        self.cxu *= fade;
-        self.cww *= fade2;
-        self.wrr *= fade;
-        self.wr *= fade;
-    }
-
-    /// Ends the current segment at a step: its sums, centred on its own
-    /// means, join the earlier segments', which go on giving the slope but
-    /// not the level, and the next block starts a new segment.
-    fn split(&mut self) {
-        if self.w > 0.0 {
-            let mean = self.wx / self.w;
-            self.cxx += self.wxx - mean * self.wx;
-            self.cxu += self.wxu - mean * self.wu;
-            self.cww += self.wwxx - 2.0 * mean * self.wwx + mean * mean * self.ww;
-        }
-        (self.w, self.wx, self.wxx, self.wu, self.wxu) = (0.0, 0.0, 0.0, 0.0, 0.0);
-        (self.ww, self.wwx, self.wwxx) = (0.0, 0.0, 0.0);
-    }
-
-    /// Takes in a block of `frames` frames at the origin whose timing error
-    /// measured `u`, with the residual `r` of a fitted line's prediction of
-    /// it when it is scored, and fits the line again.
-    fn take(&mut self, u: f64, r: Option<f64>, frames: u64, rate: f64) {
-        let weight = frames as f64 / rate;
-        self.w += weight;
-        self.wu += weight * u;
-        self.ww += weight * weight;
-        if let Some(r) = r {
-            self.wrr += weight * r * r;
-            self.wr += weight;
-        }
-        self.blocks += 1;
-        // Weighted least squares about the origin (the latest block), one
-        // slope through every segment and a level for the current one:
-        // `S` is Σw·(x − x̄)², each segment about its own mean.
-        let s = self.cxx + self.wxx - self.wx * self.wx / self.w;
-        if self.blocks >= 2 && s > 0.0 {
-            self.slope = (self.cxu + self.wxu - self.wx * self.wu / self.w) / s;
-        }
-        self.error = (self.wu - self.slope * self.wx) / self.w;
-        // Var(v̂) = σ²·Σw²·(x − x̄)² / S², σ² from the prediction residuals.
-        let mean = self.wx / self.w;
-        let spread = self.cww + self.wwxx - 2.0 * mean * self.wwx + mean * mean * self.ww;
-        let sigma2 = self.wrr / self.wr;
-        let se = (sigma2 * spread).sqrt() / s;
-        self.spread = if self.blocks >= 3 && se.is_finite() {
-            se
-        } else {
-            f64::INFINITY
-        };
-    }
 }
 
 /// `a − b` in seconds, below zero when `a` is earlier.
@@ -428,27 +325,59 @@ impl DriftEstimator {
             self.epoch = Some(Epoch::new(pts, frames, self.rate));
             return Observation::Discontinuity;
         }
-        let step = epoch.reference.is_some()
-            && residual.abs() > self.step.max(STEP_SIGMAS * epoch.scatter());
-        epoch.age(dx, self.smoothing);
-        if step {
-            epoch.split();
-            self.steps += 1;
+        let threshold = self.step.max(STEP_SIGMAS * epoch.scatter());
+        if epoch.blocks == 1 && residual.abs() > threshold {
+            // The first block's PTS was off: start again from this one.
+            self.epoch = Some(Epoch::new(pts, frames, self.rate));
+            return Observation::Start;
         }
-        let scored = epoch.blocks >= 2 && !step;
-        epoch.take(measured, scored.then_some(residual), frames, self.rate);
+        let telling = epoch.wr >= STEPS_AFTER.as_secs_f64();
+        let limit = 2.0 * self.discontinuity;
+        let verdict = match epoch.held.as_mut() {
+            Some(held) => held.weigh(residual, dx, threshold, limit),
+            None if telling && residual.abs() > threshold => {
+                epoch.held = Some(Held::new(residual));
+                Verdict::Held
+            }
+            // Within the threshold, or before steps are told.
+            None => Verdict::Back,
+        };
+        epoch.age(dx, self.smoothing);
+        let seen = match verdict {
+            Verdict::Held => {
+                epoch.pass(dx);
+                Observation::Held
+            }
+            Verdict::Back => {
+                epoch.held = None;
+                let scored = epoch.blocks >= 2;
+                epoch.take(measured, scored.then_some(residual), frames, self.rate);
+                Observation::Tracked
+            }
+            Verdict::Step => {
+                epoch.held = None;
+                epoch.split();
+                epoch.take(measured, None, frames, self.rate);
+                if epoch.reference.is_none() {
+                    epoch.stepped += residual;
+                }
+                self.steps += 1;
+                Observation::Step(residual)
+            }
+            Verdict::Lost => {
+                self.resets += 1;
+                self.epoch = Some(Epoch::new(pts, frames, self.rate));
+                return Observation::Discontinuity;
+            }
+        };
         epoch.frames += frames;
         epoch.latest = frames;
         if epoch.reference.is_none()
             && epoch.frames as f64 / self.rate >= REFERENCE_AFTER.as_secs_f64()
         {
-            epoch.reference = Some(epoch.error);
+            epoch.reference = Some(epoch.error - epoch.stepped);
         }
-        if step {
-            Observation::Step(residual)
-        } else {
-            Observation::Tracked
-        }
+        seen
     }
 
     /// Forgets the epoch, as at a break; the next block starts a new one.

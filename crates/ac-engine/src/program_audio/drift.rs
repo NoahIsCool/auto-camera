@@ -29,14 +29,17 @@
 //! was lost. The pacer's slack runs out before the audio after such a gap
 //! comes, so the pacer fills it with silence; the corrector starts
 //! measuring again from zero and counts the reset. A smaller step (audio
-//! a full ring dropped, a short loss) is made up by the corrector as soon
-//! as its block comes: that much silence ahead of the block, or for a step
-//! back that much cut, and counted ([`InputDrift::steps`]). A loss close
-//! to the slack can run the pacer out of slack too; then the pacer's
-//! silence comes first, and the corrector's comes after it as late audio,
-//! which the pacer cuts against the silence it owes, so the gap is made up
-//! once either way. A stall whose audio arrives late keeps its PTS and is
-//! not a step.
+//! a full ring dropped, a short loss) is made up by the corrector once the
+//! few blocks after it confirm it, in the first second of a connection as
+//! later: that much silence ahead of the block that confirms it, or for a
+//! step back that much cut, and counted ([`InputDrift::steps`]). A
+//! timestamp that strays for a block or a few and comes back (a host-time
+//! glitch) is not a step: those blocks pass as they are and nothing is
+//! made up. A loss close to the slack can run the pacer out of slack too;
+//! then the pacer's silence comes first, and the corrector's comes after
+//! it as late audio, which the pacer cuts against the silence it owes, so
+//! the gap is made up once either way. A stall whose audio arrives late
+//! keeps its PTS and is not a step.
 //!
 //! A change of format (a reconnection at another rate) starts a new
 //! corrector, counted as a reset too; the few frames the old one held back

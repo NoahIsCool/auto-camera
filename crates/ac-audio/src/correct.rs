@@ -20,14 +20,15 @@
 //! ([`Resampler::stretch`]), and `s` the frames of silence put in for
 //! steps less the frames cut for them (see below), so `E` is the timing
 //! error of what comes *out*, against the epoch's timing reference (its
-//! first second, [`crate::drift`]). The first term cancels the drift
-//! (`1 − v̂` is the ratio that does); the second takes up the timing error
-//! that is left, over `τₛ` = [`DriftSettings::settle`] (60 s): with the
-//! drift cancelled, `dE/dx = −E/τₛ`. Over a show the output therefore
-//! keeps the timing it had a second into the epoch, and the pacer's lead
-//! stays within block jitter. Between blocks the ratio ramps, so it never
-//! jumps; at a 100 ppm drift it settles within a minute, the timing error
-//! peaking at a couple of milliseconds on the way.
+//! first second, less any step in it, [`crate::drift`]). The first term
+//! cancels the drift (`1 − v̂` is the ratio that does); the second takes up
+//! the timing error that is left, over `τₛ` = [`DriftSettings::settle`]
+//! (60 s): with the drift cancelled, `dE/dx = −E/τₛ`. Over a show the
+//! output therefore keeps the timing it had a second into the epoch, and
+//! the pacer's lead stays within block jitter. Between blocks the ratio
+//! ramps, so it never jumps; at a 100 ppm drift it settles within a
+//! minute, the timing error peaking at a couple of milliseconds on the
+//! way.
 //!
 //! # Dead band
 //!
@@ -52,17 +53,25 @@
 //! # Steps
 //!
 //! A step in the PTS within the discontinuity ([`Observation::Step`]) is
-//! made up at once, not taken up slowly: for audio lost (a step forward
-//! by `g`) the corrector puts `g` of silence ahead of the block, through
-//! the resampler while it is on, and for a step back it cuts as much from
-//! the start of the blocks that follow. Both count in `s`, so the step
-//! leaves `E` where it was and moves nothing else; the estimator keeps it
-//! out of the drift. Making up lost audio here, as soon as the PTS show
-//! it, is what keeps it from being made up twice. The program pacer fills
-//! a gap only when its slack runs out before the audio after it comes,
-//! which a loss close to the slack can do as well; its silence then comes
-//! first, and the corrector's arrives after it like the late backlog of a
-//! stall, which the pacer cuts against the silence it owes.
+//! made up as soon as the estimator has confirmed it, not taken up slowly:
+//! for audio lost (a step forward by `g`) the corrector puts `g` of silence
+//! ahead of the block that confirmed it, through the resampler while it is
+//! on, and for a step back it cuts as much from the start of the blocks
+//! from that one on. Both count in `s`, so the step leaves `E` where it was
+//! and moves nothing else; the estimator keeps it out of the drift. No
+//! block is held back while the estimator waits for the blocks that confirm
+//! a step ([`Observation::Held`]): they pass as they would have, a few
+//! blocks of audio `g` early (or late), and a timestamp that strayed and
+//! came back is never made up at all: a glitch in the PTS is not edited
+//! into the audio. A step in an epoch's first second is made up too, and
+//! the timing reference is net of it, so `E` counts from the level before
+//! the step and the silence is not taken back over the settle. Making up
+//! lost audio here, once the PTS show it, is what keeps it from being made
+//! up twice. The program pacer fills a gap only when its slack runs out
+//! before the audio after it comes, which a loss close to the slack can do
+//! as well; its silence then comes first, and the corrector's arrives after
+//! it like the late backlog of a stall, which the pacer cuts against the
+//! silence it owes. Every step made up is counted ([`DriftStats::steps`]).
 //!
 //! # Breaks
 //!
@@ -80,7 +89,9 @@
 //! * [`Corrected::Unchanged`] is returned only for a block the corrector did
 //!   not change in any way; a block that is empty or not whole frames is
 //!   left unchanged and not measured.
-//! * A step moves the output by the step and leaves `E` where it was.
+//! * A step moves the output by the step and leaves `E` where it was; a
+//!   block the estimator holds is passed on like any other, never held
+//!   back.
 //! * The correction is finite, within its limit, and moves by at most its
 //!   slew.
 
@@ -225,7 +236,7 @@ impl DriftCorrector {
                     self.shifted -= n as i64;
                 }
             }
-            Observation::Start | Observation::Tracked => {}
+            Observation::Start | Observation::Tracked | Observation::Held => {}
         }
         let released = out.len() / ch;
         let skip = frames.min(usize::try_from(self.cut).unwrap_or(usize::MAX));
