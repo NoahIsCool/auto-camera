@@ -37,7 +37,9 @@
 //!   fallback, which the dwell does not bind.
 //! * `switching.long_wides`: stints of a wide that lasted longer than
 //!   `max_wide_s`, open ones included: a wide held past the limit until
-//!   the trace ended was still held past it.
+//!   the trace ended was still held past it. A wide the trace starts on is
+//!   timed from the end of the start-up wait (below), when it first shows
+//!   a picture.
 //! * `switching.takes_onto_unavailable`: takes whose incoming shot is
 //!   unavailable or lost on the take's tick.
 //!
@@ -61,7 +63,21 @@
 //! it lasts until the first tick with an available program shot (or to
 //! the last tick, unresolved).
 //!
-//! * `switching.time_unavailable_on_program`: the losses' total duration.
+//! A studio may start with a shot on program before its source has
+//! delivered (`ac_engine`'s `switcher.start_on_wide` puts the first
+//! source's wide there when the engine starts): program shows black until
+//! the first frame comes, which takes as long as the source takes to start
+//! (a file segment decodes up to 15 s of footage before its first frame).
+//! Nothing was lost then, and the same studio without that setting has no
+//! shot on program meanwhile, which is no loss either. So the *start-up
+//! wait* ([`start_up`]), the first ticks of the trace while program still
+//! holds the shot it started on and that shot's source has no frame yet,
+//! is not a loss; it is reported beside the losses (`start_up_s`). A shot
+//! taken onto program while its source has no frame is a take onto an
+//! unavailable shot, and its time on air a loss, as usual.
+//!
+//! * `switching.time_unavailable_on_program`: the losses' total duration;
+//!   its `start_up_s` detail is the start-up wait's, which is not in it.
 //! * `switching.time_to_fall_back`: the longest loss, whatever ended it (a
 //!   fallback take, or the subject found again): the time viewers watched
 //!   a shot that had lost its subject. 0 when program never lost one.
@@ -79,7 +95,8 @@
 //!
 //! * Takes are in record order, none on the first record. Stints are in
 //!   order and never overlap, and every tick with a head is in exactly
-//!   one; a loss likewise covers each tick at most once.
+//!   one; a loss likewise covers each tick at most once, and none of the
+//!   start-up wait.
 //! * Every metric here is a count or a duration, always measured: 0 over
 //!   no events, never not measurable.
 
@@ -266,6 +283,53 @@ pub fn availability(record: &TraceRecord, stale: &BTreeSet<SourceId>, id: &ShotI
     }
 }
 
+/// How many records the start-up wait of `trace` lasts: from the first
+/// record, while program holds the shot it held there and that shot's
+/// source has no frame; 0 when the trace starts with no shot on program or
+/// with one whose source has delivered. See the module docs.
+pub fn start_up(trace: &[TraceRecord]) -> usize {
+    let Some(first) = trace.first() else {
+        return 0;
+    };
+    let Some(program) = first.switcher.program.as_ref() else {
+        return 0;
+    };
+    let Some(source) = shot(first, program).map(|s| &s.source) else {
+        return 0;
+    };
+    trace
+        .iter()
+        .take_while(|r| {
+            r.switcher.program.as_ref() == Some(program)
+                && r.sources
+                    .iter()
+                    .find(|s| &s.id == source)
+                    .is_none_or(|s| s.frame.is_none())
+        })
+        .count()
+}
+
+/// The seconds from `trace`'s record `first` to the record after `last`
+/// (to `last` itself when it is the trace's last record).
+fn span(trace: &[TraceRecord], first: usize, last: usize) -> f64 {
+    let end = trace.get(last + 1).unwrap_or(&trace[last]);
+    seconds_between(trace[first].pts, end.pts)
+}
+
+/// How long `stint` of `trace` showed its shot's picture: all of it, but
+/// for a stint of the shot program starts on, from the first record, which
+/// shows it only once the start-up wait of `wait` records is over.
+fn pictured(trace: &[TraceRecord], stint: &Stint, wait: usize) -> f64 {
+    let started_on = stint.first == 0 && trace[0].switcher.program.as_ref() == Some(&stint.shot);
+    if !started_on || wait == 0 {
+        stint.seconds
+    } else if wait > stint.last {
+        0.0
+    } else {
+        span(trace, wait, stint.last)
+    }
+}
+
 /// Whether a take from `from` to `to` is a jump cut at `max_iou`: one
 /// source, crops overlapping with IoU above it.
 pub fn is_jump_cut(from: &ShotTrace, to: &ShotTrace, max_iou: f64) -> bool {
@@ -273,7 +337,8 @@ pub fn is_jump_cut(from: &ShotTrace, to: &ShotTrace, max_iou: f64) -> bool {
 }
 
 /// The losses on program in `trace`, where `stale[i]` holds the sources
-/// stale on record `i` ([`stale_sources`]): (seconds, resolved) each.
+/// stale on record `i` ([`stale_sources`]): (seconds, resolved) each. The
+/// start-up wait ([`start_up`]) is none.
 pub fn losses(trace: &[TraceRecord], stale: &[BTreeSet<SourceId>]) -> Vec<(f64, bool)> {
     let lost = |i: usize| {
         let r = &trace[i];
@@ -283,7 +348,7 @@ pub fn losses(trace: &[TraceRecord], stale: &[BTreeSet<SourceId>]) -> Vec<(f64, 
             .is_some_and(|p| availability(r, &stale[i], p) != Availability::Available)
     };
     let mut found = Vec::new();
-    let mut i = 0;
+    let mut i = start_up(trace);
     while i < trace.len() {
         if !lost(i) {
             i += 1;
@@ -379,13 +444,14 @@ pub(crate) fn score(join: &Join, limits: &SwitchingLimits, out: &mut Vec<Metric>
         .detail("min_dwell_s", min_dwell),
     );
 
+    let wait = start_up(trace);
     let wides: Vec<&Stint> = all_stints
         .iter()
         .filter(|s| shot(&trace[s.first], &s.shot).is_some_and(|t| t.subject.is_none()))
         .collect();
     let long = wides
         .iter()
-        .filter(|s| s.seconds > limits.max_wide_s + TOLERANCE)
+        .filter(|s| pictured(trace, s, wait) > limits.max_wide_s + TOLERANCE)
         .count() as u64;
     out.push(
         Metric::count(
@@ -424,13 +490,21 @@ pub(crate) fn score(join: &Join, limits: &SwitchingLimits, out: &mut Vec<Metric>
     let total = all_losses.iter().fold(0.0, |a, (s, _)| a + s);
     let longest = all_losses.iter().map(|(s, _)| *s).fold(0.0, f64::max);
     let n_losses = all_losses.len() as u64;
-    out.push(Metric::new(
-        "switching.time_unavailable_on_program",
-        "s",
-        Measure::Value(total),
-        n_losses,
-        Limit::max(limits.max_time_unavailable_s),
-    ));
+    let start_up_s = if wait == 0 {
+        0.0
+    } else {
+        span(trace, 0, wait - 1)
+    };
+    out.push(
+        Metric::new(
+            "switching.time_unavailable_on_program",
+            "s",
+            Measure::Value(total),
+            n_losses,
+            Limit::max(limits.max_time_unavailable_s),
+        )
+        .detail("start_up_s", start_up_s),
+    );
     out.push(
         Metric::new(
             "switching.time_to_fall_back",

@@ -1,7 +1,7 @@
 //! Switching on hand-built timelines: takes through cuts and completed or
 //! abandoned transitions, stints, jump cuts at the threshold, dwell by
 //! content, long wides, availability (stale sources included), losses on
-//! program and on-air swaps.
+//! program, the start-up wait and on-air swaps.
 
 use std::collections::BTreeSet;
 
@@ -483,6 +483,84 @@ fn losses_on_program_last_until_an_available_shot_is_on_air() {
             .value(),
         Some(1.0)
     );
+}
+
+#[test]
+fn a_shot_on_program_before_its_source_delivers_waits_and_loses_nothing() {
+    // As with `start_on_wide`: `cam`'s wide is on program from the first
+    // record, but `cam` delivers its first frame only at 45 (4.5 s), and
+    // the wide stays on to 119. `side` delivers from 80; a cut to its wide
+    // at 70, before then, and back to `cam`'s wide at 90.
+    let mut trace: Vec<TraceRecord> = timeline(120, |_| "cam/wide")
+        .into_iter()
+        .map(with_side)
+        .collect();
+    for (f, r) in trace.iter_mut().enumerate() {
+        if f < 45 {
+            r.sources[0].frame = None;
+        }
+        if f < 80 {
+            r.sources[1].frame = None;
+        }
+        if (70..90).contains(&f) {
+            r.switcher.program = Some(ShotId("side/wide".into()));
+        }
+    }
+    assert_eq!(start_up(&trace), 45);
+    // The take onto `side` before it delivered is a loss of 1 s (70 to
+    // 80), and a take onto an unavailable shot; the start-up wait is
+    // neither.
+    let stale = stale_sources(&trace, 1.0);
+    let found = losses(&trace, &stale);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!((found[0].0 - 1.0).abs() < 1e-9 && found[0].1, "{found:?}");
+    let r = switching(&trace, Content::Talk);
+    let fall_back = r.metric("switching.time_to_fall_back", None).unwrap();
+    assert!((fall_back.value().unwrap() - 1.0).abs() < 1e-9);
+    assert_eq!(fall_back.verdict, Verdict::Pass);
+    let total = r
+        .metric("switching.time_unavailable_on_program", None)
+        .unwrap();
+    assert!((total.value().unwrap() - 1.0).abs() < 1e-9);
+    assert!((total.details["start_up_s"] - 4.5).abs() < 1e-9);
+    assert_eq!(value(&r, "switching.takes_onto_unavailable"), Some(1.0));
+    // The first wide stint, 0-69 (7 s), showed a picture for 2.5 s; the
+    // wide from 90 for 2.9 s, to the end. Neither is long.
+    assert_eq!(value(&r, "switching.long_wides"), Some(0.0));
+
+    // A start-up wait longer than the wide limit is no long wide either,
+    // and a source that never delivers keeps the trace waiting throughout.
+    let mut slow = timeline(150, |_| "cam/wide");
+    for r in &mut slow[..120] {
+        r.sources[0].frame = None;
+    }
+    let r = switching(&slow, Content::Talk);
+    assert_eq!(value(&r, "switching.time_to_fall_back"), Some(0.0));
+    assert_eq!(value(&r, "switching.long_wides"), Some(0.0));
+    let mut never = timeline(30, |_| "cam/wide");
+    for r in &mut never {
+        r.sources[0].frame = None;
+    }
+    assert_eq!(start_up(&never), 30);
+    assert!(losses(&never, &stale_sources(&never, 1.0)).is_empty());
+    // Held past the limit after the wait, the wide is long: 11.9 s, from
+    // 3 s to the trace's end at 14.9 s.
+    let mut long = timeline(150, |_| "cam/wide");
+    for r in &mut long[..30] {
+        r.sources[0].frame = None;
+    }
+    let r = switching(&long, Content::Talk);
+    assert_eq!(value(&r, "switching.long_wides"), Some(1.0));
+    // A trace that starts with nothing on program, or on a source that
+    // delivers, waits for nothing.
+    assert_eq!(start_up(&timeline(10, |_| "cam/wide")), 0);
+    let mut empty = timeline(10, |_| "cam/wide");
+    for r in &mut empty {
+        r.switcher.program = None;
+        r.sources[0].frame = None;
+    }
+    assert_eq!(start_up(&empty), 0);
+    assert_eq!(start_up(&[]), 0);
 }
 
 #[test]

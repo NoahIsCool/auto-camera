@@ -43,6 +43,11 @@
 //!   a writer, such as the app's `--record-detections` file, so that a run's
 //!   detections can be replayed without its model
 //!   (`ac_vision::ReplayDetector`).
+//! * [`alarms`] reads the snapshots a reader takes into a persistent list
+//!   of what is wrong on air (spec M14): program black, frozen or on a
+//!   lost subject, encoder drops, a failed output, a stream reconnecting,
+//!   stalled or down, a recording without audio. It is pure: each reader
+//!   keeps its own, and acknowledges alarms there.
 //! * [`queries`] reads each query's prompt once, when it is created: the
 //!   detector is asked for the parsed phrase ("speaker upper body" asks for
 //!   "a person speaking"), and the prompt's shot words pick its framings
@@ -59,6 +64,7 @@
 //! every detection arrive too old to apply; the [`EngineCore`] itself
 //! takes `now` as an argument and is tested on simulated time directly.
 
+pub mod alarms;
 pub mod audio;
 pub mod catalog;
 pub mod command;
@@ -78,6 +84,7 @@ pub mod snapshot;
 pub mod trace;
 pub mod vision;
 
+pub use alarms::{Alarm, AlarmCause, AlarmChange, Alarms};
 pub use catalog::{ShotStatus, subject_shot_id, wide_shot_id};
 pub use command::{CommandError, CommandReply, EngineCommand};
 pub use config::{
