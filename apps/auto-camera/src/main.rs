@@ -17,12 +17,23 @@
 //! window does ([`signals`]), so the detector sidecar never outlives the
 //! app; a second signal exits at once.
 //!
+//! In either mode `--trace PATH` writes the engine's per-tick trace as JSON
+//! Lines ([`trace`]): the file is created before the engine starts, the
+//! engine is given its channel, and the app waits for the last line once
+//! the engine has stopped. A run whose engine does not start (a setup no
+//! retry mends, such as a detector sidecar whose program is missing)
+//! removes the empty file, so that the same command works once the cause
+//! is fixed. A source that cannot be opened does not stop the engine (it
+//! starts offline and is retried), so a run with a missing source file
+//! ticks and, like every run that ticked, keeps its trace.
+//!
 //! On macOS the system is kept awake while output runs in the window, and
 //! for the whole of a headless run ([`awake`]); elsewhere a note on stderr
 //! says it is not.
 //!
-//! Exit status: 0 on success, 1 when the engine or the output failed, 2 for
-//! usage and configuration errors, 130 after a termination signal.
+//! Exit status: 0 on success, 1 when the engine, the output or the trace
+//! failed, 2 for usage and configuration errors, 130 after a termination
+//! signal.
 
 mod awake;
 mod cli;
@@ -30,11 +41,13 @@ mod headless;
 mod signals;
 #[cfg(test)]
 mod testing;
+mod trace;
 mod ui;
 
+use std::path::Path;
 use std::process::ExitCode;
 
-use ac_engine::StudioConfig;
+use ac_engine::{EngineOptions, StudioConfig};
 use clap::Parser;
 
 use cli::Cli;
@@ -62,6 +75,7 @@ fn main() -> ExitCode {
         let options = headless::HeadlessOptions {
             seconds: cli.seconds,
             record: cli.record,
+            trace: cli.trace,
         };
         let summary = headless::run(config, &cli.config, &options, &quit);
         match serde_json::to_string_pretty(&summary) {
@@ -76,13 +90,38 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     } else {
-        match ui::run(config, quit.clone()) {
-            Ok(()) if quit.requested() => ExitCode::from(signals::INTERRUPTED),
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("auto-camera: {e}");
-                ExitCode::FAILURE
-            }
+        run_window(config, cli.trace.as_deref(), &quit)
+    }
+}
+
+/// Runs the operator window until it is closed, writing the per-tick trace
+/// to `trace` if given; see the module docs for the exit status.
+fn run_window(config: StudioConfig, trace: Option<&Path>, quit: &QuitSignal) -> ExitCode {
+    let (trace, options) = match trace::attach(trace, EngineOptions::default()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("auto-camera: {e}");
+            return ExitCode::FAILURE;
         }
+    };
+    let result = ui::run(config, options, quit.clone());
+    // The window's engine has stopped, and its trace sender with it. A
+    // window that failed, most often because its engine did not start,
+    // leaves no empty trace behind.
+    let report = trace.map(|t| match result {
+        Ok(()) => t.finish(),
+        Err(_) => t.discard_if_empty(),
+    });
+    let trace_error = report.and_then(|r| r.error);
+    if let Err(e) = &result {
+        eprintln!("auto-camera: {e}");
+    }
+    if let Some(e) = &trace_error {
+        eprintln!("auto-camera: {e}");
+    }
+    match result {
+        Ok(()) if quit.requested() => ExitCode::from(signals::INTERRUPTED),
+        Ok(()) if trace_error.is_none() => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
     }
 }

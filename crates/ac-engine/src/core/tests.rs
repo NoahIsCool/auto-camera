@@ -24,6 +24,7 @@ mod framing;
 mod protection;
 mod shared;
 mod switching;
+mod trace;
 mod vision;
 
 /// Source and output width.
@@ -147,6 +148,8 @@ impl Rig {
             state: SourceState::Running,
             frame: Some(frame),
             detector_loading: self.loading,
+            error: None,
+            info: None,
         };
         let results = std::mem::take(&mut self.pending);
         let out = self.core.tick(now, &[feed], results);
