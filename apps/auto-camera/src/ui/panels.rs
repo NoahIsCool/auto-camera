@@ -313,8 +313,13 @@ pub fn output(
             a.pushed, a.silence, a.dropped
         ));
     }
-    if let Some(line) = drift_line(snap) {
-        ui.label(line);
+    if let Some((line, tone)) = drift_line(snap) {
+        let text = RichText::new(line);
+        ui.label(match tone {
+            Tone::Plain => text,
+            Tone::Warning => text.color(AMBER),
+            Tone::Weak => text.weak(),
+        });
     }
     if let Some(reading) = &out.loudness {
         super::meter::show(ui, reading);

@@ -551,14 +551,33 @@ pub fn destinations(output: &OutputView) -> String {
     }
 }
 
-/// The drift correction of program audio from an audio input, for the
-/// output panel: "Soundboard drift correction -37.3 ppm · 1 reset · 2 steps
-/// made up" (below zero for a board whose clock runs fast; 0.0 while its
-/// blocks pass as they are; steps are the silence put in, or audio cut, for
-/// a step in its timestamps). `None` while program audio is not an audio
-/// input's.
-pub fn drift_line(snap: &EngineSnapshot) -> Option<String> {
+/// The program audio input's line for the output panel, and its tone. While
+/// it runs, the drift correction of its blocks, plain: "Soundboard drift
+/// correction -37.3 ppm · 1 reset · 2 steps made up" (below zero for a
+/// board whose clock runs fast; 0.0 while its blocks pass as they are;
+/// steps are the silence put in, or audio cut, for a step in its
+/// timestamps). While it does not run, or has an error, its state and
+/// error instead, as no correction is being applied: "Soundboard offline:
+/// <why>" in amber, weak while it starts. `None` while program audio is not
+/// an audio input's.
+pub fn drift_line(snap: &EngineSnapshot) -> Option<(String, Tone)> {
     let input = snap.audio_inputs.iter().find(|a| a.program)?;
+    let state = match input.state {
+        SourceState::Running => "",
+        SourceState::Starting => " starting",
+        SourceState::Offline => " offline",
+        SourceState::Reconnecting => " reconnecting",
+        SourceState::Stopped => " stopped",
+    };
+    if !state.is_empty() || input.error.is_some() {
+        let why = input.error.as_ref().map(|e| format!(": {e}"));
+        let tone = match (input.state, &why) {
+            (SourceState::Starting, None) => Tone::Weak,
+            _ => Tone::Warning,
+        };
+        let line = format!("{}{state}{}", input.name, why.unwrap_or_default());
+        return Some((line, tone));
+    }
     let mut line = format!(
         "{} drift correction {:.1} ppm",
         input.name, input.correction_ppm
@@ -573,7 +592,7 @@ pub fn drift_line(snap: &EngineSnapshot) -> Option<String> {
             n => line.push_str(&format!(" · {n} {many}")),
         }
     }
-    Some(line)
+    Some((line, Tone::Plain))
 }
 
 #[cfg(test)]
