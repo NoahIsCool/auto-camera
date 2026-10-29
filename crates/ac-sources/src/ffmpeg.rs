@@ -13,6 +13,11 @@
 //! frames of variable-rate input), which is what lets PTS be derived from the
 //! frame number.
 //!
+//! A file's [`Segment`](crate::segment::Segment), worked out on the file as
+//! a `Cut`, adds its options just before the `-i` and its filter first in
+//! the chain, so frames outside the segment are dropped before they are
+//! scaled.
+//!
 //! Colour: YUV-to-RGB conversion needs the right matrix. Tagged files use their
 //! tag; untagged files follow the broadcast convention of BT.709 for HD and
 //! larger (at least 1280 wide or 720 high) and BT.601 below that, instead of
@@ -26,6 +31,7 @@ use ac_media::MediaError;
 
 use crate::frame_rate::FrameRate;
 use crate::probe::{AudioStreamInfo, FfmpegTools, VideoStreamInfo, file_url};
+use crate::segment::Cut;
 
 /// Checks a file's `max_width` on its own, before any file is probed: below
 /// 2 it is invalid (no even width fits), whatever the picture.
@@ -82,21 +88,27 @@ pub(crate) fn color_matrix(video: &VideoStreamInfo) -> &'static str {
 /// Options shared by both decoders: quiet, never reading the terminal.
 const COMMON: [&str; 4] = ["-nostdin", "-hide_banner", "-loglevel", "error"];
 
-/// Arguments that decode `video` from `path` to raw RGBA frames of `size` at
-/// `rate` on stdout.
+/// Arguments that decode `video` from `path`, cut to `cut`, to raw RGBA
+/// frames of `size` at `rate` on stdout.
 pub(crate) fn video_args(
     path: &Path,
     video: &VideoStreamInfo,
     size: (u32, u32),
     rate: FrameRate,
+    cut: &Cut,
 ) -> Vec<OsString> {
-    let filters = format!(
+    let scale = format!(
         "scale=w={}:h={}:in_color_matrix={},format=rgba",
         size.0,
         size.1,
         color_matrix(video)
     );
+    let filters = match cut.video_filter() {
+        Some(trim) => format!("{trim},{scale}"),
+        None => scale,
+    };
     let mut args: Vec<OsString> = COMMON.iter().map(OsString::from).collect();
+    args.extend(cut.input_args());
     args.push("-i".into());
     args.push(file_url(path));
     for a in [
@@ -117,16 +129,20 @@ pub(crate) fn video_args(
     args
 }
 
-/// Arguments that decode `audio` from `path` to interleaved little-endian
-/// `f32` samples at the stream's own rate and channel count on stdout.
-pub(crate) fn audio_args(path: &Path, audio: &AudioStreamInfo) -> Vec<OsString> {
+/// Arguments that decode `audio` from `path`, cut to `cut`, to interleaved
+/// little-endian `f32` samples at the stream's own rate and channel count on
+/// stdout.
+pub(crate) fn audio_args(path: &Path, audio: &AudioStreamInfo, cut: &Cut) -> Vec<OsString> {
     let mut args: Vec<OsString> = COMMON.iter().map(OsString::from).collect();
+    args.extend(cut.input_args());
     args.push("-i".into());
     args.push(file_url(path));
+    args.extend(["-map".into(), format!("0:{}", audio.index).into()]);
+    if let Some(trim) = cut.audio_filter() {
+        args.extend(["-af".into(), trim.into()]);
+    }
     for a in [
-        "-map".to_string(),
-        format!("0:{}", audio.index),
-        "-f".into(),
+        "-f".to_string(),
         "f32le".into(),
         "-acodec".into(),
         "pcm_f32le".into(),
@@ -161,6 +177,7 @@ mod tests {
             frame_rate: FrameRate::new(30000, 1001).unwrap(),
             rotation: 0,
             color_space: color_space.map(str::to_string),
+            start_time: None,
         }
     }
 
@@ -212,6 +229,7 @@ mod tests {
             &video(1920, 1080, None),
             (1280, 720),
             FrameRate::new(30000, 1001).unwrap(),
+            &Cut::Whole,
         );
         let joined: Vec<String> = args.iter().map(|a| a.to_string_lossy().into()).collect();
         let at = |flag: &str| &joined[joined.iter().position(|a| a == flag).unwrap() + 1];
@@ -234,14 +252,58 @@ mod tests {
             sample_rate: 44_100,
             channels: 6,
         };
-        let joined: Vec<String> = audio_args(Path::new("/a.mkv"), &a)
-            .iter()
-            .map(|a| a.to_string_lossy().into())
-            .collect();
+        let joined = strings(&audio_args(Path::new("/a.mkv"), &a, &Cut::Whole));
         let at = |flag: &str| &joined[joined.iter().position(|a| a == flag).unwrap() + 1];
         assert_eq!(at("-map"), "0:1");
         assert_eq!(at("-f"), "f32le");
         assert_eq!(at("-ar"), "44100");
         assert_eq!(at("-ac"), "6");
+        assert!(!joined.contains(&"-af".to_string()));
+    }
+
+    /// `args` as strings.
+    fn strings(args: &[OsString]) -> Vec<String> {
+        args.iter().map(|a| a.to_string_lossy().into()).collect()
+    }
+
+    #[test]
+    fn a_cut_seeks_both_decoders_alike_and_trims_before_scaling() {
+        let cut = Cut::Inside {
+            seek: Some(std::time::Duration::from_millis(85_100)),
+            first: 101_500_000_000,
+            end: Some(103_500_000_000),
+            half_frame: 50_000_000,
+        };
+        let rate = FrameRate::new(10, 1).unwrap();
+        let video = strings(&video_args(
+            Path::new("/a.ts"),
+            &video(64, 36, None),
+            (64, 36),
+            rate,
+            &cut,
+        ));
+        let a = AudioStreamInfo {
+            index: 1,
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let audio = strings(&audio_args(Path::new("/a.ts"), &a, &cut));
+        for args in [&video, &audio] {
+            let i = args.iter().position(|a| a == "-i").unwrap();
+            assert_eq!(&args[i - 3..=i], ["-copyts", "-ss", "85.100000000", "-i"]);
+        }
+        let after = |args: &[String], flag: &str| {
+            args[args.iter().position(|a| a == flag).unwrap() + 1].clone()
+        };
+        assert_eq!(
+            after(&video, "-vf"),
+            "trim=start=101.450000000:end=103.450000000,\
+             scale=w=64:h=36:in_color_matrix=bt601,format=rgba"
+        );
+        assert_eq!(
+            after(&audio, "-af"),
+            "atrim=start=101.500000000:end=103.500000000"
+        );
+        assert!(!video.contains(&"-t".to_string()));
     }
 }

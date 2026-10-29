@@ -15,21 +15,26 @@
 //! recording is not held, and a `caffeinate` that could not start is tried
 //! once more when the recording starts.
 //!
-//! The libraries print nothing, so the notes are worded and logged here, on
-//! stderr. Where `caffeinate` does not exist (every platform but macOS) the
-//! step is skipped with a note, and a `caffeinate` that cannot start or
-//! ends early is noted too: by a headless run at its start (an early end
-//! at its end), and by the window from the engine's view, each time an
-//! output session turns out not to be held ([`SessionNotes`]).
+//! The libraries print nothing, so the notes are worded and logged here:
+//! on stderr, and as warnings in the app's log ([`crate::logs`]), so that a
+//! show the system was not held awake for is on record afterwards, also
+//! when the window was started without a terminal. Where `caffeinate` does
+//! not exist (every platform but macOS) the step is skipped with a note,
+//! and a `caffeinate` that cannot start or ends early is noted too: by a
+//! headless run at its start (an early end at its end), and by the window
+//! from the engine's view, each time an output session turns out not to be
+//! held ([`SessionNotes`]).
 
 use std::fmt::Display;
 
 use ac_engine::KeepAwakeState;
 use ac_output::{AwakeMode, Caffeinate, KeepAwake, NotHeld};
 
-/// Logs `note` on stderr, as the app's other messages.
+/// Logs `note` on stderr, as the app's other messages, and as a warning in
+/// the app's log.
 pub fn log(note: &str) {
     eprintln!("auto-camera: {note}");
+    tracing::warn!("{note}");
 }
 
 /// The note for a session or run that is not held awake, and why.

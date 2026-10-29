@@ -4,7 +4,7 @@
 //! # Pipeline
 //!
 //! ```text
-//!  sources ──newest frame──► engine thread (master clock, one tick per output frame)
+//!  sources ──frame by PTS──► engine thread (master clock, one tick per output frame)
 //!     │                        │  tracker step per new frame ─► subject store (per source)
 //!     │                        │  catalog: wide + subject × preset shots ─► framers
 //!     │                        │  switcher ◄── commands      director ─► suggestion / take
@@ -23,7 +23,10 @@
 //! * [`Engine`] is the runtime around it: it opens the sources, each under
 //!   a supervisor that reopens it when its input is lost
 //!   ([`ac_sources::open_supervised`]), runs the discovery workers,
-//!   drives the core from a master clock on its own thread, owns the program
+//!   drives the core from a master clock on its own thread (feeding it the
+//!   newest frame of the phase reference, whose frames the ticks are moved
+//!   to fall between, and of every other source the frame its
+//!   [`presentation`] buffer picks by PTS for the tick), owns the program
 //!   encoder, accepts [`EngineCommand`]s over a channel and publishes an
 //!   immutable [`EngineSnapshot`] every tick. See [`runtime`] for the
 //!   threads, channels and mailboxes.
@@ -36,6 +39,10 @@
 //! * [`trace`] carries one record per tick (subjects, shot targets and
 //!   crops, program and preview) from the engine thread to a writer, such
 //!   as the app's `--trace` file, for scoring with `ac_eval`.
+//! * [`detection_log`] carries every discovery pass the engine applied to
+//!   a writer, such as the app's `--record-detections` file, so that a run's
+//!   detections can be replayed without its model
+//!   (`ac_vision::ReplayDetector`).
 //! * [`queries`] reads each query's prompt once, when it is created: the
 //!   detector is asked for the parsed phrase ("speaker upper body" asks for
 //!   "a person speaking"), and the prompt's shot words pick its framings
@@ -57,10 +64,12 @@ pub mod catalog;
 pub mod command;
 pub mod config;
 pub mod core;
+pub mod detection_log;
 pub mod detectors;
 pub mod discovery;
 pub mod mailbox;
 pub mod output;
+pub mod presentation;
 pub mod queries;
 pub mod readiness;
 pub mod runtime;
@@ -77,6 +86,7 @@ pub use config::{
     preset_for,
 };
 pub use core::{EngineCore, SourceFeed, TickOutput};
+pub use detection_log::{PassRecord, PassSender};
 pub use queries::{PromptReader, build_query, default_presets, read_prompt, shot_presets};
 pub use readiness::{Readiness, SystemInspector};
 pub use runtime::{Engine, EngineError, EngineHandle, EngineOptions, EngineReport, PendingReply};

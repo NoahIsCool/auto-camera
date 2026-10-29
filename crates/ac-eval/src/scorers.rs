@@ -21,6 +21,17 @@
 //! slower than the clip, or the trace is shorter) is left out and counted
 //! in the report's coverage.
 //!
+//! A run may play only a segment of the labelled file (a file source's
+//! `start_s` and `duration_s`, in `ac-sources`). The source then rebases
+//! time: the segment's first frame, the first at or after `start_s` (one up
+//! to [`AT_TOLERANCE`] before it counts as at it), comes with PTS 0, so its
+//! clock is no longer the clip's. [`Scope::start_s`] repeats the source's
+//! `start_s`, and a record's frame is then that first frame plus the frame
+//! nearest its PTS ([`Scope::first_frame`]), so a segment is scored
+//! against the labels of the whole file, on the keyframes it showed. The
+//! label file still names the whole file, which is what the source plays.
+//! The keyframes outside the segment are among those no record shows.
+//!
 //! Everything a subject or a shot did on that tick is then compared with
 //! the keyframe's people. Boxes are matched by IoU at or above
 //! `tracking.match_iou` (0.5, the MOT Challenge's threshold), in two ways
@@ -79,7 +90,7 @@ use ac_core::{QueryId, ShotSize, SourceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::labels::{FieldErrors, LabelFile, RoleTag};
+use crate::labels::{FieldErrors, FrameRate, LabelFile, RoleTag};
 use crate::report::{Coverage, Report};
 use crate::thresholds::Thresholds;
 use crate::trace::{ShotTrace, TraceRecord};
@@ -97,12 +108,22 @@ mod testkit;
 
 pub use join::on_air;
 
+/// How far before a segment's `start_s` a frame may be and still be its
+/// first frame: the file source's tolerance (Matroska stores times to the
+/// millisecond).
+pub const AT_TOLERANCE: Duration = Duration::from_millis(1);
+
 /// How a trace relates to a label file; see the module docs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scope {
     /// The trace source the labelled clip played on.
     pub source: SourceId,
+    /// How far into the clip, in seconds, the run's source started: its
+    /// `start_s` when it played a segment of the clip, else 0 (the
+    /// default). Finite and at least 0.
+    #[serde(default)]
+    pub start_s: f64,
     /// Whom each query should find; each query at most once.
     #[serde(default)]
     pub queries: Vec<QueryBinding>,
@@ -149,6 +170,10 @@ pub enum ScoreError {
     /// The scope binds one query twice.
     #[error("the scope binds query {0:?} twice")]
     DuplicateQuery(QueryId),
+    /// The scope's `start_s` is negative, not finite or too large for a
+    /// time; the value as written.
+    #[error("the scope's start_s must be a finite number of seconds, at least 0; got {0}")]
+    Start(String),
     /// The trace has records but none of them has the scoped source: the
     /// scope names the wrong source, or the trace is of another studio.
     #[error("no trace record has source {0:?}")]
@@ -156,11 +181,12 @@ pub enum ScoreError {
 }
 
 impl Scope {
-    /// A scope for `source`: talk, every query looking for everyone, and
-    /// only the built-in preset names.
+    /// A scope for `source` over the whole clip: talk, every query looking
+    /// for everyone, and only the built-in preset names.
     pub fn new(source: SourceId) -> Self {
         Self {
             source,
+            start_s: 0.0,
             queries: Vec::new(),
             preset_sizes: BTreeMap::new(),
             content: Content::Talk,
@@ -190,8 +216,28 @@ impl Scope {
             .or_else(|| size_named(preset))
     }
 
-    /// Checks that no query is bound twice.
+    /// The clip frame the run's first frame is, at the clip's `fps`: the
+    /// first frame at or after [`Self::start_s`], a frame up to
+    /// [`AT_TOLERANCE`] before it counting as at it, as the file source
+    /// cuts a segment; 0 for the whole clip. `None` when a part of `fps` is
+    /// zero or `start_s` is invalid.
+    pub fn first_frame(&self, fps: FrameRate) -> Option<u64> {
+        let start = Duration::try_from_secs_f64(self.start_s).ok()?;
+        if fps.num == 0 || fps.den == 0 {
+            return None;
+        }
+        let wanted = start.saturating_sub(AT_TOLERANCE).as_nanos();
+        let period = u128::from(fps.den) * 1_000_000_000;
+        let first = (wanted * u128::from(fps.num)).div_ceil(period);
+        Some(u64::try_from(first).unwrap_or(u64::MAX))
+    }
+
+    /// Checks that `start_s` is a time, as the file source checks its own,
+    /// and that no query is bound twice.
     fn validate(&self) -> Result<(), ScoreError> {
+        if Duration::try_from_secs_f64(self.start_s).is_err() {
+            return Err(ScoreError::Start(self.start_s.to_string()));
+        }
         let mut seen = BTreeSet::new();
         for b in &self.queries {
             if !seen.insert(&b.query) {
@@ -226,10 +272,10 @@ fn seconds_between_ns(from_ns: u64, to_ns: u64) -> f64 {
 /// Scores `trace` against `labels` and `thresholds`; see the module docs.
 ///
 /// Fails only on input it cannot score: invalid labels or thresholds, a
-/// query bound twice, or a non-empty trace that never shows the scoped
-/// source. Every metric of [`framing`], [`motion`], [`rest`],
-/// [`tracking`] (one set per query) and [`switching`] is in the report, in
-/// that order.
+/// scope starting at an invalid time or binding a query twice, or a
+/// non-empty trace that never shows the scoped source. Every metric of
+/// [`framing`], [`motion`], [`rest`], [`tracking`] (one set per query) and
+/// [`switching`] is in the report, in that order.
 pub fn score(
     labels: &LabelFile,
     trace: &[TraceRecord],

@@ -265,8 +265,8 @@ fn start_reports_unusable_setups() {
         Err(EngineError::Config(_))
     ));
     // A missing file starts offline (tests/reconnect.rs), but a pattern
-    // that cannot be made, or a width no picture can be scaled to, is a
-    // mistake no retry mends.
+    // that cannot be made, a width no picture can be scaled to, or a
+    // segment no file can have, is a mistake no retry mends.
     let pattern = SourceConfig::Synthetic {
         width: 320,
         height: 180,
@@ -278,8 +278,22 @@ fn start_reports_unusable_setups() {
         loop_playback: false,
         max_width: Some(1),
         audio: false,
+        start_s: None,
+        duration_s: None,
     };
-    for (input, why) in [(pattern, "frame rate"), (narrow, "max_width")] {
+    let before = SourceConfig::File {
+        path: "/nonexistent/auto-camera/clip.mp4".into(),
+        loop_playback: false,
+        max_width: None,
+        audio: false,
+        start_s: Some(-1.0),
+        duration_s: None,
+    };
+    for (input, why) in [
+        (pattern, "frame rate"),
+        (narrow, "max_width"),
+        (before, "start_s"),
+    ] {
         match Engine::start_with(StudioConfig::with_source("s", input), fast_time()) {
             Err(EngineError::Config(e)) => assert!(e.to_string().contains(why), "{e}"),
             other => panic!("{why}: {other:?}"),

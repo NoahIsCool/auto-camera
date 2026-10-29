@@ -1,9 +1,12 @@
 //! End-to-end tests of [`score`]: defined results on empty and one-frame
 //! traces, a perfect run with no violation, a run with one planted ID
-//! swap, one jump cut and one dwell violation, and the inputs it refuses.
-//! The metrics' own arithmetic is tested next to each scorer.
+//! swap, one jump cut and one dwell violation, a segment's first frame,
+//! and the inputs it refuses. The metrics' own arithmetic is tested next
+//! to each scorer.
 
 use ac_core::{QueryId, Rect, ShotSize, SourceId};
+
+use crate::labels::FrameRate;
 
 use super::testkit::*;
 use super::*;
@@ -329,6 +332,56 @@ fn invalid_input_is_refused_with_its_reason() {
         score(&still_labels(), &trace, &twice, &Thresholds::default()),
         Err(ScoreError::DuplicateQuery(QueryId("person".into())))
     );
+    for (start_s, written) in [(-1.0, "-1"), (f64::NAN, "NaN"), (f64::INFINITY, "inf")] {
+        let bad = Scope { start_s, ..scope() };
+        assert_eq!(
+            score(&still_labels(), &trace, &bad, &Thresholds::default()),
+            Err(ScoreError::Start(written.into()))
+        );
+        assert_eq!(bad.first_frame(FrameRate::new(10, 1)), None);
+    }
+}
+
+#[test]
+fn a_segment_starts_on_the_first_frame_at_or_after_its_start() {
+    let at = |start_s: f64, fps: FrameRate| Scope { start_s, ..scope() }.first_frame(fps);
+    let ntsc = FrameRate::new(30000, 1001);
+    // Frame 29 is presented at 0.967633 s, frame 30 at 1.001 s.
+    assert_eq!(at(0.0, ntsc), Some(0));
+    assert_eq!(at(1.0, ntsc), Some(30));
+    assert_eq!(at(0.97, ntsc), Some(30), "the next frame, not the nearest");
+    assert_eq!(at(1.001, ntsc), Some(30));
+    // A frame up to 1 ms before the start counts as at it, as the file
+    // source cuts.
+    assert_eq!(at(1.0019, ntsc), Some(30));
+    assert_eq!(at(1.0021, ntsc), Some(31));
+    assert_eq!(at(0.0009, ntsc), Some(0));
+    assert_eq!(at(2.0, FrameRate::new(10, 1)), Some(20));
+    assert_eq!(at(2.0, FrameRate::new(0, 1)), None);
+    // A record of the segment's frame `n` then shows clip frame `20 + n`.
+    let labels = labels(2, vec![keyframe(20, vec![a()]), keyframe(30, vec![b()])]);
+    let trace: Vec<TraceRecord> = (0..11)
+        .map(|f| {
+            record(
+                f,
+                vec![subject(1, a().bbox)],
+                vec![wide()],
+                Some("cam/wide"),
+            )
+        })
+        .collect();
+    let segment = Scope {
+        start_s: 2.0,
+        ..scope()
+    };
+    let r = score(&labels, &trace, &segment, &Thresholds::default()).unwrap();
+    assert_eq!(r.coverage.scored_keyframes, 2);
+    // Subject 1 stands where person 1 is on frame 20, not where person 2 is
+    // on frame 30.
+    let recall = r.metric("tracking.recall", Some("person")).unwrap();
+    assert_eq!((recall.value(), recall.samples), (Some(0.5), 2));
+    // Read on the clip's clock, the trace shows neither keyframe.
+    assert_eq!(report(&labels, &trace).coverage.scored_keyframes, 0);
 }
 
 #[test]

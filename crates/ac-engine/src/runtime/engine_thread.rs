@@ -7,10 +7,21 @@
 //! core the newest frame of every source and the discovery results that
 //! arrived, hands the core's requests to the workers, pushes the program
 //! frame and audio to the output, sends the tick's trace record (when the
-//! engine traces; [`crate::trace`]) and publishes a snapshot. The frame the
-//! tick read from the phase reference (the program audio source, else the
-//! first source) goes to the [`PhaseLock`], which delays the schedule when
-//! ticks collide with that source's frames (see [`crate::schedule`]).
+//! engine traces; [`crate::trace`]) and the passes it applied (when it logs
+//! detections; [`crate::detection_log`]) and publishes a snapshot. The
+//! frame the tick read from the phase reference (the program audio source,
+//! else the first source) goes to the [`PhaseLock`], which delays the
+//! schedule when ticks collide with that source's frames (see
+//! [`crate::schedule`]).
+//!
+//! Only the phase reference is fed its newest frame as it is, though: every
+//! other source's newest frame is offered to its
+//! [`PresentationBuffer`](crate::presentation::PresentationBuffer) whenever
+//! the thread wakes, between ticks too, and the core is fed the frame that
+//! buffer presents for the clock reading at which the tick was due
+//! ([`TickSchedule::due`], read before the phase lock can move the
+//! schedule), with the buffers' counts for the snapshot (see
+//! [`crate::presentation`]).
 //!
 //! Commands are applied in order at tick start, and only on this thread:
 //! `StartOutput` and `StopOutput` go to the
@@ -33,6 +44,7 @@ use crate::command::{CommandReply, EngineCommand};
 use crate::core::SourceFeed;
 use crate::discovery::{DiscoveryResult, DiscoveryWorker};
 use crate::mailbox::Latest;
+use crate::presentation::stats_by_source;
 use crate::schedule::{PhaseLock, TickDecision, TickSchedule};
 use crate::snapshot::{EngineSnapshot, OutputState, TimingView};
 
@@ -72,23 +84,27 @@ impl Runtime {
         let mut schedule = TickSchedule::new(self.clock.now(), self.period, self.max_lag);
         let mut phase = PhaseLock::new(self.period);
         loop {
-            let (media_time, late, skipped) = match schedule.poll(self.clock.now()) {
+            let (index, media_time, late, skipped) = match schedule.poll(self.clock.now()) {
                 TickDecision::Wait(d) => {
+                    self.collect_frames();
                     self.clock.sleep(d.min(WAIT_SLICE));
                     continue;
                 }
                 TickDecision::Tick {
+                    index,
                     media_time,
                     late,
                     skipped,
                     ..
-                } => (media_time, late, skipped),
+                } => (index, media_time, late, skipped),
             };
+            // Before the phase lock can delay the schedule below.
+            let due = schedule.due(index);
             let started = Instant::now();
             if self.apply_commands() {
                 break;
             }
-            let reference = self.tick(media_time, skipped);
+            let reference = self.tick(media_time, due, skipped);
             if let Some(by) = phase.observe(reference) {
                 schedule.delay(by);
             }
@@ -146,21 +162,44 @@ impl Runtime {
         })
     }
 
-    /// One tick: feed the core, dispatch discovery, push the program
-    /// (owing the encoder a repeat for each of the `skipped` ticks before).
-    /// Returns the sequence number and PTS of the frame the tick read from
-    /// the phase reference (the program audio source, else the first
-    /// source), for the [`PhaseLock`].
-    fn tick(&mut self, media_time: Duration, skipped: u64) -> Option<(u64, Duration)> {
+    /// Offers every source's newest frame to its presentation buffer, if
+    /// it has one, stamped with the clock reading now.
+    fn collect_frames(&mut self) {
+        let now = self.clock.now();
+        for (s, buffer) in self.sources.iter().zip(&mut self.presenters) {
+            if let Some(buffer) = buffer
+                && let Some(frame) = s.latest()
+            {
+                buffer.offer(frame, now);
+            }
+        }
+    }
+
+    /// One tick, due at clock reading `due`: feed the core, dispatch
+    /// discovery, push the program (owing the encoder a repeat for each of
+    /// the `skipped` ticks before). Returns the sequence number and PTS of
+    /// the frame the tick read from the phase reference (the program audio
+    /// source, else the first source), for the [`PhaseLock`].
+    fn tick(
+        &mut self,
+        media_time: Duration,
+        due: Duration,
+        skipped: u64,
+    ) -> Option<(u64, Duration)> {
         self.output.poll();
+        self.collect_frames();
         let results: Vec<DiscoveryResult> = self.results.try_iter().collect();
         let feeds: Vec<SourceFeed> = self
             .sources
             .iter()
             .zip(&mut self.workers)
-            .map(|(s, w)| SourceFeed {
+            .zip(&mut self.presenters)
+            .map(|((s, w), p)| SourceFeed {
                 state: s.state(),
-                frame: s.latest(),
+                frame: match p {
+                    Some(buffer) => buffer.present(due).into_frame(),
+                    None => s.latest(),
+                },
                 detector_loading: w.as_mut().is_some_and(DiscoveryWorker::is_loading),
                 error: s.error(),
                 // After `frame` (fields are evaluated in order), so it
@@ -168,6 +207,8 @@ impl Runtime {
                 info: Some(s.current_info()),
             })
             .collect();
+        self.core
+            .note_presentation(stats_by_source(&self.presenters));
         let reference = feeds
             .get(self.audio_source.unwrap_or(0))
             .and_then(|feed| feed.frame.as_ref())
@@ -177,6 +218,9 @@ impl Runtime {
             if let Some(Some(worker)) = self.workers.get(i) {
                 worker.submit(request);
             }
+        }
+        for pass in out.applied {
+            self.detections.send(pass);
         }
         let mut program_audio = Vec::new();
         for (i, s) in self.sources.iter().enumerate() {
@@ -209,21 +253,24 @@ impl Runtime {
             late_ticks: self.late,
             skipped_ticks: self.skipped,
         };
-        let snapshot = Arc::new(self.core.snapshot(self.output.view(), timing, running));
+        let mut snapshot = self.core.snapshot(self.output.view(), timing, running);
+        snapshot.sidecar = self.sidecar.as_ref().map(|s| s.status());
+        let snapshot = Arc::new(snapshot);
         self.snapshots.publish(snapshot.clone());
         snapshot
     }
 
     /// Stops the sidecar, the workers, the output and the sources, and
-    /// publishes the final snapshot. The sidecar goes first: dropping its
+    /// publishes the final snapshot. The sidecar goes first: stopping its
     /// service interrupts a pass or a load in progress, so the workers can
-    /// be joined at once instead of after a request deadline.
+    /// be joined at once instead of after a request deadline. The stopped
+    /// service is kept, so the final snapshot carries its final status.
     fn shutdown(mut self) -> EngineReport {
         let mut joined = 0;
-        if let Some(service) = self.sidecar.take() {
+        if let Some(service) = &mut self.sidecar {
             // Ends the process (stdin closed, 2 s grace, kill, reap) and
             // joins the service thread.
-            drop(service);
+            service.stop();
             joined += 1;
         }
         for w in self.workers.iter_mut().flatten() {

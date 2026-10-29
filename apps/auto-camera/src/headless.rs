@@ -66,6 +66,11 @@
 //! whose source never delivered a picture did start, so it reports and
 //! keeps its trace, as every run that ticked does.
 //!
+//! `--record-detections` works the same way ([`crate::detections`]): the
+//! summary's `detections` gives the passes written, one per pass the
+//! engine applied, so it equals the sources' `applied` passes in all
+//! unless the writer fell behind (`missing`).
+//!
 //! This module runs the phases; the run's flags ([`HeadlessOptions`]) are
 //! in `flags`, and the summary's types in [`summary`] and its building
 //! from the run's snapshots in `report`.
@@ -76,6 +81,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::awake;
+use crate::detections;
 use crate::signals::QuitSignal;
 use crate::trace::{self, TraceFile};
 use ac_core::{Rect, ShotId};
@@ -88,12 +94,14 @@ use ac_output::AwakeMode;
 
 mod flags;
 mod report;
+mod sidecar;
 mod summary;
 
 pub use flags::HeadlessOptions;
 pub use summary::{
-    DirectorSummary, MatchSummary, OutputSummary, ProgramSummary, QuerySummary, ShotSummary,
-    SourceSummary, StreamSummary, SubjectSummary, Summary, TimingSummary, TraceSummary,
+    DetectionsSummary, DirectorSummary, LoudnessSummary, MatchSummary, OutputSummary,
+    ProgramSummary, QuerySummary, ShotSummary, SourceSummary, StreamSummary, SubjectSummary,
+    Summary, TimingSummary, TraceSummary,
 };
 
 use report::{Totals, failed_to_start, summarize};
@@ -148,6 +156,15 @@ pub fn run_with(
         Ok(t) => t,
         Err(e) => return failed_to_start(path, options, started, e),
     };
+    let passes = options.record_detections.as_deref();
+    let (detections, engine_options) = match detections::attach(passes, engine_options) {
+        Ok(d) => d,
+        Err(e) => {
+            // The trace's sender went with the options: its file is empty.
+            let _ = trace.map(TraceFile::discard_if_empty);
+            return failed_to_start(path, options, started, e);
+        }
+    };
     let engine = match Engine::start_with(config, engine_options) {
         Ok(e) => e,
         Err(e) => {
@@ -157,9 +174,14 @@ pub fn run_with(
                 Some(why) => format!("{e}; the trace failed: {why}"),
                 None => e.to_string(),
             };
+            let error = match detections.and_then(|d| d.discard_if_empty().error) {
+                Some(why) => format!("{error}; the detection log failed: {why}"),
+                None => error,
+            };
             return failed_to_start(path, options, started, error);
         }
     };
+    let _watch = crate::logs::watch(engine.handle());
     let mut sampler = Sampler::default();
     let error = drive(&engine, options, limit, &mut sampler, quit).err();
     let (ticks, threads_joined, final_snapshot, error) = match engine.shutdown() {
@@ -167,6 +189,7 @@ pub fn run_with(
         Err(e) => (0, 0, None, error.or(Some(e.to_string()))),
     };
     let (trace, error) = finish_trace(trace, ticks, error);
+    let (detections, error) = finish_detections(detections, final_snapshot.as_deref(), error);
     awake::end_of_run(awake, &mut log);
     let last = sampler.last.clone().or(final_snapshot.clone());
     summarize(
@@ -178,6 +201,7 @@ pub fn run_with(
             ticks,
             threads_joined,
             trace,
+            detections,
         },
         last.as_deref(),
         final_snapshot.as_deref(),
@@ -204,6 +228,32 @@ fn finish_trace(
         missing: ticks.saturating_sub(report.lines),
     };
     let error = error.or(report.error.map(|e| format!("the trace failed: {e}")));
+    (Some(summary), error)
+}
+
+/// Waits for the detection log's writer, once the engine has stopped, and
+/// sums the log up against the passes applied by the engine of `end`, its
+/// final snapshot. A write error fails the run unless it had already
+/// failed (`error`).
+fn finish_detections(
+    file: Option<TraceFile<ac_engine::PassRecord>>,
+    end: Option<&EngineSnapshot>,
+    error: Option<String>,
+) -> (Option<DetectionsSummary>, Option<String>) {
+    let Some(file) = file else {
+        return (None, error);
+    };
+    let path = file.path().to_owned();
+    let report = file.finish();
+    let applied: u64 = end.map_or(0, |s| s.sources.iter().map(|v| v.discovery.applied).sum());
+    let summary = DetectionsSummary {
+        path,
+        records: report.lines,
+        missing: applied.saturating_sub(report.lines),
+    };
+    let error = error.or(report
+        .error
+        .map(|e| format!("the detection log failed: {e}")));
     (Some(summary), error)
 }
 

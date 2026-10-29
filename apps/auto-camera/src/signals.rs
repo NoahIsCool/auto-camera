@@ -76,6 +76,7 @@ impl QuitSignal {
                 std::process::exit(i32::from(INTERRUPTED));
             }
             eprintln!("auto-camera: termination signal, shutting down (again to force)");
+            tracing::warn!("termination signal, shutting down");
         })
         .map_err(|e| format!("cannot handle termination signals: {e}"))
     }

@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use ac_audio::LoudnessReading;
 use ac_core::{
     ParsedPrompt, Preset, QueryId, Rect, ShotId, ShotSize, SourceId, SubjectId, TrackState,
 };
@@ -23,6 +24,7 @@ use ac_switcher::{Queued, SwitchError, Transition};
 
 use crate::audio::AudioPacerStats;
 use crate::catalog::ShotStatus;
+use crate::presentation::PresentationStats;
 use crate::schedule::TickTimer;
 use crate::vision::VisionStats;
 
@@ -285,9 +287,18 @@ pub struct SourceView {
     pub frame_age: Option<Duration>,
     /// New frames seen.
     pub frames: u64,
-    /// Frames produced but never seen, because a newer one replaced them in
-    /// the mailbox before the engine looked (the engine fell behind).
+    /// Frames produced but never shown: a newer one replaced them in the
+    /// mailbox before the engine looked (the engine fell behind), or, for a
+    /// source with a presentation buffer, the buffer passed over them
+    /// (counted on their own in [`PresentationStats::skipped`]).
     pub missed: u64,
+    /// How the source's presentation buffer has presented it, for a source
+    /// the engine aligns to the ticks by PTS (every source but the phase
+    /// reference; see [`crate::presentation`]): new frames, repeats,
+    /// passed-over frames, and whether it is stale. `None` for the phase
+    /// reference, which is shown as it arrives, and in a core driven
+    /// without the runtime.
+    pub presentation: Option<PresentationStats>,
     /// The source has fresh frames and its shots can go on air.
     pub available: bool,
     /// Live subjects.
@@ -349,6 +360,10 @@ pub struct OutputView {
     pub stats: Option<EncoderStats>,
     /// Program audio pacing, when the output carries audio.
     pub audio: Option<AudioPacerStats>,
+    /// Program loudness and peaks (EBU R 128) of the session, measured on
+    /// the paced audio, when the output carries audio; final once the
+    /// session has ended.
+    pub loudness: Option<LoudnessReading>,
     /// Program frames handed to the encoder this session.
     pub frames_pushed: u64,
     /// Whether the machine is held awake for the session.
@@ -410,6 +425,13 @@ pub struct EngineSnapshot {
     /// sidecar), so a source's request can wait behind another source's
     /// pass or a restart of that process.
     pub shared_detector: bool,
+    /// The detector sidecar's host, when the detector is one: what it is
+    /// doing (with the reason it is down), its process, what its hello
+    /// named, and its counters since the engine started, restarts among
+    /// them (`stats.restarts()`). The runtime fills it in each tick (the
+    /// core leaves it `None`); in the final snapshot the host is stopped
+    /// and the counters are final.
+    pub sidecar: Option<ac_sidecar::HostStatus>,
 }
 
 impl EngineSnapshot {

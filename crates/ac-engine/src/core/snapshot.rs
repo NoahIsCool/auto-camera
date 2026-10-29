@@ -125,6 +125,7 @@ impl EngineCore {
                 frame_age: s.last_frame_at.map(|t| now.saturating_sub(t)),
                 frames: s.frames,
                 missed: s.missed,
+                presentation: s.presentation,
                 available: s.available(now),
                 subjects: s.vision.store().len(),
                 discovery_enabled: s.discovery.enabled,
@@ -150,6 +151,7 @@ impl EngineCore {
             render_issues: self.render_issues.clone(),
             program_changes: self.program_changes,
             shared_detector: self.shared_detector,
+            sidecar: None,
         }
     }
 }

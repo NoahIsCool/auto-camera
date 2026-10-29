@@ -36,16 +36,25 @@ pub use ac_eval::TraceRecord;
 pub type TraceSender = SyncSender<TraceRecord>;
 
 /// The engine thread's end of a trace channel: one record per tick, never
-/// waiting; see the module docs.
-#[derive(Debug, Default)]
-pub(crate) struct Tracer {
+/// waiting; see the module docs. The detection log's channel of passes
+/// ([`crate::detection_log`]) follows the same rules, as a `Tracer` of
+/// [`PassRecord`](ac_vision::PassRecord)s.
+#[derive(Debug)]
+pub(crate) struct Tracer<T = TraceRecord> {
     /// The channel, until the writer is gone.
-    tx: Option<TraceSender>,
+    tx: Option<SyncSender<T>>,
 }
 
-impl Tracer {
+impl<T> Default for Tracer<T> {
+    /// Sends nowhere.
+    fn default() -> Self {
+        Self { tx: None }
+    }
+}
+
+impl<T> Tracer<T> {
     /// Sends to `tx`, or nowhere.
-    pub(crate) fn new(tx: Option<TraceSender>) -> Self {
+    pub(crate) fn new(tx: Option<SyncSender<T>>) -> Self {
         Self { tx }
     }
 
@@ -56,7 +65,7 @@ impl Tracer {
 
     /// Sends `record` without waiting: dropped if the channel is full, and
     /// tracing ends if the writer is gone.
-    pub(crate) fn send(&mut self, record: TraceRecord) {
+    pub(crate) fn send(&mut self, record: T) {
         let Some(tx) = &self.tx else {
             return;
         };
@@ -133,6 +142,6 @@ mod tests {
         let mut off = Tracer::new(None);
         assert!(!off.is_on());
         off.send(record(1));
-        assert!(!Tracer::default().is_on());
+        assert!(!Tracer::<TraceRecord>::default().is_on());
     }
 }

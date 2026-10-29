@@ -11,7 +11,12 @@
 //! 0.08 below it on the keyframe at 0.5 s (inside the medium band, 0.07 to
 //! 0.10), but at 0.26 on the keyframe at 1.5 s, 0.042 / 0.4 = 0.105 below
 //! it, outside the band.
+//!
+//! The same run over a segment of the clip (a file source's `start_s`),
+//! whose PTS start again at 0, scores as that part of the whole run does,
+//! once the scope gives the same `start_s`.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use ac_core::{QueryId, Rect, ShotId, SourceId, SubjectId, TrackState};
@@ -37,10 +42,21 @@ const MEDIUM: Rect = Rect::new(0.3, 0.218, 0.4, 0.4);
 
 /// The trace of the run in the module docs, as JSON Lines.
 fn trace_text(labels: &LabelFile) -> String {
+    segment_text(labels, 0..labels.clip.frame_count, false)
+}
+
+/// The trace of the run in the module docs over the clip's `frames`, as
+/// JSON Lines. When `rebased`, the trace is of a source playing just those
+/// frames: ticks, sequence numbers and PTS count from the range's first
+/// frame, as a file source playing a segment counts them; otherwise from
+/// the clip's.
+fn segment_text(labels: &LabelFile, frames: Range<u64>, rebased: bool) -> String {
     let stage = SourceId("stage".into());
-    (0..labels.clip.frame_count)
+    let first = frames.start;
+    frames
         .map(|frame| {
-            let pts = Duration::from_nanos(labels.clip.fps.pts_ns(frame).unwrap());
+            let seq = if rebased { frame - first } else { frame };
+            let pts = Duration::from_nanos(labels.clip.fps.pts_ns(seq).unwrap());
             // Everyone where the latest keyframe put them.
             let keyframe = labels
                 .keyframes
@@ -72,13 +88,13 @@ fn trace_text(labels: &LabelFile) -> String {
             };
             TraceRecord {
                 version: TRACE_VERSION,
-                tick: frame + 1,
+                tick: seq + 1,
                 pts,
                 late: false,
                 skipped: 0,
                 sources: vec![SourceTrace {
                     id: stage.clone(),
-                    frame: Some(FrameTag { seq: frame, pts }),
+                    frame: Some(FrameTag { seq, pts }),
                     subjects,
                 }],
                 shots: vec![
@@ -103,6 +119,37 @@ fn run(thresholds: &str) -> Report {
     let scope: Scope = serde_json::from_str(SCOPE).expect("the scope reads");
     let thresholds = Thresholds::from_toml(thresholds).expect("the thresholds read");
     score(&labels, &trace, &scope, &thresholds).expect("the run scores")
+}
+
+/// The report of `trace` (JSON Lines) with the scope's `start_s` set to
+/// `start_s`, against the default thresholds.
+fn scored(labels: &LabelFile, trace: &str, start_s: f64) -> Report {
+    let trace = parse_trace(trace).expect("the trace reads back");
+    let mut scope: Scope = serde_json::from_str(SCOPE).expect("the scope reads");
+    scope.start_s = start_s;
+    let thresholds = Thresholds::from_toml(DEFAULT_THRESHOLDS).expect("the thresholds read");
+    score(labels, &trace, &scope, &thresholds).expect("the run scores")
+}
+
+/// One metric's name, query, value (rounded to the nanosecond, as the two
+/// clocks round frame times apart), samples and verdict.
+type Line = (String, Option<String>, Option<i64>, u64, Verdict);
+
+/// Each metric of `report`, as a [`Line`].
+fn summary(report: &Report) -> Vec<Line> {
+    report
+        .metrics
+        .iter()
+        .map(|m| {
+            (
+                m.name.clone(),
+                m.query.as_ref().map(|q| q.0.clone()),
+                m.value().map(|v| (v * 1e9).round() as i64),
+                m.samples,
+                m.verdict,
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -148,6 +195,32 @@ fn the_run_fails_on_the_headroom_alone_and_says_so_in_json() {
     assert!(json.contains(r#""name": "framing.headroom.medium""#));
     assert!(json.contains(r#""verdict": "fail""#));
     assert_eq!(Report::from_json(&json), Ok(report));
+}
+
+#[test]
+fn a_segment_of_the_clip_scores_the_keyframes_it_showed() {
+    let labels = LabelFile::from_json(LABELS).expect("the fixture is valid");
+    // Frame 30 is the first at or after 1 s (it is presented at 1.001 s), so
+    // a source with `start_s = 1` plays frames 30 to 59, from PTS 0.
+    let segment = segment_text(&labels, 30..60, true);
+    let report = scored(&labels, &segment, 1.0);
+    assert_eq!(report.coverage.ticks, 30);
+    assert_eq!(report.coverage.scored_keyframes, 2);
+    // It scores as the same frames do in the whole run, on keyframes 30
+    // and 45: `person` finds 2 + 0 of the 3 + 1 people listed there.
+    let part = scored(&labels, &segment_text(&labels, 30..60, false), 0.0);
+    assert_eq!(report.coverage, part.coverage);
+    assert_eq!(summary(&report), summary(&part));
+    let recall = report.metric("tracking.recall", Some("person")).unwrap();
+    assert_eq!((recall.value(), recall.samples), (Some(0.5), 4));
+    // Read on the clip's clock instead, the segment would show keyframes 0
+    // and 15, which it never showed.
+    let misread = scored(&labels, &segment, 0.0);
+    assert_ne!(summary(&misread), summary(&report));
+    // A scope file gives the start as the source config does.
+    let text = SCOPE.replacen('{', r#"{ "start_s": 1.0,"#, 1);
+    let scope: Scope = serde_json::from_str(&text).expect("the scope reads");
+    assert_eq!(scope.start_s, 1.0);
 }
 
 #[test]

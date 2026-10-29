@@ -6,8 +6,13 @@
 //!
 //! ```json
 //! {"kind": "file", "path": "rehearsal.mp4", "loop_playback": true, "max_width": 1920}
+//! {"kind": "file", "path": "service.mp4", "start_s": 1800, "duration_s": 240}
 //! {"kind": "synthetic", "width": 1280, "height": 720, "fps": 30}
 //! ```
+//!
+//! A file's `start_s` and `duration_s` play a segment of it, as if it were a
+//! clip of its own: its first frame is the first at or after `start_s`, with
+//! PTS 0, and its audio starts with that frame ([`crate::segment`]).
 //!
 //! [`open_source`] turns a config into a running source behind the
 //! [`VideoSource`] trait, so callers never depend on the concrete type.
@@ -22,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::clock::{Clock, WallClock};
 use crate::ffmpeg::check_max_width;
 use crate::file::{FileOptions, FileSource};
+use crate::segment::Segment;
 use crate::synthetic::{SyntheticPattern, SyntheticSource};
 
 /// Default for [`SourceConfig::File::audio`]: decode audio when present.
@@ -51,6 +57,15 @@ pub enum SourceConfig {
         /// Decode the file's audio when it has any (default `true`).
         #[serde(default = "default_audio")]
         audio: bool,
+        /// Start this many seconds into the file (default 0); the first
+        /// frame at or after that time is delivered first, with PTS 0
+        /// ([`crate::segment`]).
+        #[serde(default)]
+        start_s: Option<f64>,
+        /// Play at most this many seconds from `start_s` (default: to the
+        /// end of the file).
+        #[serde(default)]
+        duration_s: Option<f64>,
     },
     /// A deterministic moving test pattern.
     Synthetic {
@@ -68,13 +83,22 @@ pub enum SourceConfig {
 
 impl SourceConfig {
     /// Checks what can be checked before the source is opened, the mistakes
-    /// no reopening can mend: a synthetic pattern's parameters and a file's
-    /// `max_width` ([`check_max_width`]). A file is not looked for, since it
-    /// may appear later and a supervised source then picks it up
+    /// no reopening can mend: a synthetic pattern's parameters, a file's
+    /// `max_width` ([`check_max_width`]) and its segment
+    /// ([`Segment::from_seconds`]). A file is not looked for, since it may
+    /// appear later and a supervised source then picks it up
     /// ([`crate::supervisor`]).
     pub fn validate(&self) -> Result<(), MediaError> {
         match self {
-            SourceConfig::File { max_width, .. } => check_max_width(*max_width),
+            SourceConfig::File {
+                max_width,
+                start_s,
+                duration_s,
+                ..
+            } => {
+                check_max_width(*max_width)?;
+                Segment::from_seconds(*start_s, *duration_s).map(|_| ())
+            }
             SourceConfig::Synthetic {
                 width,
                 height,
@@ -105,11 +129,14 @@ pub fn open_source_with_clock(
             loop_playback,
             max_width,
             audio,
+            start_s,
+            duration_s,
         } => {
             let options = FileOptions {
                 loop_playback: *loop_playback,
                 max_width: *max_width,
                 audio: *audio,
+                segment: Segment::from_seconds(*start_s, *duration_s)?,
                 ..FileOptions::default()
             };
             Ok(Box::new(FileSource::open_with_clock(
@@ -147,6 +174,8 @@ mod tests {
                 loop_playback: false,
                 max_width: None,
                 audio: true,
+                start_s: None,
+                duration_s: None,
             }
         );
     }
@@ -174,6 +203,8 @@ mod tests {
                 loop_playback: true,
                 max_width: Some(1280),
                 audio: false,
+                start_s: Some(1800.5),
+                duration_s: Some(240.0),
             },
             SourceConfig::Synthetic {
                 width: 1920,
@@ -264,6 +295,8 @@ mod tests {
             loop_playback: false,
             max_width: None,
             audio: true,
+            start_s: Some(2.0),
+            duration_s: Some(0.5),
         };
         assert!(missing.validate().is_ok(), "it may appear later");
         // A width no picture can be scaled to fails before any file is
@@ -274,6 +307,8 @@ mod tests {
                 loop_playback: false,
                 max_width,
                 audio: true,
+                start_s: None,
+                duration_s: None,
             };
             match file.validate() {
                 Ok(()) => assert!(ok, "{max_width:?} accepted"),
@@ -284,6 +319,23 @@ mod tests {
                 }
             }
         }
+        // So does a segment no file can have.
+        for (start_s, duration_s, key) in [
+            (Some(-1.0), None, "start_s"),
+            (Some(f64::NAN), None, "start_s"),
+            (None, Some(0.0), "duration_s"),
+        ] {
+            let file = SourceConfig::File {
+                path: "/nonexistent/auto-camera/clip.mp4".into(),
+                loop_playback: false,
+                max_width: None,
+                audio: true,
+                start_s,
+                duration_s,
+            };
+            let e = file.validate().unwrap_err().to_string();
+            assert!(e.contains(key), "{e}");
+        }
     }
 
     #[test]
@@ -293,6 +345,8 @@ mod tests {
             loop_playback: false,
             max_width: None,
             audio: true,
+            start_s: None,
+            duration_s: None,
         };
         match open_source(&config, SourceId("f".into())) {
             Err(MediaError::Open(msg)) => assert!(msg.contains("clip.mp4"), "{msg}"),
@@ -300,6 +354,38 @@ mod tests {
                 "expected an open error, got {:?}",
                 other.map(|s| s.info().clone())
             ),
+        }
+    }
+
+    #[test]
+    fn a_segment_is_read_and_checked_before_the_file() {
+        let json = r#"{"kind": "file", "path": "a.mp4", "start_s": 2, "duration_s": 0.5}"#;
+        let c: SourceConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            c,
+            SourceConfig::File {
+                start_s: Some(2.0),
+                duration_s: Some(0.5),
+                ..
+            }
+        ));
+        // A segment no file can have fails before the file is looked for.
+        for (start_s, duration_s, key) in [
+            (Some(-1.0), None, "start_s"),
+            (None, Some(0.0), "duration_s"),
+        ] {
+            let config = SourceConfig::File {
+                path: "/nonexistent/auto-camera/clip.mp4".into(),
+                loop_playback: false,
+                max_width: None,
+                audio: true,
+                start_s,
+                duration_s,
+            };
+            match open_source(&config, SourceId("f".into())) {
+                Err(MediaError::Open(msg)) => assert!(msg.contains(key), "{msg}"),
+                other => panic!("expected an open error, got {:?}", other.is_ok()),
+            }
         }
     }
 }

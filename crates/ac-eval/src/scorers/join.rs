@@ -2,7 +2,8 @@
 //! and whom each subject's box is of there.
 //!
 //! [`Join::new`] reads both once: for every record, where the scoped
-//! source is among its sources and which clip frame its newest frame is;
+//! source is among its sources and which clip frame its newest frame is
+//! (counted from the scope's first frame, for a segment of the clip);
 //! then, for every keyframe some record shows, the first such record and
 //! each subject's identity there (see the scorers' module docs for both
 //! rules). Every scorer reads this one join, so they all agree on which
@@ -40,7 +41,8 @@ pub(crate) struct Join<'a> {
     /// For each record, the index of the scoped source in its sources.
     pub source_at: Vec<Option<usize>>,
     /// For each record, the clip frame the scoped source's newest frame
-    /// is, when it has one.
+    /// is, when it has one: the scope's first frame plus the frame nearest
+    /// its PTS.
     pub frame_at: Vec<Option<u64>>,
     /// The keyframes some record shows, in label order.
     pub keyframes: Vec<Scored<'a>>,
@@ -74,13 +76,15 @@ impl<'a> Join<'a> {
             .iter()
             .map(|r| r.sources.iter().position(|s| s.id == scope.source))
             .collect();
+        let fps = labels.clip.fps;
+        let first = scope.first_frame(fps);
         let frame_at: Vec<Option<u64>> = trace
             .iter()
             .zip(&source_at)
             .map(|(r, at)| {
                 let frame = r.sources[(*at)?].frame?;
                 let pts_ns = u64::try_from(frame.pts.as_nanos()).unwrap_or(u64::MAX);
-                labels.clip.fps.nearest_frame(pts_ns)
+                first?.checked_add(fps.nearest_frame(pts_ns)?)
             })
             .collect();
         let mut first_showing = BTreeMap::new();
