@@ -345,8 +345,8 @@ UTC: the app's version and commit, the config's SHA-256 (for a show,
 also that of the studio file it lies over) and the model files (path,
 size and time at once, their SHA-256 from a background thread, so a
 start never waits for gigabytes of weights), which lines start every
-file again after a rotation, then what the studio did
-(sources starting, going offline and stopping, with the reason, detectors
+file again after a rotation, then what the studio did (sources and audio
+inputs starting, going offline and stopping, with the reason, detectors
 ready or failing, program changes, the output's lifecycle and the
 stream's connection), every line ffmpeg and the detector sidecar print on
 stderr (stream key redacted; a source decoder's repeats of one complaint
@@ -486,7 +486,11 @@ The picked channels are copied as they are; nothing is mixed. Without
 both sides at full level. A pick beyond `channel_count` fails the load; an
 input that opens without the picked channels, or with another count than
 `channel_count`, stays offline with the reason and is retried, like a
-source. The engine does not resample: program audio reaches the encoder at
+source. The window and the headless summary do not show audio inputs yet,
+but the log does: it says when an input goes offline, comes back or stops,
+with the reason (`audio input board: running -> offline (...)`), and
+writes a reason that every retry repeats only once.
+The engine does not resample: program audio reaches the encoder at
 the input's own rate (48 kHz while the input has not connected), and the
 encoder converts it to 48 kHz AAC. The engine never waits on an input: a
 stall is filled with silence and the late audio after it cut, and a sample
@@ -522,16 +526,20 @@ channels = [1, 2]            # the board's stereo bus on its USB channels
 channel_count = 32           # optional, as for a file
 ```
 
-The device is captured with all its input channels at the rate it runs at
-(its rate is left as it is), and each block carries the host time
-CoreAudio stamped it with, on the engine's clock. Only the device with
-exactly that UID is opened: one that is not connected leaves the input
-offline with the UIDs of the devices that are, retried like a source, so
-the board comes on air within seconds of being plugged in, and back after
-it was unplugged; the default microphone is never opened in its place.
-A glitch the input delivers through (audio dropped because the input fell
-behind its device, a jump in the device's timestamps, an overload CoreAudio
-reports) keeps it on air: it is counted, shown as the input's error
+The device is captured with all its input channels at the rate it runs at,
+and each block carries the host time CoreAudio stamped it with, on the
+engine's clock. The rate is kept, but the cpal library that opens the
+stream switches a device that offers a 32-bit float format at that rate to
+it: a setting of the device that stays after the show and that Audio MIDI
+Setup shows. Only the device with exactly that UID is opened: one that is
+not connected leaves the input offline, retried like a source, so the
+board comes on air within seconds of being plugged in, and back after it
+was unplugged; the default microphone is never opened in its place. The
+log says why it is offline, with the UIDs of the devices that are
+connected, and says it again when that list changes. A glitch the input
+delivers through (audio dropped because the input fell behind its device,
+a jump in the device's timestamps, an overload CoreAudio reports) keeps it
+on air: it is counted, kept as the input's error
 (`audio discontinuity (3 so far): ...`) and written to the log, at most a
 line every 10 s. A device that sends nothing for 2 s is reopened. Device
 inputs need macOS and a build with `--features coreaudio`, which is opt-in

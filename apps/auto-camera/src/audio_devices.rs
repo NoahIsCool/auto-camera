@@ -62,13 +62,31 @@ fn report(devices: &[AudioDevice]) -> String {
             "  {}{default}: {} input channel{s} at {} Hz",
             d.name, d.input_channels, d.sample_rate
         );
-        // A JSON string is a TOML basic string, escapes and all.
-        let uid = serde_json::to_string(&d.uid).unwrap_or_default();
-        let _ = writeln!(out, "    uid = {uid}");
+        let _ = writeln!(out, "    uid = {}", toml_string(&d.uid));
     }
     out.push_str(
         "Copy a device's uid line into its [[audio_inputs]] entry, with kind = \"device\".\n",
     );
+    out
+}
+
+/// `text` as a TOML basic string: quoted, with `"` and `\` escaped and
+/// every control character (which TOML forbids raw, U+007F included)
+/// written as `\uXXXX`, so the line parses whatever a device's UID holds.
+fn toml_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04X}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
     out
 }
 
@@ -106,13 +124,31 @@ mod tests {
 
     #[test]
     fn a_uid_line_is_valid_toml_whatever_the_uid_holds() {
-        let odd = device("Odd \"quoted\" \\ uid\t1", "Odd", 2, false);
-        let text = report(std::slice::from_ref(&odd));
-        assert!(text.starts_with("1 audio input device:\n"), "{text}");
-        let line = text.lines().find(|l| l.contains("uid = ")).unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(line.trim().trim_start_matches("uid = ")).unwrap();
-        assert_eq!(parsed, serde_json::Value::String(odd.uid));
+        for uid in [
+            "Odd \"quoted\" \\ uid\t1",
+            // DEL and the other control characters TOML forbids raw.
+            "dev\u{7f}ice",
+            "nul\0 bell\u{7} esc\u{1b} newline\n c1\u{85}",
+            "Ünïcode:é:日本",
+        ] {
+            let odd = device(uid, "Odd", 2, false);
+            let text = report(std::slice::from_ref(&odd));
+            assert!(text.starts_with("1 audio input device:\n"), "{text}");
+            let line = text.lines().find(|l| l.contains("uid = ")).unwrap();
+            let table: toml::Table =
+                toml::from_str(line.trim()).unwrap_or_else(|e| panic!("{line:?} is not TOML: {e}"));
+            assert_eq!(table["uid"].as_str(), Some(uid), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_plain_uid_is_printed_as_it_is() {
+        assert_eq!(
+            toml_string("BuiltInMicrophoneDevice"),
+            "\"BuiltInMicrophoneDevice\""
+        );
+        assert_eq!(toml_string(""), "\"\"");
+        assert_eq!(toml_string("a\u{7f}\"\\"), "\"a\\u007F\\\"\\\\\"");
     }
 
     #[test]

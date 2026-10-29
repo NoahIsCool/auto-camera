@@ -364,6 +364,7 @@ dependencies = [
  "hmac-sha256",
  "serde",
  "serde_json",
+ "toml",
  "tracing",
 ]
 

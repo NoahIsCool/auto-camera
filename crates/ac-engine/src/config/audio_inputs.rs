@@ -88,7 +88,7 @@ pub struct AudioInputEntry {
     /// another count is refused.
     #[serde(default)]
     pub channel_count: Option<u16>,
-    /// How to open it (`kind = "file"`).
+    /// How to open it (`kind = "file"` or `"device"`).
     #[serde(flatten)]
     pub input: AudioInputConfig,
 }

@@ -11,8 +11,14 @@
 //! * **format**: the input channels of all the device's input streams
 //!   (`supported_input_configs`, from its stream configuration) and its
 //!   current nominal rate (`default_input_config`, from its stream
-//!   format). The stream is opened at exactly that rate, so cpal leaves
-//!   the device's rate as it is, as `f32`, which the AUHAL converts to;
+//!   format). The stream is opened at exactly that rate, as `f32`, so the
+//!   rate is kept. The format may not be: before it builds the audio unit,
+//!   cpal sets the device's physical format to a 32-bit float one at that
+//!   rate with at least that many channels when the device offers one
+//!   (aggregate devices and some virtual soundcards do), a setting of the
+//!   device that outlasts the app and that other apps and Audio MIDI Setup
+//!   see. A device without one keeps its format, which the AUHAL converts
+//!   to `f32`;
 //! * **time**: every input callback's `capture` instant, the buffer's host
 //!   time (`mHostTime`) less the device's latency, in nanoseconds of the
 //!   host clock, and `Stream::now()` on the same time base;

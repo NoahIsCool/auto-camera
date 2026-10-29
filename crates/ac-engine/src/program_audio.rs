@@ -97,7 +97,8 @@ pub struct AudioInputView {
     pub name: String,
     /// Health.
     pub state: SourceState,
-    /// Why it is offline, while it is.
+    /// Why it is offline, while it is; while it runs, the trouble it
+    /// reports and delivers through (a device's discontinuities), if any.
     pub error: Option<String>,
     /// Sample rate and channel count of its newest connection, once one
     /// opened.

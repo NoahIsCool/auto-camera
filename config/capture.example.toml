@@ -42,11 +42,11 @@ fps = 30
 #   cargo run -p auto-camera --features coreaudio -- --list-audio-devices
 #
 # and paste the board's `uid` line here. A device that is not connected
-# leaves the input OFFLINE with the UIDs of the devices that are (the
-# default microphone is never opened instead), and it comes on air within
-# seconds of being plugged in. `channels` picks the stereo pair, counted
-# from 1; `channel_count`, optional, is what the device has. Then set
-# `audio_source = "board"` in [output].
+# leaves the input offline (the default microphone is never opened
+# instead), which the log says with the UIDs of the devices that are, and
+# it comes on air within seconds of being plugged in. `channels` picks the
+# stereo pair, counted from 1; `channel_count`, optional, is what the
+# device has. Then set `audio_source = "board"` in [output].
 # [[audio_inputs]]
 # id = "board"
 # name = "Soundboard"
