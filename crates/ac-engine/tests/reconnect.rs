@@ -382,7 +382,10 @@ fn the_engine_starts_with_one_of_two_sources_missing_and_runs_the_other() {
         shot: shot("stage/wide"),
     })
     .unwrap();
-    h.send(EngineCommand::Cut).unwrap();
+    h.send(EngineCommand::Cut {
+        preview: Some(shot("stage/wide")),
+    })
+    .unwrap();
     h.wait_until(WAIT, |s| s.switcher.program == Some(shot("stage/wide")))
         .expect("the stage on air");
     h.send(EngineCommand::SetPreview {
@@ -390,7 +393,9 @@ fn the_engine_starts_with_one_of_two_sources_missing_and_runs_the_other() {
     })
     .unwrap();
     assert!(matches!(
-        h.send(EngineCommand::Cut),
+        h.send(EngineCommand::Cut {
+            preview: Some(shot("later/wide")),
+        }),
         Err(CommandError::Switch(SwitchError::Unavailable(_)))
     ));
     let report = engine.shutdown().unwrap();

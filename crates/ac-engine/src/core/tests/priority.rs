@@ -380,7 +380,12 @@ fn equal_quality_suggests_the_higher_priority_query_s_shot() {
                     shot: shot("a/wide"),
                 })
                 .unwrap();
-            twins.core.apply(&EngineCommand::Cut).unwrap();
+            twins
+                .core
+                .apply(&EngineCommand::Cut {
+                    preview: Some(shot("a/wide")),
+                })
+                .unwrap();
             twins.run_secs(1.0);
             let (a, b) = (twins.qualities("a/"), twins.qualities("b/"));
             assert_eq!(a.len(), 2, "{a:?}");

@@ -83,7 +83,7 @@ fn a_panic_on_the_engine_thread_is_published() {
     assert!(h.wait_until(WAIT, |s| s.tick > u64::MAX / 2).is_none());
     assert!(started.elapsed() < Duration::from_secs(1));
     assert_eq!(
-        h.send(EngineCommand::Cut),
+        h.send(EngineCommand::Cut { preview: None }),
         Err(CommandError::Unavailable("engine stopped"))
     );
     assert!(matches!(engine.shutdown(), Err(EngineError::Panicked)));

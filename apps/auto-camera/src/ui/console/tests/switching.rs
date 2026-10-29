@@ -4,14 +4,18 @@
 //! A [`Studio`] hands every command the console returns straight to a real
 //! [`EngineCore`], as the engine thread does between ticks, and turns its
 //! reply into the notice the app would raise ([`notice_for`]), handed back
-//! on the next frame; every frame draws the core's newest snapshot. Engine
-//! time moves only when a test says so ([`advance`]), and frames only draw
-//! and apply commands, so a test decides exactly where in a transition each
-//! press lands. The studio has three synthetic sources ("a", "b", "c") and
-//! no queries, so its shots are the three wides, which need no detector; a
+//! on the next frame; every frame draws the core's newest snapshot. A
+//! lagging studio ([`Studio::lagging`]) applies each frame's commands only
+//! on the next frame, after taking the snapshot that frame draws, as the
+//! engine does a tick after the window sent them. Engine time moves only
+//! when a test says so ([`advance`]), and frames only draw and apply
+//! commands, so a test decides exactly where in a transition each press
+//! lands. The studio has three synthetic sources ("a", "b", "c") and no
+//! queries, so its shots are the three wides, which need no detector; a
 //! stalled source repeats its last frame, and its wide goes unavailable
-//! [`SOURCE_STALE_AFTER`] later. The director is off, so only the
-//! operator stages shots.
+//! [`SOURCE_STALE_AFTER`] later. The director is off, so only the operator
+//! stages shots; [`studio_with`] changes the config, and the tests of the
+//! operator's side of the director (`operator.rs`) turn it on.
 //!
 //! The rules themselves (queued takes, Cut cutting a transition short, Cut
 //! now, the T-bar's hold) are the switcher's and are tested there and in
@@ -30,9 +34,9 @@ use ac_switcher::Queued;
 use std::time::Duration;
 
 /// Frame and tick rate of the studio.
-const FPS: f64 = 30.0;
+pub(super) const FPS: f64 = 30.0;
 /// Length of the studio's mix, long enough to press keys during it.
-const MIX_SECS: f64 = 3.0;
+pub(super) const MIX_SECS: f64 = 3.0;
 
 /// One synthetic source of the studio.
 struct Feed {
@@ -47,29 +51,42 @@ struct Feed {
 }
 
 /// The window on a live engine core; see the module docs.
-struct Studio {
+pub(super) struct Studio {
     /// The console.
-    console: Console,
+    pub(super) console: Console,
     /// The engine core the console's commands go to.
-    core: EngineCore,
+    pub(super) core: EngineCore,
     /// The sources, in the core's order.
     feeds: Vec<Feed>,
     /// Notices of the replies since the last frame, handed to the console
     /// with the next.
     raised: Vec<(String, bool)>,
     /// Every command the console returned, with the core's reply.
-    sent: Vec<(EngineCommand, Result<CommandReply, CommandError>)>,
+    pub(super) sent: Vec<(EngineCommand, Result<CommandReply, CommandError>)>,
+    /// When true, each frame's commands reach the core only on the next
+    /// frame, after the snapshot that frame draws was taken, so a frame
+    /// drawn from a snapshot older than them follows every command.
+    pub(super) lagging: bool,
+    /// The last frame's commands, while lagging.
+    late: Vec<EngineCommand>,
 }
 
 impl Studio {
     /// The core's snapshot, without output or timing.
-    fn snapshot(&self) -> EngineSnapshot {
+    pub(super) fn snapshot(&self) -> EngineSnapshot {
         self.core
             .snapshot(OutputView::default(), TimingView::default(), true)
     }
 
+    /// Hands `command` to the core, keeping the reply and its notice.
+    fn apply(&mut self, command: EngineCommand) {
+        let reply = self.core.apply(&command);
+        self.raised.extend(notice_for(command.name(), &reply));
+        self.sent.push((command, reply));
+    }
+
     /// Ticks the core for `secs` seconds of frames.
-    fn tick_for(&mut self, secs: f64) {
+    pub(super) fn tick_for(&mut self, secs: f64) {
         for _ in 0..(secs * FPS).round() as usize {
             let now = Duration::from_secs_f64(self.core.ticks() as f64 / FPS);
             let feeds: Vec<SourceFeed> = self
@@ -94,6 +111,12 @@ impl Studio {
 /// A window on a fresh three-source studio whose sources have delivered
 /// for a second, so all three wides are available; nothing is on air.
 fn studio() -> Harness<'static, Studio> {
+    studio_with(|_| {})
+}
+
+/// [`studio`] with its config changed by `configure` first; with the
+/// director on, it has run for that first second too.
+pub(super) fn studio_with(configure: impl FnOnce(&mut StudioConfig)) -> Harness<'static, Studio> {
     let source = || SourceConfig::Synthetic {
         width: 64,
         height: 36,
@@ -111,6 +134,7 @@ fn studio() -> Harness<'static, Studio> {
     config.director.mode = DirectorMode::Off;
     config.output.width = 64;
     config.output.height = 36;
+    configure(&mut config);
     config.validate().expect("a valid studio");
     let feeds: Vec<Feed> = config
         .sources
@@ -140,6 +164,8 @@ fn studio() -> Harness<'static, Studio> {
         feeds,
         raised: Vec::new(),
         sent: Vec::new(),
+        lagging: false,
+        late: Vec::new(),
     };
     studio.tick_for(1.0);
     let mut h = Harness::builder()
@@ -147,11 +173,21 @@ fn studio() -> Harness<'static, Studio> {
         .build_ui_state(
             |ui, s: &mut Studio| {
                 let snap = s.snapshot();
+                // A frame egui draws twice (it discarded a pass) is still
+                // one frame.
+                if ui.ctx().current_pass_index() == 0 {
+                    for command in std::mem::take(&mut s.late) {
+                        s.apply(command);
+                    }
+                }
                 let raised = std::mem::take(&mut s.raised);
-                for command in s.console.frame(ui, &snap, raised, false) {
-                    let reply = s.core.apply(&command);
-                    s.raised.extend(notice_for(command.name(), &reply));
-                    s.sent.push((command, reply));
+                let commands = s.console.frame(ui, &snap, raised, false);
+                if s.lagging {
+                    s.late.extend(commands);
+                } else {
+                    for command in commands {
+                        s.apply(command);
+                    }
                 }
             },
             studio,
@@ -165,13 +201,13 @@ fn studio() -> Harness<'static, Studio> {
 
 /// Ticks the engine for `secs` seconds, then draws until the window
 /// settles.
-fn advance(h: &mut Harness<'_, Studio>, secs: f64) {
+pub(super) fn advance(h: &mut Harness<'_, Studio>, secs: f64) {
     h.state_mut().tick_for(secs);
     h.run();
 }
 
 /// The id of the shot of tile `index` (0-based).
-fn shot_of(h: &Harness<'_, Studio>, index: usize) -> ShotId {
+pub(super) fn shot_of(h: &Harness<'_, Studio>, index: usize) -> ShotId {
     h.state().snapshot().shots[index].id.clone()
 }
 
@@ -182,7 +218,7 @@ fn tile_of(h: &Harness<'_, Studio>, index: usize) -> String {
 }
 
 /// Takes the commands sent so far, failing on any the core refused.
-fn accepted(h: &mut Harness<'_, Studio>) -> Vec<EngineCommand> {
+pub(super) fn accepted(h: &mut Harness<'_, Studio>) -> Vec<EngineCommand> {
     std::mem::take(&mut h.state_mut().sent)
         .into_iter()
         .map(|(command, reply)| {
@@ -206,11 +242,15 @@ fn mixing_to_b(h: &mut Harness<'_, Studio>) {
             EngineCommand::SetPreview {
                 shot: shot_of(h, 0)
             },
-            EngineCommand::Cut,
+            EngineCommand::Cut {
+                preview: Some(shot_of(h, 0))
+            },
             EngineCommand::SetPreview {
                 shot: shot_of(h, 1)
             },
-            EngineCommand::Auto,
+            EngineCommand::Auto {
+                preview: Some(shot_of(h, 1))
+            },
         ]
     );
     advance(h, 0.5);
@@ -226,7 +266,9 @@ fn a_take_pressed_during_a_mix_is_queued_and_its_drop_is_shown() {
     mixing_to_b(&mut h);
     let c = shot_of(&h, 2);
     // AUTO stays live during the mix: staging "c" and pressing it queues
-    // a take of "c" for the end of the mix; nothing is refused.
+    // a take of "c" for the end of the mix; nothing is refused. Preview
+    // still shows "b", which the mix brings in, so that is what AUTO says
+    // the operator saw.
     press(&mut h, Key::Num3);
     h.get_by_label("AUTO").click();
     h.run();
@@ -234,7 +276,9 @@ fn a_take_pressed_during_a_mix_is_queued_and_its_drop_is_shown() {
         accepted(&mut h),
         [
             EngineCommand::SetPreview { shot: c.clone() },
-            EngineCommand::Auto
+            EngineCommand::Auto {
+                preview: Some(shot_of(&h, 1))
+            }
         ]
     );
     let snap = h.state().snapshot();
@@ -303,8 +347,12 @@ fn keys_during_a_mix_stage_the_next_shot_queue_a_take_and_cut_it_short() {
         accepted(&mut h),
         [
             EngineCommand::SetPreview { shot: c.clone() },
-            EngineCommand::Auto,
-            EngineCommand::Cut
+            EngineCommand::Auto {
+                preview: Some(b.clone())
+            },
+            EngineCommand::Cut {
+                preview: Some(b.clone())
+            }
         ]
     );
     // With no transition running, the keys do what the README table says:
@@ -320,9 +368,9 @@ fn keys_during_a_mix_stage_the_next_shot_queue_a_take_and_cut_it_short() {
     assert_eq!(
         accepted(&mut h),
         [
-            EngineCommand::SetPreview { shot: a },
-            EngineCommand::Cut,
-            EngineCommand::Auto
+            EngineCommand::SetPreview { shot: a.clone() },
+            EngineCommand::Cut { preview: Some(a) },
+            EngineCommand::Auto { preview: Some(b) }
         ]
     );
 }
@@ -391,7 +439,12 @@ fn while_the_tbar_holds_a_mix_cut_is_disabled_and_space_and_double_clicks_are_re
     press(&mut h, Key::Space);
     let sent = std::mem::take(&mut h.state_mut().sent);
     assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].0, EngineCommand::Cut);
+    assert_eq!(
+        sent[0].0,
+        EngineCommand::Cut {
+            preview: Some(shot_of(&h, 1))
+        }
+    );
     assert_eq!(
         sent[0].1,
         Err(CommandError::Switch(SwitchError::TBarHeld)),

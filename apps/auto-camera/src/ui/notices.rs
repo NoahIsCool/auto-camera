@@ -1,20 +1,25 @@
 //! The status bar's notice: one line telling the operator what just
 //! happened.
 //!
-//! Three things raise one: a command's reply ([`notice_for`]: routine
-//! switching replies are silent, every error is shown), a take the switcher
-//! dropped when the transition before it ended ([`dropped_notice`]), and
-//! the engine stopping ([`stopped_notice`]). The newest raised notice is
-//! shown for [`NOTICE_FOR`] and then cleared; while the engine is stopped,
-//! its notice replaces any other, since nothing else matters then.
+//! Four things raise one: a command's reply ([`notice_for`]: routine
+//! switching replies are silent, every error is shown, a take refused
+//! because preview changed after the operator saw it included, and so is
+//! the director dropping to Suggest or pausing because the operator
+//! switched by hand), a take the switcher dropped when the transition
+//! before it ended ([`dropped_notice`]), a suggestion the director did not
+//! stage because the operator's shot holds preview ([`held_back_notice`]),
+//! and the engine stopping ([`stopped_notice`]). The newest raised notice
+//! is shown for [`NOTICE_FOR`] and then cleared; while the engine is
+//! stopped, its notice replaces any other, since nothing else matters then.
 //!
 //! A take queued during a transition is answered when it is queued, so its
 //! drop can only be read from the snapshots: the switcher counts the takes
-//! it dropped and keeps the newest reason. [`Notices`] remembers the count
-//! it has seen, so each drop raises one notice however many frames draw
-//! the same snapshot, and drops counted before the window opened are not
-//! news. Several drops between two frames raise one notice, with the
-//! newest reason.
+//! it dropped and keeps the newest reason. A suggestion held back is no
+//! command's at all, so it too is read from the snapshots, where the engine
+//! counts them and keeps the newest. [`Notices`] remembers the counts it
+//! has seen, so each drop or hold raises one notice however many frames
+//! draw the same snapshot, and those counted before the window opened are
+//! not news. Several between two frames raise one notice, the newest.
 //!
 //! Time is egui's input time in seconds, which a real window reads from the
 //! clock and the test harness advances by a fixed step per frame, so the
@@ -23,6 +28,8 @@
 use std::time::Duration;
 
 use ac_engine::{CommandError, CommandReply, EngineSnapshot};
+
+use super::text::shot_name;
 
 /// How long a notice stays in the status bar.
 pub const NOTICE_FOR: Duration = Duration::from_secs(8);
@@ -38,6 +45,9 @@ pub fn notice_for(
         Ok(CommandReply::QueryAdded { id }) => Some((format!("query {} added", id.0), false)),
         Ok(CommandReply::OutputStarting) => Some(("output starting".into(), false)),
         Ok(CommandReply::OutputStopping) => Some(("output finishing".into(), false)),
+        Ok(CommandReply::TookOver(handover)) => {
+            Some((format!("{handover}, as you switched by hand"), false))
+        }
         Ok(CommandReply::Done) => match command {
             "set_preview" | "cut" | "cut_to" | "auto" | "set_tbar" | "accept_suggestion" => None,
             other => Some((format!("{other}: done"), false)),
@@ -55,6 +65,26 @@ pub fn dropped_notice(snap: &EngineSnapshot, seen: u64) -> Option<(String, bool)
     }
     let reason = switcher.last_dropped.clone()?;
     notice_for("queued take", &Err(CommandError::Switch(reason)))
+}
+
+/// The notice for a suggestion the director did not stage, since the
+/// window had seen `seen` of them, because the operator's shot holds
+/// preview; `None` when there is no new one.
+pub fn held_back_notice(snap: &EngineSnapshot, seen: u64) -> Option<(String, bool)> {
+    let d = &snap.director;
+    if d.held_back <= seen {
+        return None;
+    }
+    let suggested = d.last_held_back.as_ref()?;
+    let held = d.preview_held.as_ref()?;
+    Some((
+        format!(
+            "director: {} not staged, your {} holds preview until you take or release it",
+            shot_name(snap, Some(suggested)),
+            shot_name(snap, Some(held))
+        ),
+        false,
+    ))
 }
 
 /// The notice for an engine that is no longer running, with the reason when
@@ -88,15 +118,19 @@ pub struct Notices {
     latest: Option<Notice>,
     /// Dropped takes counted by the newest snapshot observed.
     dropped_seen: u64,
+    /// Suggestions held back counted by the newest snapshot observed.
+    held_back_seen: u64,
 }
 
 impl Notices {
     /// Notices of a window whose first snapshot is `first`: the takes it
-    /// already counts as dropped are not news.
+    /// already counts as dropped, and the suggestions as held back, are not
+    /// news.
     pub fn new(first: &EngineSnapshot) -> Self {
         Self {
             latest: None,
             dropped_seen: first.switcher.dropped_takes,
+            held_back_seen: first.director.held_back,
         }
     }
 
@@ -111,8 +145,9 @@ impl Notices {
     }
 
     /// Reads the frame's snapshot at `now`: clears a notice shown for
-    /// [`NOTICE_FOR`], then raises the notice of a take dropped since the
-    /// last snapshot.
+    /// [`NOTICE_FOR`], then raises the notice of a suggestion held back and
+    /// of a take dropped since the last snapshot (the drop last, as the
+    /// failure).
     pub fn observe(&mut self, snap: &EngineSnapshot, now: f64) {
         if self
             .latest
@@ -121,6 +156,10 @@ impl Notices {
         {
             self.latest = None;
         }
+        if let Some((text, error)) = held_back_notice(snap, self.held_back_seen) {
+            self.raise(text, error, now);
+        }
+        self.held_back_seen = snap.director.held_back;
         if let Some((text, error)) = dropped_notice(snap, self.dropped_seen) {
             self.raise(text, error, now);
         }
@@ -139,6 +178,7 @@ mod tests {
     use super::*;
     use crate::ui::fixtures::snapshot;
     use ac_core::{QueryId, ShotId};
+    use ac_director::Handover;
     use ac_switcher::SwitchError;
 
     #[test]
@@ -162,6 +202,72 @@ mod tests {
         let (text, error) =
             notice_for("auto", &Err(CommandError::Switch(SwitchError::NoPreview))).unwrap();
         assert!(error && text.starts_with("auto: "), "{text}");
+    }
+
+    #[test]
+    fn a_refused_take_and_a_takeover_are_shown() {
+        let changed = CommandError::PreviewChanged {
+            seen: Some(ShotId("mine".into())),
+            preview: Some(ShotId("theirs".into())),
+        };
+        let (text, error) = notice_for("cut", &Err(changed)).unwrap();
+        assert!(error, "{text}");
+        assert!(
+            text.starts_with("cut: preview changed to ShotId(\"theirs\")"),
+            "{text}"
+        );
+        assert_eq!(
+            notice_for(
+                "set_preview",
+                &Ok(CommandReply::TookOver(Handover::ToSuggest))
+            ),
+            Some((
+                "the director dropped to Suggest, as you switched by hand".into(),
+                false
+            ))
+        );
+        let paused = Handover::Paused(Duration::from_secs(10));
+        let (text, error) = notice_for("cut", &Ok(CommandReply::TookOver(paused))).unwrap();
+        assert!(!error && text.contains("paused for 10 s"), "{text}");
+    }
+
+    /// `snap` with `n` suggestions held back, the newest `shot`, while the
+    /// operator's `held` holds preview.
+    fn held_back(mut snap: EngineSnapshot, n: u64, shot: &str, held: &str) -> EngineSnapshot {
+        snap.director.held_back = n;
+        snap.director.last_held_back = Some(ShotId(shot.into()));
+        snap.director.preview_held = Some(ShotId(held.into()));
+        snap
+    }
+
+    #[test]
+    fn each_held_back_suggestion_raises_one_notice() {
+        let fresh = snapshot();
+        let wide = fresh.shots[0].id.0.clone();
+        let first = held_back(fresh.clone(), 2, "gone", &wide);
+        let mut notices = Notices::new(&first);
+        notices.observe(&first, 0.0);
+        assert_eq!(notices.shown(&first), None, "not news");
+        let third = held_back(fresh.clone(), 3, "gone", &wide);
+        assert_eq!(held_back_notice(&third, 3), None);
+        notices.observe(&third, 1.0);
+        let (text, error) = notices.shown(&third).unwrap();
+        assert!(!error, "{text}");
+        let name = shot_name(&third, Some(&ShotId(wide.clone())));
+        assert_eq!(
+            text,
+            format!(
+                "director: gone not staged, your {name} holds preview until you take or \
+                 release it"
+            )
+        );
+        notices.raise("pin: done".into(), false, 2.0);
+        notices.observe(&third, 3.0);
+        assert_eq!(notices.shown(&third), Some(("pin: done".into(), false)));
+        // Without a hold there is nothing to say.
+        let mut released = held_back(fresh, 4, "gone", &wide);
+        released.director.preview_held = None;
+        assert_eq!(held_back_notice(&released, 3), None);
     }
 
     #[test]

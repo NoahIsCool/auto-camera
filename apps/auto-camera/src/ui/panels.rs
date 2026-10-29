@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use ac_core::TrackState;
+use ac_core::{ShotId, TrackState};
 use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::{EngineCommand, EngineSnapshot, OutputState, PromptReader};
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -69,8 +69,12 @@ impl OutputForm {
     }
 }
 
-/// The director panel: mode, profile, suggestion and Accept.
-pub fn director(ui: &mut Ui, snap: &EngineSnapshot) -> Vec<EngineCommand> {
+/// The director panel: mode, profile, the suggestion with Accept and Skip,
+/// and the operator's hold on preview with Release. Accept and Skip name
+/// `seen`, the suggestion the operator saw (the console's, the one the last
+/// frame drew), so a suggestion that changed meanwhile is neither the one
+/// taken nor the one skipped: the engine refuses the Accept.
+pub fn director(ui: &mut Ui, snap: &EngineSnapshot, seen: Option<&ShotId>) -> Vec<EngineCommand> {
     let mut commands = Vec::new();
     let d = &snap.director;
     ui.heading("Director");
@@ -104,13 +108,46 @@ pub fn director(ui: &mut Ui, snap: &EngineSnapshot) -> Vec<EngineCommand> {
             .add_enabled(can, egui::Button::new("Accept"))
             .on_hover_text("Stage the suggestion and take it with the selected transition")
             .clicked()
+            && let Some(shot) = seen
         {
-            commands.push(EngineCommand::AcceptSuggestion);
+            commands.push(EngineCommand::AcceptSuggestion { shot: shot.clone() });
+        }
+        let skip = ui
+            .add_enabled(can, egui::Button::new("Skip"))
+            .on_hover_text(format!(
+                "Do not suggest this shot for {:.0} s",
+                d.skip.as_secs_f64()
+            ));
+        if skip.clicked()
+            && let Some(shot) = seen
+        {
+            commands.push(EngineCommand::Skip { shot: shot.clone() });
         }
         ui.label(format!("{} takes", d.takes));
     });
+    if let Some(held) = d
+        .preview_held
+        .as_ref()
+        .filter(|_| d.mode != DirectorMode::Off)
+    {
+        ui.horizontal(|ui| {
+            ui.label(format!("Preview held: {}", shot_name(snap, Some(held))))
+                .on_hover_text(HELD_HOVER);
+            if ui
+                .button("Release")
+                .on_hover_text("Hand preview back to the director")
+                .clicked()
+            {
+                commands.push(EngineCommand::ReleasePreview);
+            }
+        });
+    }
     commands
 }
+
+/// Hover text of the operator's hold on preview.
+const HELD_HOVER: &str = "You staged this shot, so the director does not stage its \
+                          suggestions over it until you take it or release it.";
 
 /// The queries panel: live queries, the add form (its prompt read with
 /// `prompts`, the engine's reader) and the subjects.
@@ -371,7 +408,7 @@ mod tests {
         let prompts = PromptReader::new(ac_core::Lexicon::builtin(), false);
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             commands.clear();
-            commands.extend(director(ui, &snap));
+            commands.extend(director(ui, &snap, snap.director.suggestion.as_ref()));
             commands.extend(queries(ui, &snap, &mut q, &prompts));
             commands.extend(output(ui, &snap, &mut o, &mut guard));
             status_bar(ui, &snap, true, Some(("cut: no preview", true)));

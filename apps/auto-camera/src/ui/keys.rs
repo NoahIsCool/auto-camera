@@ -13,6 +13,11 @@
 //! of the next shot; the switcher has the rules ([`ac_switcher`]). While
 //! the T-bar holds a transition, Space is refused with a notice.
 //!
+//! Space and Enter carry the preview the operator saw ([`command`]), so
+//! the engine refuses them when the director restaged preview in between
+//! (the window shows the refusal as a notice), and never takes a shot the
+//! operator did not look at.
+//!
 //! Shortcuts must never fire by accident during a show, so they are ignored
 //! while a widget has keyboard focus (typing a prompt must not cut, Enter
 //! ending a number must not run a transition; the window says
@@ -111,14 +116,19 @@ pub fn drops_focus(events: &[Event]) -> bool {
 }
 
 /// The engine command for `action`, given the multiview's shots in tile
-/// order; `None` when the tile does not exist.
-pub fn command(action: Action, shots: &[ShotId]) -> Option<EngineCommand> {
+/// order and the preview the operator saw (`seen`, which Cut and Auto
+/// carry); `None` when the tile does not exist.
+pub fn command(action: Action, shots: &[ShotId], seen: &Option<ShotId>) -> Option<EngineCommand> {
     match action {
         Action::Preview(i) => shots
             .get(i)
             .map(|shot| EngineCommand::SetPreview { shot: shot.clone() }),
-        Action::Cut => Some(EngineCommand::Cut),
-        Action::Auto => Some(EngineCommand::Auto),
+        Action::Cut => Some(EngineCommand::Cut {
+            preview: seen.clone(),
+        }),
+        Action::Auto => Some(EngineCommand::Auto {
+            preview: seen.clone(),
+        }),
     }
 }
 
@@ -231,16 +241,23 @@ mod tests {
     #[test]
     fn actions_map_to_commands_for_existing_tiles() {
         let list = shots(3);
+        let seen = Some(ShotId("s1".into()));
         assert_eq!(
-            command(Action::Preview(2), &list),
+            command(Action::Preview(2), &list, &seen),
             Some(EngineCommand::SetPreview {
                 shot: ShotId("s2".into())
             })
         );
-        assert_eq!(command(Action::Preview(3), &list), None);
-        assert_eq!(command(Action::Preview(0), &[]), None);
-        assert_eq!(command(Action::Cut, &[]), Some(EngineCommand::Cut));
-        assert_eq!(command(Action::Auto, &list), Some(EngineCommand::Auto));
+        assert_eq!(command(Action::Preview(3), &list, &seen), None);
+        assert_eq!(command(Action::Preview(0), &[], &None), None);
+        assert_eq!(
+            command(Action::Cut, &[], &None),
+            Some(EngineCommand::Cut { preview: None })
+        );
+        assert_eq!(
+            command(Action::Auto, &list, &seen),
+            Some(EngineCommand::Auto { preview: seen })
+        );
     }
 
     #[test]

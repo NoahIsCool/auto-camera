@@ -290,8 +290,12 @@ fn drive(
     sampler.record(&snap);
     if snap.director.mode != DirectorMode::Auto && snap.switcher.program.is_none() {
         let wide = first_wide(&snap).expect("checked above");
-        h.send(EngineCommand::SetPreview { shot: wide })
-            .and_then(|_| h.send(EngineCommand::Cut))
+        h.send(EngineCommand::SetPreview { shot: wide.clone() })
+            .and_then(|_| {
+                h.send(EngineCommand::Cut {
+                    preview: Some(wide),
+                })
+            })
             .map_err(|e| format!("cannot put a wide on program: {e}"))?;
     }
     await_detectors(|| h.snapshot(), sampler, detector_limit, quit)?;
