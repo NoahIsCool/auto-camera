@@ -689,3 +689,42 @@ fn live_queries_show_what_the_detector_is_asked_for() {
     assert!(!reordered.shot_words_overridden());
     assert!(query_hover(&query("drummer wide", false, None)).contains("\nNote: \"wide\""));
 }
+
+#[test]
+fn the_program_inputs_drift_correction_is_shown() {
+    let mut snap = snapshot();
+    assert_eq!(drift_line(&snap), None, "no audio input");
+    let board = ac_engine::AudioInputView {
+        id: ac_core::SourceId("board".into()),
+        name: "Soundboard".into(),
+        state: SourceState::Running,
+        error: None,
+        format: Some((48_000, 2)),
+        pick: None,
+        program: false,
+        blocks: 100,
+        dropped: 0,
+        unusable: 0,
+        correction_ppm: -37.26,
+        drift_resets: 0,
+    };
+    snap.audio_inputs = vec![board.clone()];
+    assert_eq!(drift_line(&snap), None, "not program audio");
+    snap.audio_inputs[0].program = true;
+    assert_eq!(
+        drift_line(&snap).as_deref(),
+        Some("Soundboard drift correction -37.3 ppm")
+    );
+    snap.audio_inputs[0].drift_resets = 1;
+    assert!(drift_line(&snap).unwrap().ends_with(" · 1 reset"));
+    snap.audio_inputs[0] = ac_engine::AudioInputView {
+        correction_ppm: 0.0,
+        drift_resets: 3,
+        ..board
+    };
+    snap.audio_inputs[0].program = true;
+    assert_eq!(
+        drift_line(&snap).as_deref(),
+        Some("Soundboard drift correction 0.0 ppm · 3 resets")
+    );
+}

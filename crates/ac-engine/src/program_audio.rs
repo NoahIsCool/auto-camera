@@ -30,16 +30,28 @@
 //!
 //! # Rate
 //!
-//! The engine does not resample: program audio reaches the encoder at the
-//! origin's own rate, as its newest connection describes it when the output
-//! starts ([`ProgramAudio::format`]), and the encoder converts it to 48 kHz
-//! AAC, so the recording and the stream are 48 kHz whatever that rate. A
+//! Program audio reaches the encoder at the origin's own nominal rate, as
+//! its newest connection describes it when the output starts
+//! ([`ProgramAudio::format`]), and the encoder converts it to 48 kHz AAC,
+//! so the recording and the stream are 48 kHz whatever that rate. A
 //! video source that has described no audio gives the output none. An
 //! audio input that has not connected yet is taken to run at
 //! [`STAND_IN_RATE`], the rate a soundboard runs at, so the recording still
 //! has its audio track and the input is heard as soon as it connects at that
 //! rate; at another rate its blocks are dropped by the pacer (its
 //! `mismatched_blocks`) until the output is started again.
+//!
+//! What the engine does correct is drift ([`ac_audio::DriftCorrector`]).
+//! An audio input on its own sample clock delivers a little more or less
+//! than its nominal rate per second of the engine's clock (100 ppm is a
+//! second over three hours); its program blocks are measured against their
+//! PTS and resampled by that much, smoothly, before the pacer, so the pacer
+//! neither fills nor cuts for it ([`AudioInputView::correction_ppm`]).
+//! Blocks within the drift's dead band pass as they are, as a file input's
+//! on the engine's clock always do; a step in the PTS (a reconnection, lost
+//! audio) is a break, not drift ([`AudioInputView::drift_resets`]). A video
+//! source's embedded audio is never resampled, and drift of the video
+//! itself is not corrected.
 //!
 //! # Ownership and threads
 //!
@@ -54,8 +66,10 @@
 //!
 //! * a stall delivers nothing for a while (the pacer fills silence), then
 //!   perhaps a burst (the pacer cuts the late backlog);
-//! * a sample clock that drifts from the engine's delivers a little more or
-//!   less than the video's share, which the pacer's fills and cuts absorb;
+//! * a sample clock that drifts from the engine's is resampled onto it, and
+//!   drift beyond the correction's limit (a thousand ppm) delivers a little
+//!   more or less than the video's share, which the pacer's fills and cuts
+//!   absorb;
 //! * blocks nobody drained in time are dropped oldest first by the input's
 //!   bounded ring ([`AudioInputView::dropped`]);
 //! * an unplugged input goes offline with its reason and comes back when
@@ -74,6 +88,10 @@ use ac_sources::{Backoff, Clock, open_supervised_audio};
 
 use crate::config::StudioConfig;
 use crate::runtime::EngineError;
+
+mod drift;
+
+use drift::InputDrift;
 
 /// The sample rate an output starts with when its audio input has not
 /// connected yet; see the module docs.
@@ -113,6 +131,13 @@ pub struct AudioInputView {
     pub dropped: u64,
     /// Program blocks dropped because they lacked the picked channels.
     pub unusable: u64,
+    /// Drift correction applied to its program blocks now, in ppm of its
+    /// rate: below zero while samples are taken out (its clock runs fast),
+    /// zero while blocks pass through as they are.
+    pub correction_ppm: f64,
+    /// Breaks in its PTS (reconnections, lost audio) and format changes
+    /// that restarted the drift measurement.
+    pub drift_resets: u64,
 }
 
 /// An opened audio input and what the engine counts of it.
@@ -127,6 +152,8 @@ pub(crate) struct InputSlot {
     blocks: u64,
     /// Program blocks without the picked channels.
     unusable: u64,
+    /// Drift correction of its program blocks.
+    drift: InputDrift,
 }
 
 impl InputSlot {
@@ -138,6 +165,7 @@ impl InputSlot {
             input,
             blocks: 0,
             unusable: 0,
+            drift: InputDrift::default(),
         }
     }
 }
@@ -228,7 +256,8 @@ impl ProgramAudio {
 
     /// Drains the audio of every one of `sources` and every input, and
     /// returns the origin's, oldest first: a video source's as it is, an
-    /// input's picked to stereo; see the module docs.
+    /// input's picked to stereo and corrected for drift; see the module
+    /// docs.
     pub fn take(&mut self, sources: &[Box<dyn VideoSource>]) -> Vec<AudioBlock> {
         let mut program = Vec::new();
         for (i, s) in sources.iter().enumerate() {
@@ -245,7 +274,7 @@ impl ProgramAudio {
             }
             for block in &blocks {
                 match stereo(slot.pick, block) {
-                    Some(picked) => program.push(picked),
+                    Some(picked) => program.extend(slot.drift.correct(picked)),
                     None => slot.unusable += 1,
                 }
             }
@@ -271,6 +300,8 @@ impl ProgramAudio {
                     blocks: slot.blocks,
                     dropped: slot.input.dropped(),
                     unusable: slot.unusable,
+                    correction_ppm: slot.drift.correction_ppm(),
+                    drift_resets: slot.drift.resets(),
                 }
             })
             .collect()

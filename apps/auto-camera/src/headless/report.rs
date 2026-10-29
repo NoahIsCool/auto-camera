@@ -20,6 +20,7 @@ use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::EngineSnapshot;
 use ac_output::{StreamHealth, StreamState};
 
+use super::audio_inputs::audio_input_summaries;
 use super::sidecar::sidecar_summary;
 use super::{
     CropRange, DetectionsSummary, DirectorSummary, HeadlessOptions, LoudnessSummary, MatchSummary,
@@ -260,6 +261,7 @@ pub(super) fn summarize(
         detections: totals.detections,
         render_issues: end.map(|s| s.render_issues.clone()).unwrap_or_default(),
         sidecar: sidecar_summary(last, end),
+        audio_inputs: audio_input_summaries(end),
     }
 }
 

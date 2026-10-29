@@ -21,7 +21,8 @@
 //! without a contact sheet. An output that streams also reports how the
 //! stream's connection stood while the output last ran, and how often it
 //! was lost and opened again (spec M14). With audio it also carries the
-//! program's loudness and peaks (spec M12).
+//! program's loudness and peaks (spec M12), and each audio input's drift
+//! correction (spec C.3; drift corrections to 0.1 ppm).
 
 use std::path::PathBuf;
 
@@ -30,6 +31,7 @@ use ac_director::{ContentProfile, DirectorMode};
 use ac_engine::ShotStatus;
 use serde::Serialize;
 
+use super::audio_inputs::AudioInputSummary;
 use super::sidecar::SidecarSummary;
 
 /// The JSON summary of a run.
@@ -79,6 +81,9 @@ pub struct Summary {
     /// The detector sidecar, when the studio has one: its state, process,
     /// model and restarts (`sidecar` module).
     pub sidecar: Option<SidecarSummary>,
+    /// The audio inputs at the end, with their drift correction; empty
+    /// without any.
+    pub audio_inputs: Vec<AudioInputSummary>,
 }
 
 /// One source in the summary.

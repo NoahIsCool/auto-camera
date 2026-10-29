@@ -7,7 +7,9 @@
 //! audio, or an audio input; [`crate::program_audio`]), which is paced by
 //! the same clock as the video but arrives in 10 ms blocks with some
 //! jitter, may stall, catches up in a burst after a stall, and (a device's
-//! own sample clock) may drift.
+//! own sample clock) may drift. An audio input's drift is resampled away
+//! before its blocks get here ([`crate::program_audio`]); drift beyond the
+//! correction's limit is absorbed below like any shortfall or surplus.
 //!
 //! # What decides lip sync
 //!

@@ -485,12 +485,28 @@ The picked channels are copied as they are; nothing is mixed. Without
 both sides at full level. A pick beyond `channel_count` fails the load; an
 input that opens without the picked channels, or with another count than
 `channel_count`, stays offline with the reason and is retried, like a
-source. The engine does not resample: program audio reaches the encoder at
-the input's own rate (48 kHz while the input has not connected), and the
-encoder converts it to 48 kHz AAC. The engine never waits on an input: a
-stall is filled with silence and the late audio after it cut, and a sample
-clock that drifts from the engine's is kept in step the same way, so the
-program stays in sync.
+source. Program audio reaches the encoder at the input's own rate (48 kHz
+while the input has not connected), and the encoder converts it to 48 kHz
+AAC. The engine never waits on an input: a stall is filled with silence
+and the late audio after it cut, so the program stays in sync.
+
+An input on its own sample clock (a board's USB interface, typically tens
+of ppm off the engine's clock; 100 ppm is a second over three hours) is
+corrected for drift: the engine measures the drift from the blocks'
+timestamps against their sample counts and resamples the input by that
+much, before the pacing above, with a band-limited (windowed-sinc)
+resampler whose ratio changes smoothly, up to 1000 ppm. In simulation a
+board 100 ppm off stays within 20 ms of the video for three hours with no
+silence inserted and nothing cut. What is not corrected: blocks within a
+dead band of 2 ppm pass through bit for bit, as a file input on the
+engine's clock always does; a step in the timestamps (a reconnection,
+audio lost in a stall) is a break, not drift, so the gap is filled with
+silence and the measurement starts again; a source's embedded audio is
+never resampled, and drift of the video itself (a camera against the
+engine) is not corrected; drift beyond 1000 ppm is left to the fills and
+cuts. The window's output panel shows the program input's correction and
+its resets, and a headless summary reports them for every input
+(`audio_inputs`: `correction_ppm`, `drift_resets`).
 
 A source's embedded audio is mixed to stereo by ffmpeg as it is decoded,
 with the matrix the encoder used on it before: a stereo track as it is, a
@@ -769,7 +785,7 @@ the program is silent. A headless run reports the session's values in
 |---|---|
 | `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
 | `ac-media` | Frames, audio blocks, the source and audio input traits, latest-frame mailboxes and audio rings, and the stereo channel pick |
-| `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak |
+| `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak; drift correction of audio inputs (drift estimator, band-limited resampler) |
 | `ac-sources` | File (ffmpeg), synthetic and capture (avfoundation, by unique ID) sources, file segments, audio-only file inputs (WAV, RF64) and a fake input that drifts and stalls, a frame-by-frame clip reader for offline tools; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector, replay of recorded detections |
 | `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
