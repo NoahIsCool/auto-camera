@@ -123,7 +123,7 @@ fn a_typo_or_an_unknown_kind_is_refused() {
             "kind = \"file\"\npath = \"b.wav\"\nloop = true\n",
             "a misspelt key",
         ),
-        ("kind = \"device\"\npath = \"b.wav\"\n", "an unknown kind"),
+        ("kind = \"mixer\"\npath = \"b.wav\"\n", "an unknown kind"),
         ("path = \"b.wav\"\n", "no kind"),
         (
             "kind = \"file\"\npath = \"b.wav\"\nchannels = [0, -1]\n",

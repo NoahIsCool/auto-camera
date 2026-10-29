@@ -99,7 +99,9 @@ pub trait AudioInput: Send {
     fn wait(&self, timeout: Duration) -> bool;
     /// Blocks dropped because they were not drained in time.
     fn dropped(&self) -> u64;
-    /// The error behind the current state, if an error is the reason.
+    /// The error behind the current state, if an error is the reason; a
+    /// running input may also report trouble it keeps delivering through
+    /// (a device's discontinuities).
     fn error(&self) -> Option<String>;
     /// Stops capturing or decoding and releases the input. Idempotent.
     fn stop(&mut self);

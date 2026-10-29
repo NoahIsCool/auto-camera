@@ -17,6 +17,10 @@
 //!   ([`AudioInput::current_info`]), so a reader learns its format.
 //! * **End.** A connection that stops without an error (a file played to
 //!   its end) is not reopened: the input is `Stopped`.
+//! * **Trouble.** A connection that keeps delivering but reports an error
+//!   (a device input's discontinuities, [`crate::audio_input::device`])
+//!   stays on: the input stays `Running` with that error shown, until a
+//!   newer one replaces it or a new connection delivers.
 //!
 //! # Sequence numbers and PTS
 //!
@@ -75,6 +79,7 @@ struct Health {
     /// The input's state.
     state: SourceState,
     /// Why the input went offline; cleared once a connection delivers.
+    /// While one delivers, the trouble it reports, if any.
     error: Option<String>,
     /// The description of the newest connection that delivered (the first
     /// connection's from the start, when `start` opened one), else the
@@ -111,6 +116,15 @@ impl Shared {
         let mut health = lock(&self.health);
         health.state = state;
         health.error = error;
+    }
+
+    /// Shows `notice`, the trouble a delivering connection reports, as the
+    /// input's error.
+    fn notice(&self, notice: String) {
+        let mut health = lock(&self.health);
+        if health.error.as_ref() != Some(&notice) {
+            health.error = Some(notice);
+        }
     }
 
     /// Marks the input `Running` on a connection described by `info`,
@@ -361,6 +375,12 @@ impl Supervisor {
             self.shared
                 .upstream_drops
                 .store(upstream, Ordering::Relaxed);
+            if !stopped
+                && up_since.is_some()
+                && let Some(notice) = input.error()
+            {
+                self.shared.notice(notice);
+            }
             if stopped && !ended {
                 match input.error() {
                     Some(error) => return Ended::Failed { error, up_since },

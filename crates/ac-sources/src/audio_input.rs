@@ -12,8 +12,10 @@
 //!   line, as the rehearsal stand-in for the board's feed: paced on the
 //!   clock as a device would deliver it, looping with PTS that keep
 //!   counting.
-//! * The board itself reaches the Mac as a USB audio interface, a CoreAudio
-//!   device; its adapter comes later behind the same trait.
+//! * [`DeviceInput`] ([`device`]) reads the board itself: its USB audio
+//!   interface, or any other CoreAudio device, named by its UID, with each
+//!   block's capture time mapped to the clock the input is paced by, in a
+//!   macOS build with the `coreaudio` feature.
 //! * [`FakeAudioInput`] ([`fake`]) is an input whose sample clock drifts,
 //!   whose blocks stall and which can be unplugged, on a plan, for testing
 //!   what reads a live input, and [`write_fake_wav`] ([`wav`]) writes its
@@ -31,6 +33,7 @@
 //!
 //! ```json
 //! {"kind": "file", "path": "board-rehearsal.wav", "loop_playback": true}
+//! {"kind": "device", "uid": "AppleUSBAudioEngine:Allen&Heath:SQ:1A2B3C:1"}
 //! ```
 //!
 //! [`open_audio_input`] opens one as a running `Box<dyn AudioInput>`, and
@@ -50,11 +53,13 @@ use serde::{Deserialize, Serialize};
 use crate::clock::Clock;
 use crate::supervisor::Backoff;
 
+pub mod device;
 pub mod fake;
 pub mod file;
 pub mod supervised;
 pub mod wav;
 
+pub use device::{AudioDevice, DeviceBackend, DeviceInput, DeviceOptions, SystemDevices};
 pub use fake::{FakeAudio, FakeAudioInput, FakeFeed, FeedState, Gap, fake_sample};
 pub use file::{AudioFileInput, AudioFileOptions};
 pub use supervised::{AudioOpener, SupervisedAudio};
@@ -74,6 +79,14 @@ pub enum AudioInputConfig {
         #[serde(default)]
         loop_playback: bool,
     },
+    /// An audio device on the Mac, such as the soundboard's USB audio
+    /// interface, by its CoreAudio UID; it opens only in a macOS build with
+    /// the `coreaudio` feature ([`device`]).
+    Device {
+        /// The device's UID, as `auto-camera --list-audio-devices` prints
+        /// it.
+        uid: String,
+    },
 }
 
 impl AudioInputConfig {
@@ -81,6 +94,7 @@ impl AudioInputConfig {
     pub fn path(&self) -> Option<&Path> {
         match self {
             AudioInputConfig::File { path, .. } => Some(path),
+            AudioInputConfig::Device { .. } => None,
         }
     }
 
@@ -88,6 +102,27 @@ impl AudioInputConfig {
     pub fn path_mut(&mut self) -> Option<&mut PathBuf> {
         match self {
             AudioInputConfig::File { path, .. } => Some(path),
+            AudioInputConfig::Device { .. } => None,
+        }
+    }
+
+    /// The device UID the input opens, if it opens a device.
+    pub fn device_uid(&self) -> Option<&str> {
+        match self {
+            AudioInputConfig::Device { uid } => Some(uid),
+            AudioInputConfig::File { .. } => None,
+        }
+    }
+
+    /// Why the config cannot describe an input, if it cannot: a device
+    /// UID that is empty. Whether the file or the device is there is not
+    /// asked.
+    pub fn problem(&self) -> Option<String> {
+        match self {
+            AudioInputConfig::Device { uid } if uid.trim().is_empty() => Some(
+                "uid must name a device; `auto-camera --list-audio-devices` prints the UIDs".into(),
+            ),
+            _ => None,
         }
     }
 }
@@ -111,6 +146,13 @@ pub fn open_audio_input(
                 id, path, options, clock,
             )?))
         }
+        AudioInputConfig::Device { uid } => Ok(Box::new(DeviceInput::open(
+            id,
+            uid,
+            &SystemDevices,
+            DeviceOptions::default(),
+            clock,
+        )?)),
     }
 }
 
