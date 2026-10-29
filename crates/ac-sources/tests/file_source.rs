@@ -9,13 +9,14 @@ mod common;
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ac_core::SourceId;
-use ac_media::{AudioBlock, MediaError, SourceState, VideoFrame, VideoSource};
+use ac_media::{AudioBlock, MediaError, SourceInfo, SourceState, VideoFrame, VideoSource};
 use ac_sources::{
-    FileOptions, FileSource, FrameRate, SourceConfig, VirtualClock, open_source, probe,
+    Backoff, FileOptions, FileSource, FrameRate, SourceConfig, SupervisedSource, VirtualClock,
+    WallClock, open_source, probe,
 };
 use common::{TempDir, make_clip, poll, tools};
 
@@ -208,6 +209,89 @@ fn stop_and_drop_leave_no_child_processes() {
         for pid in pids {
             assert!(!alive(pid), "ffmpeg {pid} outlived its source");
         }
+    }
+}
+
+/// Kills process `pid` with `SIGKILL`.
+#[cfg(unix)]
+fn kill(pid: u32) {
+    let killed = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success(), "kill {pid}");
+}
+
+/// Spec C.3: when ffmpeg dies under a running file source (killed here,
+/// first the video decoder, then on the next connection the audio one), the
+/// source fails, its supervisor opens the file again under a new epoch, and
+/// every decoder is reaped: the killed ones at once, the rest on stop.
+#[cfg(unix)]
+#[test]
+fn a_file_source_whose_ffmpeg_is_killed_restarts_and_leaves_no_child_process() {
+    let Some(tools) = tools() else { return };
+    let dir = TempDir::new("killed");
+    let clip = make_clip(&tools, &dir.0, 4.0, Some(4.0));
+    let id = SourceId("file".into());
+    // The decoders of each connection, video first.
+    let decoders: Arc<Mutex<Vec<Vec<u32>>>> = Arc::default();
+    let (opened, path, file) = (decoders.clone(), clip.clone(), id.clone());
+    let opener = move || -> Result<Box<dyn VideoSource>, MediaError> {
+        let src = FileSource::open(file.clone(), &path, opts(false))?;
+        opened.lock().unwrap().push(src.child_pids());
+        Ok(Box::new(src))
+    };
+    let offline = SourceInfo {
+        id,
+        width: 160,
+        height: 120,
+        fps: 0.0,
+        audio: None,
+    };
+    let clock = Arc::new(WallClock::new());
+    let mut src = SupervisedSource::start(opener, offline, clock, Backoff::default()).unwrap();
+    assert_eq!(src.start_error(), None);
+    let connection = |n: usize| decoders.lock().unwrap().get(n).cloned();
+    let mut frames = Vec::new();
+    for (epoch, victim, what) in [(1, 0, "video"), (2, 1, "audio")] {
+        assert!(poll(Duration::from_secs(20), || {
+            record(&src, &mut frames);
+            frames.last().is_some_and(|f| f.epoch == epoch - 1)
+                && src.state() == SourceState::Running
+        }));
+        let pids = connection(epoch as usize - 1).unwrap();
+        assert_eq!(pids.len(), 2, "video and audio decoders: {pids:?}");
+        assert!(pids.iter().all(|&p| alive(p)));
+        kill(pids[victim]);
+        // The failure shows while the supervisor backs off (0.5 s, then 1 s).
+        let message = format!("the {what} decoder exited during playback");
+        assert!(poll(Duration::from_secs(20), || {
+            src.state() == SourceState::Offline && src.error().is_some_and(|e| e.contains(&message))
+        }));
+        for pid in &pids {
+            assert!(!alive(*pid), "{pid} of a failed connection was not reaped");
+        }
+        let started = Instant::now();
+        assert!(poll(Duration::from_secs(20), || {
+            record(&src, &mut frames);
+            frames.last().is_some_and(|f| f.epoch == epoch)
+        }));
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "within the backoff"
+        );
+        assert_eq!(src.error(), None);
+    }
+    assert!(
+        frames
+            .windows(2)
+            .all(|w| w[0].seq < w[1].seq && w[0].pts < w[1].pts)
+    );
+    src.stop();
+    let all: Vec<u32> = decoders.lock().unwrap().concat();
+    assert_eq!(all.len(), 6, "three connections");
+    for pid in all {
+        assert!(!alive(pid), "ffmpeg {pid} outlived its source");
     }
 }
 

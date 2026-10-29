@@ -140,6 +140,31 @@ fn a_run_reads_as_one_line_per_change() {
 }
 
 #[test]
+fn a_source_that_goes_offline_says_why() {
+    let mut w = Watcher::default();
+    let mut snap = fixtures::snapshot();
+    snap.sources[0].state = SourceState::Offline;
+    snap.sources[0].error = Some("cannot open /shows/missing.mp4".into());
+    assert_eq!(
+        texts(&w.observe(&snap))[1],
+        "source stage (stage): 320x180 at 30 fps, offline (cannot open /shows/missing.mp4), \
+         detector loading"
+    );
+    snap.sources[0].state = SourceState::Running;
+    snap.sources[0].error = None;
+    assert_eq!(
+        texts(&w.observe(&snap)),
+        ["source stage: offline -> running"]
+    );
+    snap.sources[0].state = SourceState::Reconnecting;
+    snap.sources[0].error = Some("the video decoder exited during playback".into());
+    assert_eq!(
+        at(&w.observe(&snap), Level::WARN),
+        ["source stage: running -> reconnecting (the video decoder exited during playback)"]
+    );
+}
+
+#[test]
 fn a_clean_stop_and_a_finished_output_are_info() {
     let mut w = Watcher::default();
     let mut snap = fixtures::snapshot();

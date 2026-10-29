@@ -9,8 +9,9 @@
 //! one a few times a second ([`POLL`]), compares it with what it saw last
 //! ([`Watcher::observe`]) and logs each change worth a line: the engine
 //! starting and stopping (with the reason when it died), a source changing
-//! state, a detector becoming ready or failing, program changing, the
-//! director's mode, the output's lifecycle and the stream's connection.
+//! state (with the reason it went offline, is reconnecting or stopped), a
+//! detector becoming ready or failing, program changing, the director's
+//! mode, the output's lifecycle and the stream's connection.
 //! It also renders the snapshot's summary (`summary` module) for the crash
 //! reporter, so a crash report says what the studio was doing.
 //!
@@ -301,7 +302,7 @@ impl Watcher {
                 s.width,
                 s.height,
                 s.nominal_fps,
-                lower(&s.state),
+                state_of(s),
                 if s.discovery_enabled {
                     if s.discovery.preparing {
                         ", detector loading"
@@ -327,7 +328,7 @@ impl Watcher {
             };
             notes.push((
                 level,
-                format!("source {id}: {} -> {}", lower(&seen.state), lower(&s.state)),
+                format!("source {id}: {} -> {}", lower(&seen.state), state_of(s)),
             ));
             seen.state = s.state;
         }
@@ -443,6 +444,15 @@ fn info(text: String) -> Note {
 /// The `Debug` text of `value`, lower case: `Running` reads `running`.
 fn lower(value: &impl std::fmt::Debug) -> String {
     format!("{value:?}").to_lowercase()
+}
+
+/// The state of source `s`, with the reason it does not deliver when an
+/// error is the reason (what keeps it offline, or what stopped it).
+fn state_of(s: &SourceView) -> String {
+    match &s.error {
+        Some(error) => format!("{} ({error})", lower(&s.state)),
+        None => lower(&s.state),
+    }
 }
 
 /// The note of `n` detector errors on source `id`, the newest `error`.

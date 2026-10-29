@@ -100,19 +100,16 @@ fn switcher_line(snap: &EngineSnapshot) -> String {
     line
 }
 
-/// One source's health and its detector's.
+/// One source's health (with the reason it does not deliver, when an
+/// error is the reason) and its detector's.
 fn source_line(s: &SourceView) -> String {
+    let mut state = format!("{:?}", s.state).to_lowercase();
+    if let Some(error) = &s.error {
+        let _ = write!(state, " ({error})");
+    }
     let mut line = format!(
         "source {} ({}): {}, {:.1} of {} fps, {}x{}, {} subjects, {} frames missed",
-        s.id.0,
-        s.name,
-        format!("{:?}", s.state).to_lowercase(),
-        s.fps,
-        s.nominal_fps,
-        s.width,
-        s.height,
-        s.subjects,
-        s.missed
+        s.id.0, s.name, state, s.fps, s.nominal_fps, s.width, s.height, s.subjects, s.missed
     );
     if !s.discovery_enabled {
         line.push_str("; no detector");
@@ -201,6 +198,7 @@ fn sidecar_line(s: &HostStatus) -> String {
 #[cfg(test)]
 mod tests {
     use ac_core::{ShotId, SourceId};
+    use ac_media::SourceState;
     use ac_output::{EncoderChoice, EncoderStats, Progress, StreamHealth, StreamState};
 
     use super::*;
@@ -240,6 +238,8 @@ mod tests {
         snap.sources[0].discovery.preparing = false;
         snap.sources[0].discovery.errors = 3;
         snap.sources[0].discovery.last_error = Some("refused\nthree times".into());
+        snap.sources[0].state = SourceState::Offline;
+        snap.sources[0].error = Some("cannot open /shows/a.mp4".into());
         snap.output.state = OutputState::Failed("ffmpeg exited".into());
         snap.output.rtmp_url = Some("rtmp://host/live/<redacted>".into());
         snap.output.stats = Some(EncoderStats {
@@ -278,6 +278,11 @@ mod tests {
             )),
             "{}",
             lines[2]
+        );
+        assert!(
+            lines[3].starts_with("source stage (stage): offline (cannot open /shows/a.mp4), "),
+            "{}",
+            lines[3]
         );
         assert!(
             lines[3].ends_with("; detector ready, 0 applied, 0 stale, 3 errors, 0 timeouts, last error: refused\\nthree times"),

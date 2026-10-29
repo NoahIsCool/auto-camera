@@ -22,6 +22,14 @@
 //! pass's audio is trimmed or padded to the video's pass, so A/V stay locked
 //! however long the file loops.
 //!
+//! A decoder's output ending is end of input only if the decoder then exits
+//! successfully. One that was killed or crashed lost the input: the source
+//! fails with that exit status as its error, and the failure stops the whole
+//! source (both workers and every child), so a supervisor
+//! ([`crate::supervisor`]) can open it again from the start. A plain looping
+//! source would otherwise take a killed decoder for the end of the file and
+//! carry on, and a plain one-shot source would end as if the file had.
+//!
 //! Shutdown: [`VideoSource::stop`] raises the stop flag, kills every child (which
 //! unblocks any worker stuck reading a pipe), joins the workers and reaps the
 //! children. Dropping a source stops it, so no ffmpeg process outlives its
@@ -34,6 +42,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use ac_core::SourceId;
 use ac_media::{
@@ -46,7 +55,7 @@ use crate::ffmpeg::{audio_args, command, output_size, video_args};
 use crate::frame_rate::FrameRate;
 use crate::pool::FramePool;
 use crate::probe::{FFMPEG_ENV, FfmpegTools, ProbeInfo, probe};
-use crate::process::{Children, Respawner, Spawned, read_full};
+use crate::process::{Children, END_GRACE, Respawner, Spawned, read_full};
 use crate::status::{CloseOnDrop, Status, VideoProgress};
 
 /// Default capacity of the audio queue: 256 blocks, about 2.5 s.
@@ -109,6 +118,13 @@ impl Shared {
         self.stop.store(true, Ordering::Release);
         self.progress.close();
         self.children.close();
+    }
+
+    /// Stops the source because of `message` (unless an earlier error is
+    /// kept): a failed decoder stops both workers and every child.
+    pub(crate) fn fail(&self, message: impl Into<String>) {
+        self.status.fail(message);
+        self.request_stop();
     }
 }
 
@@ -253,11 +269,6 @@ impl FileSource {
         self.shared.audio.dropped()
     }
 
-    /// The error that stopped the source, if it stopped because of one.
-    pub fn error(&self) -> Option<String> {
-        self.shared.status.error()
-    }
-
     /// Process ids of the running ffmpeg children (empty once stopped).
     pub fn child_pids(&self) -> Vec<u32> {
         self.shared.children.pids()
@@ -277,8 +288,16 @@ impl VideoSource for FileSource {
         self.shared.latest.get()
     }
 
+    fn wait_newer(&self, after: Option<u64>, timeout: Duration) -> Option<VideoFrame> {
+        self.shared.latest.wait_newer(after, timeout)
+    }
+
     fn drain_audio(&self) -> Vec<AudioBlock> {
         self.shared.audio.drain()
+    }
+
+    fn error(&self) -> Option<String> {
+        self.shared.status.error()
     }
 
     fn stop(&mut self) {
@@ -326,7 +345,7 @@ impl VideoWorker {
                 Ok(Some(d)) => d,
                 Ok(None) => break,
                 Err(e) => {
-                    shared.status.fail(format!("cannot restart ffmpeg: {e}"));
+                    shared.fail(format!("cannot restart ffmpeg: {e}"));
                     break;
                 }
             };
@@ -360,40 +379,43 @@ impl VideoWorker {
                 shared.progress.frame_published(pass, self.rate.pts(seq));
             }
             let produced = seq > first;
-            if self.looping && produced && failure.is_none() && !shared.stopping() {
-                // Announce the loop point before reaping the old decoder: the
-                // audio worker may be waiting on it.
-                shared.progress.pass_ended(self.rate.pts(seq));
-                pass += 1;
-            }
-            // A decoder that closed its output without a frame is exiting, and
-            // is waited for, for its status; any other is done (or stopping)
-            // and killing it is immediate. Either way it is gone before its
-            // pipe closes (see `crate::process`).
-            let exit = if !produced && failure.is_none() && !shared.stopping() {
-                shared.children.finish(key)
-            } else {
+            // A decoder cut off by a stop or a failure is killed. One whose
+            // output ended is waited for, for its exit status: briefly when it
+            // produced frames (it exits at once), longer when it produced none.
+            // Either way it is gone before its pipe closes (see
+            // `crate::process`).
+            let exit = if shared.stopping() || failure.is_some() {
                 shared.children.kill(key);
                 None
+            } else if produced {
+                shared.children.finish_within(key, END_GRACE)
+            } else {
+                shared.children.finish(key)
             };
             drop(stdout);
             if shared.stopping() {
                 break;
             }
+            if produced && let Some(status) = exit.filter(|s| !s.success()) {
+                failure.get_or_insert(format!(
+                    "the video decoder exited during playback ({status})"
+                ));
+            }
             if let Some(message) = failure {
-                shared.status.fail(message);
+                shared.fail(message);
                 break;
             }
             if !produced {
                 let exit = exit.map_or("killed".to_string(), |s| s.to_string());
-                shared
-                    .status
-                    .fail(format!("ffmpeg decoded no frames ({exit})"));
+                shared.fail(format!("ffmpeg decoded no frames ({exit})"));
                 break;
             }
             if !self.looping {
                 break;
             }
+            // The audio worker may be waiting for the loop point.
+            shared.progress.pass_ended(self.rate.pts(seq));
+            pass += 1;
         }
         self.decoder.discard(&shared.children);
         shared.status.advance(SourceState::Stopped);

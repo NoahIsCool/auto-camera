@@ -38,6 +38,12 @@ const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// Poll interval while waiting for a child to exit.
 const EXIT_POLL: Duration = Duration::from_millis(5);
 
+/// How long a decoder whose output ended may take to exit before it is taken
+/// as finished. ffmpeg exits within a millisecond of closing its output; the
+/// wait is for its exit status, which tells end of input (success) from a
+/// decoder that was killed or crashed (the input was lost).
+pub(crate) const END_GRACE: Duration = Duration::from_millis(250);
+
 /// A child process started through [`Children::spawn`].
 #[derive(Debug)]
 pub(crate) struct Spawned {
@@ -104,7 +110,13 @@ impl Children {
     /// killing it after a grace period, and returns its exit status. `None`
     /// when the child was already taken by [`Children::close`] or killed.
     pub(crate) fn finish(&self, key: u64) -> Option<ExitStatus> {
-        let deadline = Instant::now() + EXIT_GRACE;
+        self.finish_within(key, EXIT_GRACE)
+    }
+
+    /// [`Children::finish`] with a grace period of `grace`; `None` also when
+    /// the child had not exited by then (it is killed and reaped).
+    pub(crate) fn finish_within(&self, key: u64, grace: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + grace;
         loop {
             {
                 let mut reg = lock(&self.inner);
@@ -330,6 +342,35 @@ mod tests {
         let mut out = s.stdout;
         assert_eq!(read_full(&mut out, &mut [0u8; 8]).unwrap(), 0);
         assert!(children.finish(s.key).unwrap().success());
+        assert!(children.pids().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_child_reports_the_signal_and_a_hung_one_is_killed() {
+        use std::os::unix::process::ExitStatusExt;
+        let children = Children::new();
+        let mut sleep = Command::new("sleep");
+        sleep.arg("30");
+        let victim = children.spawn(&mut sleep).unwrap().unwrap();
+        let pid = children.pids()[0];
+        let killed = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        let status = children.finish_within(victim.key, Duration::from_secs(10));
+        assert_eq!(status.and_then(|s| s.signal()), Some(9));
+        assert!(!alive(pid), "reaped");
+        let hung = children.spawn(&mut sleep).unwrap().unwrap();
+        let pid = children.pids()[0];
+        let started = Instant::now();
+        assert_eq!(
+            children.finish_within(hung.key, Duration::from_millis(30)),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!alive(pid), "killed and reaped after the grace");
         assert!(children.pids().is_empty());
     }
 

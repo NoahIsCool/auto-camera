@@ -2,7 +2,8 @@
 //! demo studio (synthetic, no camera, model or network) with `--log-dir`
 //! set to a temporary folder, must leave a log there that says which build
 //! ran which config, what the studio did and that the app exited, and no
-//! crash report. Two runs at once on one folder write a log each.
+//! crash report. What the app prints on stderr is in that log too. Two runs
+//! at once on one folder write a log each.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -130,6 +131,49 @@ fn a_headless_run_leaves_a_log_that_says_what_ran() {
     );
     assert!(!log.contains(" ERROR "), "{log}");
     assert!(named(&logs, "crash-").is_empty());
+}
+
+#[test]
+fn what_the_app_prints_on_stderr_is_in_its_log_too() {
+    let dir = TempDir::new("stderr");
+    let out = Command::new(APP)
+        .args([
+            "--config",
+            DEMO,
+            "--headless",
+            "--seconds",
+            "1",
+            "--log-dir",
+        ])
+        .arg(&dir.0)
+        .stdin(Stdio::null())
+        .output()
+        .expect("the app runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let log = std::fs::read_to_string(dir.0.join("auto-camera.log")).expect("a log");
+    let notes: Vec<&str> = stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("auto-camera: "))
+        .map(|n| n.strip_prefix("warning: ").unwrap_or(n))
+        .collect();
+    for note in &notes {
+        assert!(
+            log.lines()
+                .any(|l| l.contains(" WARN  ") && l.ends_with(note)),
+            "{note:?} is not a warning in the log: {log}"
+        );
+    }
+    // Only macOS has `caffeinate`: elsewhere a run says it is not kept
+    // awake, which is the note checked here.
+    if !cfg!(target_os = "macos") {
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.starts_with("not keeping the system awake while live: ")),
+            "{stderr}"
+        );
+    }
 }
 
 #[test]

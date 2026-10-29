@@ -6,7 +6,8 @@
 //! [`WAIT_SLICE`] at a time. A tick applies the pending commands, feeds the
 //! core the newest frame of every source and the discovery results that
 //! arrived, hands the core's requests to the workers, pushes the program
-//! frame and audio to the output, and publishes a snapshot. The frame the
+//! frame and audio to the output, sends the tick's trace record (when the
+//! engine traces; [`crate::trace`]) and publishes a snapshot. The frame the
 //! tick read from the phase reference (the program audio source, else the
 //! first source) goes to the [`PhaseLock`], which delays the schedule when
 //! ticks collide with that source's frames (see [`crate::schedule`]).
@@ -24,6 +25,8 @@
 use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
+
+use ac_output::AudioFormat;
 
 use super::{EngineReport, Runtime};
 use crate::command::{CommandReply, EngineCommand};
@@ -92,6 +95,7 @@ impl Runtime {
             self.timer.record(started.elapsed());
             self.late += u64::from(late);
             self.skipped += skipped;
+            self.send_trace(late, skipped);
             self.publish(true);
         }
         self.shutdown()
@@ -111,9 +115,11 @@ impl Runtime {
                 EngineCommand::StartOutput {
                     rtmp_url,
                     record_path,
-                } => self
-                    .output
-                    .start(rtmp_url.clone(), record_path.clone(), self.audio_format),
+                } => {
+                    let audio = self.program_audio_format();
+                    self.output
+                        .start(rtmp_url.clone(), record_path.clone(), audio)
+                }
                 EngineCommand::StopOutput => self.output.stop(),
                 other => self.core.apply(other),
             };
@@ -124,6 +130,20 @@ impl Runtime {
                 return true;
             }
         }
+    }
+
+    /// The format of program audio for an output starting now: the audio
+    /// source's, as its newest connection describes it, so a source that
+    /// was missing when the engine started gives the program its audio
+    /// once it has been on air. `None` without an audio source, or while
+    /// it has given no description with audio.
+    fn program_audio_format(&self) -> Option<AudioFormat> {
+        let source = self.sources.get(self.audio_source?)?;
+        let (sample_rate, channels) = source.current_info().audio?;
+        Some(AudioFormat {
+            sample_rate,
+            channels,
+        })
     }
 
     /// One tick: feed the core, dispatch discovery, push the program
@@ -142,6 +162,10 @@ impl Runtime {
                 state: s.state(),
                 frame: s.latest(),
                 detector_loading: w.as_mut().is_some_and(DiscoveryWorker::is_loading),
+                error: s.error(),
+                // After `frame` (fields are evaluated in order), so it
+                // describes that frame's connection or a newer one.
+                info: Some(s.current_info()),
             })
             .collect();
         let reference = feeds
@@ -163,6 +187,18 @@ impl Runtime {
         }
         self.output.push(&out.program, program_audio, skipped);
         reference
+    }
+
+    /// Sends the trace record of the tick just run, with the clock's word
+    /// on it: it started `late`, after `skipped` skipped ticks.
+    fn send_trace(&mut self, late: bool, skipped: u64) {
+        if !self.trace.is_on() {
+            return;
+        }
+        let mut record = self.core.trace_record();
+        record.late = late;
+        record.skipped = skipped;
+        self.trace.send(record);
     }
 
     /// Publishes the current snapshot and returns it.

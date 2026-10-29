@@ -67,6 +67,8 @@ pub struct Summary {
     pub timing: TimingSummary,
     /// The output session, when one was started.
     pub output: Option<OutputSummary>,
+    /// The per-tick trace, with `--trace` and an engine that started.
+    pub trace: Option<TraceSummary>,
     /// Shots that should have been on program but were drawn black.
     pub render_issues: Vec<String>,
     /// The detector sidecar, when the studio has one: its state, process,
@@ -79,6 +81,13 @@ pub struct Summary {
 pub struct SourceSummary {
     /// Source id.
     pub id: String,
+    /// Health at the run's last tick: `starting`, `running`, `offline` or
+    /// `reconnecting` (its input lost or not there yet, and retried), or
+    /// `stopped`.
+    pub state: String,
+    /// What kept the source from delivering at the run's last tick (a file
+    /// that is not there, a lost input); `null` while it delivered.
+    pub error: Option<String>,
     /// Picture size.
     pub size: [u32; 2],
     /// Frame rate measured over the last second.
@@ -286,4 +295,16 @@ pub struct StreamSummary {
     /// What the ingest took over the newest two seconds of media, in
     /// kbit/s to one decimal; `null` when this ffmpeg cannot tell.
     pub bitrate_kbps: Option<f64>,
+}
+
+/// The per-tick trace in the summary.
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceSummary {
+    /// The trace file.
+    pub path: PathBuf,
+    /// Lines written, one per tick.
+    pub records: u64,
+    /// Ticks without a line: dropped because the writer fell behind, or
+    /// never written after a write error. `records + missing` is `ticks`.
+    pub missing: u64,
 }

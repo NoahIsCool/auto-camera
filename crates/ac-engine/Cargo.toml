@@ -14,6 +14,7 @@ onnx = ["ac-vision/onnx"]
 
 [dependencies]
 ac-core.workspace = true
+ac-eval.workspace = true
 ac-media.workspace = true
 ac-sources.workspace = true
 ac-vision.workspace = true

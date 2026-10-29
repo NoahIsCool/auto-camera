@@ -20,6 +20,11 @@
 //! * The core crates (and the engine) log nothing: their state reaches
 //!   the log as data, through the snapshot watcher ([`watch`]), which
 //!   logs each change worth a line and keeps the crash summary current.
+//! * The app logs its own warnings and errors beside printing them on
+//!   stderr, since a window started from the Finder has no terminal: the
+//!   config's warnings, errors that end a run, a system not kept awake
+//!   while live (`awake`), a termination signal and an engine that did not
+//!   shut down cleanly; and how a headless run ended.
 //! * This module installs the one subscriber (`writer`: one line per
 //!   event, queued without blocking, written by one thread into the
 //!   rotating file of `file`), the panic hook (`crash`), and writes the

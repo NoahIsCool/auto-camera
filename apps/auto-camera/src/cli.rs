@@ -1,17 +1,21 @@
 //! Command-line interface.
 //!
 //! ```text
-//! auto-camera [--config PATH]                                   # operator window
-//! auto-camera [--config PATH] --headless [--seconds N] [--record PATH]
+//! auto-camera [--config PATH] [--trace PATH]                    # operator window
+//! auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
+//! auto-camera [--config PATH] --check                           # readiness check
 //! ```
 //!
-//! Both take `--log-dir PATH`, the folder for the log and crash reports
-//! (the per-user log folder when absent; see the `logs` module).
+//! The window and headless runs take `--log-dir PATH`, the folder for the
+//! log and crash reports (the per-user log folder when absent; see the
+//! `logs` module).
 //!
 //! The headless options are only accepted together with `--headless`, so a
-//! typo cannot silently open a window that records nothing. The config path
-//! defaults to the demo studio relative to the working directory, which is
-//! the repository root under `cargo run`.
+//! typo cannot silently open a window that records nothing, and `--check`
+//! is accepted only on its own, since it starts nothing. `--trace` works in
+//! both other modes: it writes the engine's per-tick trace as JSON Lines
+//! ([`crate::trace`]). The config path defaults to the demo studio relative
+//! to the working directory, which is the repository root under `cargo run`.
 
 use std::path::PathBuf;
 
@@ -50,6 +54,18 @@ pub struct Cli {
     /// Record program to this MP4 during a headless run; it must not exist.
     #[arg(long, value_name = "PATH", requires = "headless")]
     pub record: Option<PathBuf>,
+    /// Write one JSON line per engine tick (subjects, shot targets and
+    /// crops, program and preview) to this file; it must not exist.
+    #[arg(long, value_name = "PATH")]
+    pub trace: Option<PathBuf>,
+    /// Check the studio without starting it: list the problems with the
+    /// config and the files, tools and folders it names, then exit 0 when
+    /// there is none and 2 otherwise.
+    #[arg(
+        long,
+        conflicts_with_all = ["headless", "seconds", "record", "trace", "log_dir"]
+    )]
+    pub check: bool,
     /// Folder for the log and crash reports [default:
     /// ~/Library/Logs/auto-camera on macOS, $XDG_STATE_HOME/auto-camera or
     /// ~/.local/state/auto-camera on Linux].
@@ -84,8 +100,39 @@ mod tests {
         let cli = parse(&[]).unwrap();
         assert_eq!(cli.config, PathBuf::from(DEFAULT_CONFIG));
         assert!(!cli.headless);
+        assert!(!cli.check);
         assert_eq!(cli.record, None);
+        assert_eq!(cli.trace, None);
         assert_eq!(cli.log_dir, None);
+    }
+
+    #[test]
+    fn both_modes_take_a_trace() {
+        let window = parse(&["--trace", "/tmp/t.jsonl"]).unwrap();
+        assert!(!window.headless);
+        assert_eq!(window.trace, Some(PathBuf::from("/tmp/t.jsonl")));
+        let headless = parse(&["--headless", "--trace", "t.jsonl"]).unwrap();
+        assert_eq!(headless.trace, Some(PathBuf::from("t.jsonl")));
+        assert!(parse(&["--trace"]).is_err(), "a path is required");
+    }
+
+    #[test]
+    fn check_runs_alone() {
+        let cli = parse(&["--check", "--config", "show.toml"]).unwrap();
+        assert!(cli.check && !cli.headless);
+        assert_eq!(cli.config, PathBuf::from("show.toml"));
+        assert!(parse(&["--check"]).unwrap().check);
+        assert!(parse(&["--check", "--headless"]).is_err());
+        assert!(parse(&["--check", "--record", "x.mp4"]).is_err());
+        assert!(parse(&["--check", "--seconds", "3"]).is_err());
+    }
+
+    #[test]
+    fn check_takes_no_trace_or_log() {
+        // A check starts no engine, so there is no trace to write.
+        assert!(parse(&["--check", "--trace", "t.jsonl"]).is_err());
+        // Nor does it keep a log.
+        assert!(parse(&["--check", "--log-dir", "logs"]).is_err());
     }
 
     #[test]

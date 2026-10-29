@@ -42,6 +42,7 @@ pub fn studio(subjects: u32) -> StudioConfig {
             PresetSpec::Size(ShotSize::Close),
         ]),
         literal: false,
+        priority: None,
     });
     c.output.width = 320;
     c.output.height = 180;
