@@ -519,17 +519,18 @@ stays off for four blocks or more (spanning at least 6 ms, should its
 blocks be shorter than 2 ms) is taken for a step and made up, then taken
 back once four blocks confirm the way back: two short edits of its size
 (silence and a cut), audio off by that much for about as long as the stray
-lasted, and no lasting offset. What is not corrected: blocks within a dead
-band of 2 ppm pass through bit for bit, as a file input on the engine's
-clock always does; a source's embedded audio is never resampled, and drift
-of the video itself (a camera against the engine) is not corrected; drift
-beyond 1000 ppm is left to the fills and cuts. The window's output panel
-shows the program input's correction, its resets and the steps made up,
-with the trouble a running input delivered through (a device's
-discontinuities) on a weak line under it (while the input is not running,
-its state and why instead, in amber, and while it is not heard for its
-rate, only why), and a headless summary reports them for every input
-(`audio_inputs`: `id`, `name`, `program`, `correction_ppm`,
+lasted, and no lasting offset (audio the pacing drops at its 100 ms limit
+while that silence is in is given back once it is out). What is not
+corrected: blocks within a dead band of 2 ppm pass through bit for bit, as
+a file input on the engine's clock always does; a source's embedded audio
+is never resampled, and drift of the video itself (a camera against the
+engine) is not corrected; drift beyond 1000 ppm is left to the fills and
+cuts. The window's output panel shows the program input's correction, its
+resets and the steps made up, with the trouble a running input delivered
+through (a device's discontinuities) on a weak line under it (while the
+input is not running, its state and why instead, in amber, and while it is
+not heard for its rate, only why), and a headless summary reports them for
+every input (`audio_inputs`: `id`, `name`, `program`, `correction_ppm`,
 `drift_resets`, `drift_steps`).
 
 On the Mac the board is an input of `kind = "device"`: its USB audio

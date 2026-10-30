@@ -75,7 +75,26 @@
 //!   cut stops there.
 //! * **Bursts.** Otherwise, whole blocks that would put the lead above
 //!   `max_lead` are dropped, oldest first, so the newest audio is always
-//!   kept and no burst can leave audio more than `max_lead` late.
+//!   kept and no burst can leave audio more than `max_lead` late. Whole
+//!   blocks keep the drops rare for a source that runs fast: one block now
+//!   and then, not a few frames on every tick.
+//! * **Credit.** Not everything that lifts the lead past `max_lead` is
+//!   late audio. A drift corrector makes up a step in a device's PTS with
+//!   silence, and takes that silence out again a few blocks later when
+//!   the step was a glitch of the timestamps ([`crate::program_audio`]):
+//!   a step that, with the lead it comes on, is more than `max_lead` puts
+//!   the lead over the limit for those blocks, and the blocks dropped
+//!   then would leave the program that much early once the silence is
+//!   gone. So the frames dropped are kept as *credit*, for
+//!   [`RECOVERY_WINDOW`] after the latest drop, and given back as
+//!   silence, all of it at once and before the tick's blocks, on the
+//!   first tick that brings audio, owes no silence, and has room for it
+//!   with the lead within half of `max_lead`: the lead is then where it
+//!   was before the step. A real burst's audio keeps the lead near the
+//!   limit, so its credit is never given back and is forgotten after the
+//!   window; the half of the limit left free keeps the silence given back
+//!   from tripping the limit again. A lead already beyond half the limit
+//!   before such a step keeps the loss.
 //! * Blocks in another format than the encoder was opened with are dropped.
 //!
 //! The slack keeps ordinary block jitter from inserting silence and
@@ -89,7 +108,9 @@ use std::time::Duration;
 use ac_media::AudioBlock;
 
 /// How long owed silence waits for a stall's backlog (after the last
-/// silence or the last cut) before it is forgiven.
+/// silence or the last cut) before it is forgiven, and audio dropped at the
+/// lead limit waits to be given back (after the last drop) before it is
+/// forgotten.
 pub const RECOVERY_WINDOW: Duration = Duration::from_secs(1);
 
 /// How far ahead of video audio may run, while silence is owed, before the
@@ -112,7 +133,8 @@ pub enum PacedAudio {
 pub struct AudioPacerStats {
     /// Sample frames of source audio pushed.
     pub pushed: u64,
-    /// Sample frames of silence pushed.
+    /// Sample frames of silence pushed: gaps filled, and credit given
+    /// back.
     pub silence: u64,
     /// Sample frames of source audio dropped: late backlog cut to repay
     /// silence, and bursts beyond the lead limit.
@@ -151,6 +173,11 @@ pub struct AudioPacer {
     /// The latest tick inserted silence and had no audio: the next audio
     /// that arrives resumes the stream.
     starved: bool,
+    /// Sample frames dropped beyond the lead limit and not yet given back
+    /// as silence.
+    credit: u64,
+    /// Target after which the credit is forgotten.
+    credit_until: u64,
     /// Counters.
     stats: AudioPacerStats,
 }
@@ -171,6 +198,8 @@ impl AudioPacer {
             owed_until: 0,
             repaying: 0,
             starved: false,
+            credit: 0,
+            credit_until: 0,
             stats: AudioPacerStats::default(),
         }
     }
@@ -193,6 +222,9 @@ impl AudioPacer {
         if target > self.owed_until {
             (self.owed, self.repaying) = (0, 0);
         }
+        if target > self.credit_until {
+            self.credit = 0;
+        }
         let mut kept = Vec::with_capacity(blocks.len());
         for block in blocks {
             if block.sample_rate != self.rate || block.channels != self.channels {
@@ -201,7 +233,7 @@ impl AudioPacer {
                 kept.push(block);
             }
         }
-        let have = self.stats.pushed + self.stats.silence;
+        let mut have = self.stats.pushed + self.stats.silence;
         let mut incoming: u64 = kept.iter().map(|b| b.frames() as u64).sum();
         let resuming = self.starved && incoming > 0;
         let tolerated = if resuming { 0 } else { self.slack };
@@ -241,6 +273,19 @@ impl AudioPacer {
                 self.repaying = self.repaying.saturating_sub(n);
                 self.owed_until = target.saturating_add(self.recovery);
             }
+            // Credit given back, all at once, where it leaves the lead
+            // within half the limit.
+            let room = target.saturating_add(self.max_lead / 2);
+            if self.credit > 0
+                && self.owed == 0
+                && incoming > 0
+                && have + incoming + self.credit <= room
+            {
+                out.push(PacedAudio::Silence(self.credit));
+                self.stats.silence += self.credit;
+                have += self.credit;
+                self.credit = 0;
+            }
             // Oldest first: the whole blocks a burst beyond the lead limit
             // drops, and how many sample frames remain after dropping them.
             let mut cut = 0;
@@ -248,6 +293,8 @@ impl AudioPacer {
                 let n = kept[cut].frames() as u64;
                 (incoming, cut) = (incoming - n, cut + 1);
                 self.stats.dropped += n;
+                self.credit = self.credit.saturating_add(n);
+                self.credit_until = target.saturating_add(self.recovery);
             }
             kept.drain(..cut);
         }

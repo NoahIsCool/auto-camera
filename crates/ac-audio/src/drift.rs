@@ -24,19 +24,20 @@
 //!
 //! # Filtering jitter
 //!
-//! A device's PTS jitters by its driver's scheduling, a millisecond or so,
-//! which is a lot against drift of 10⁻⁴ (a tenth of a millisecond per
-//! second). The estimator fits a straight line `u ≈ û + v̂·(x − x_latest)`
-//! to the epoch's blocks by least squares, each block weighed by the input
-//! time it covers and by `e^(−age/τ)`, its age along input time over the
-//! fit's memory `τ` ([`DriftSettings::smoothing`], 20 s): the
-//! fading-memory polynomial filter of first order, solved exactly from the
-//! epoch's first block on (so it has no start-up transient: exact PTS give
-//! the exact slope from the second block, and blocks of any length are
-//! weighed by the time they cover) and kept as running sums about the
-//! latest block (so their values stay small over a show of any length).
-//! Jitter of a millisecond leaves a few tenths of a part per million in
-//! `v̂`.
+//! A device's PTS jitter by how its driver stamps them, from tens of
+//! microseconds (CoreAudio's host times) to a millisecond or so (a driver
+//! that stamps by its scheduling), which is a lot against drift of 10⁻⁴ (a
+//! tenth of a millisecond per second). The estimator fits a straight line
+//! `u ≈ û + v̂·(x − x_latest)` to the epoch's blocks by least squares, each
+//! block weighed by the input time it covers and by `e^(−age/τ)`, its age
+//! along input time over the fit's memory `τ`
+//! ([`DriftSettings::smoothing`], 20 s): the fading-memory polynomial
+//! filter of first order, solved exactly from the epoch's first block on
+//! (so it has no start-up transient: exact PTS give the exact slope from
+//! the second block, and blocks of any length are weighed by the time they
+//! cover) and kept as running sums about the latest block (so their values
+//! stay small over a show of any length). Jitter of a millisecond leaves a
+//! few tenths of a part per million in `v̂`.
 //!
 //! The fit also reports how far its slope can be trusted
 //! ([`DriftEstimator::drift_uncertainty_ppm`]): the standard error of `v̂`,
