@@ -49,6 +49,7 @@ fn open_name(opened: Option<f64>) -> String {
     }
 }
 
+/// A first buffer's timestamp error cannot hide or invent a later loss.
 #[test]
 fn m8_a_first_buffer_stamped_off_is_not_reported_and_a_loss_after_it_is_made_up_once() {
     let mut card = Card::new("M8 first buffer off by ±3 to 30 ms");
@@ -119,6 +120,7 @@ fn m8_a_first_buffer_stamped_off_is_not_reported_and_a_loss_after_it_is_made_up_
     card.finish();
 }
 
+/// A second-buffer glitch is reported only as a glitch beyond tolerance.
 #[test]
 fn m9_a_glitch_of_the_second_buffer_is_no_rewind_and_no_gap() {
     let mut card = Card::new("M9 second buffer's glitch of ±3 to 30 ms");
@@ -144,6 +146,16 @@ fn m9_a_glitch_of_the_second_buffer_is_no_rewind_and_no_gap() {
                         } else {
                             judge.require("no glitch", notices.glitches.is_empty());
                         }
+                        // One run may start resampling while its twin
+                        // stays inside the dead band. Allow the retained
+                        // half kernel and one sample's rounding, not a
+                        // lasting timestamp-sized edit.
+                        let filter_ms = (HALF_TAPS + 1) as f64 * 1000.0 / f64::from(rate);
+                        judge.at_most(
+                            "lasting lead offset (ms)",
+                            run.apart(&twin, 2.0),
+                            filter_ms.max(0.5),
+                        );
                         let case = format!(
                             "{by:+} ms, {rate} Hz, {frames} frames, {}",
                             open_name(opened)

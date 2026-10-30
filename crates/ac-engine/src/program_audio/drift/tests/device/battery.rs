@@ -36,6 +36,9 @@
 //!   frames it edited, silence put in less audio cut plus what resampling
 //!   changed, are printed);
 //! * the pacer's silence and drops;
+//! * *net edit*: drift correction's inserted frames, plus the pacer's
+//!   silence less its drops, against the twin's. For a real loss this
+//!   must equal the known frames lost, independently of the stamped PTS;
 //! * *apart*: the largest difference of the pacer's lead from the twin's,
 //!   in ms, over the run or from some time on: what was put in or cut;
 //! * *walk*: how far the lead's difference from the twin's moved, the
@@ -47,10 +50,10 @@
 //!   from the offsets of the blocks pushed over the last second (the
 //!   encoder's position at a block less its PTS), so that a loss which
 //!   moves the callbacks after it to other ticks is compared rightly;
-//! * the *PTS walk*, printed and not judged: how far the blocks' PTS
-//!   error moved over the run, less the twin's. It is the stamper's map
-//!   itself moving, which the lead shows only once drift correction takes
-//!   it for a slow or fast clock, past its dead band.
+//! * the *PTS walk*, also judged for jitter-only families: how far the
+//!   blocks' PTS error moved over the run, less the twin's. It is the
+//!   stamper's map itself moving, which the lead shows only once drift
+//!   correction takes it for a slow or fast clock, past its dead band.
 //!
 //! # Families
 //!
@@ -77,14 +80,17 @@
 //!   drift edits.
 //! * **M7** real losses, of one IO cycle at 128 to 1024 frames and of up to
 //!   99.9 ms (the near-slack cases): one gap of the loss, made up once, the
-//!   lasting offset within 0.5 ms.
+//!   lasting offset within 0.5 ms; the net edit equals the known loss to
+//!   within a 0.5 ms resampler and sample-rounding budget.
 //! * **M8** the first buffer off by ±3 to 30 ms at 128 to 4096 frames, its
 //!   first frame captured before the open and after it: nothing reported,
 //!   no step, apart within 1 ms; with a cycle lost before callback 2 to 5:
 //!   the loss's gap alone, made up once (no step for a cycle shorter than
 //!   drift correction's), apart from the loss alone within 1 ms.
 //! * **M9** a one-buffer glitch of the second buffer, ±3 to 30 ms: no
-//!   rewind and no gap; one glitch beyond the tolerance, none within it.
+//!   rewind and no gap; one glitch beyond the tolerance, none within it;
+//!   no lasting lead offset beyond 0.5 ms or the resampler's half kernel
+//!   and one sample's rounding, whichever is larger.
 //! * **M10** a sample clock ±200 ppm off the host's, white jitter ±0.5 ms:
 //!   no notice, the correction settles where it cancels the drift, no walk.
 //!
@@ -352,7 +358,11 @@ fn mean_apart(run: &Run, twin: &Run, from: f64, to: f64) -> f64 {
         .zip(&twin.lead[first..last])
         .map(|(a, b)| a - b)
         .sum();
-    sum / (last - first).max(1) as f64
+    if first == last {
+        f64::NAN
+    } else {
+        sum / (last - first) as f64
+    }
 }
 
 /// `run`'s walk against `twin`: how far its lead's difference from the
@@ -381,7 +391,11 @@ fn pts_mean(run: &Run, from: f64, to: f64) -> f64 {
         .iter()
         .filter(|(t, _)| (from..to).contains(t))
         .fold((0.0, 0u32), |(sum, n), (_, e)| (sum + e, n + 1));
-    sum * 1000.0 / f64::from(n.max(1))
+    if n == 0 {
+        f64::NAN
+    } else {
+        sum * 1000.0 / f64::from(n)
+    }
 }
 
 /// `run`'s PTS walk against `twin`: how far its blocks' PTS error moved
@@ -398,6 +412,18 @@ fn pts_walk(run: &Run, twin: &Run) -> Option<f64> {
     Some(moved(run)? - moved(twin)?)
 }
 
+/// Requires both the audible lead and the Stamper's PTS map to stay
+/// within `limit_ms`; a map error must fail before drift correction's
+/// dead band can turn it into an audible offset.
+fn no_walk(judge: &mut Judge, run: &Run, twin: &Run, limit_ms: f64) {
+    judge.at_most("walk (ms)", walk_size(run, twin), limit_ms);
+    judge.at_most(
+        "PTS walk (ms)",
+        pts_walk(run, twin).map_or(f64::NAN, f64::abs),
+        limit_ms,
+    );
+}
+
 /// Where `run`'s board audio ends up against `twin`'s, in ms: the mean
 /// offset of its pushed blocks over the twin's last second of PTS, less
 /// the twin's.
@@ -409,9 +435,17 @@ fn lasting_offset(run: &Run, twin: &Run) -> f64 {
             .iter()
             .filter(|(pts, _)| *pts >= last)
             .fold((0.0, 0u32), |(sum, n), (_, o)| (sum + o, n + 1));
-        sum / f64::from(n.max(1))
+        if n == 0 { f64::NAN } else { sum / f64::from(n) }
     };
     (mean(run) - mean(twin)) * 1000.0
+}
+
+/// Frames inserted into the encoder's audio by drift correction and the
+/// pacer together. Unlike a PTS-relative offset this does not trust the
+/// Stamper's map, so a wrong timestamp and an equal wrong edit cannot hide
+/// one another.
+fn net_edit(run: &Run) -> i128 {
+    i128::from(run.edited) + i128::from(run.pacer.silence) - i128::from(run.pacer.dropped)
 }
 
 /// What the device input reported in a run, by kind, with sizes in ms.
@@ -532,6 +566,7 @@ fn untouched_by(judge: &mut Judge, run: &Run) {
     judge.require("no pacer edit", (pacer.silence, pacer.dropped) == (0, 0));
 }
 
+/// Limits include their boundary, reject NaN and keep all failures.
 #[test]
 fn a_judge_fails_what_is_past_its_limit_or_not_a_number() {
     let mut judge = Judge::default();
@@ -539,6 +574,8 @@ fn a_judge_fails_what_is_past_its_limit_or_not_a_number() {
     judge.require("ok", true);
     assert!(judge.failed.is_empty());
     assert_eq!(judge.worst, 0.5);
+    judge.at_most("boundary", 2.0, 2.0);
+    assert!(judge.failed.is_empty());
     judge.at_most("walk", 3.0, 2.0);
     judge.at_most("nothing", f64::NAN, 2.0);
     judge.require("notice", false);
@@ -546,6 +583,7 @@ fn a_judge_fails_what_is_past_its_limit_or_not_a_number() {
     assert_eq!(judge.worst, 1.5);
 }
 
+/// A failed criterion outranks passing cases when naming the worst case.
 #[test]
 fn a_scorecard_names_its_worst_case_and_counts_what_passed() {
     let mut card = Card::new("test family");
@@ -567,6 +605,7 @@ fn a_scorecard_names_its_worst_case_and_counts_what_passed() {
     );
 }
 
+/// A scorecard cannot turn a failing scenario into a passing family.
 #[test]
 #[should_panic(expected = "1 failed, worst first")]
 fn a_scorecard_with_a_failed_case_fails_its_family() {
@@ -577,6 +616,7 @@ fn a_scorecard_with_a_failed_case_fails_its_family() {
     card.finish();
 }
 
+/// Grid selection and buffer times preserve each requested scenario.
 #[test]
 fn sweeps_pick_their_grid_and_buffers_their_times() {
     let quick = Sweep {
@@ -599,4 +639,27 @@ fn sweeps_pick_their_grid_and_buffers_their_times() {
         }
     }
     assert_eq!(block_tolerance(4096, 48_000), tolerance(1024, 48_000));
+}
+
+/// Missing observations fail their limits instead of looking perfectly aligned.
+#[test]
+fn an_empty_measurement_does_not_pass_as_zero_error() {
+    let mut run = play(Device::new(RATE, 512), 1);
+    let twin = play(Device::new(RATE, 512), 1);
+    assert!(mean_apart(&run, &twin, 2.0, 3.0).is_nan());
+    assert!(pts_mean(&run, 2.0, 3.0).is_nan());
+    run.offsets.clear();
+    assert!(lasting_offset(&run, &twin).is_nan());
+    assert!(walk_size(&run, &twin).is_nan());
+}
+
+/// Frame accounting includes both edit stages without trusting their timestamps.
+#[test]
+fn net_edits_count_fills_and_cuts_independently_of_pts() {
+    let mut run = play(Device::new(RATE, 512), 1);
+    run.edited = -12;
+    run.pacer.silence = 30;
+    run.pacer.dropped = 7;
+    run.offsets.clear();
+    assert_eq!(net_edit(&run), 11);
 }

@@ -42,10 +42,11 @@ fn formats(sweep: Sweep, quick: &[(u32, u64)], rates: &[u32], sizes: &[u64]) -> 
 fn judge_scatter(run: &Run, twin: &Run, walk_ms: f64) -> Judge {
     let mut judge = Judge::default();
     judge.require("no rewind", Notices::of(run).rewinds.is_empty());
-    judge.at_most("walk (ms)", walk_size(run, twin), walk_ms);
+    no_walk(&mut judge, run, twin, walk_ms);
     judge
 }
 
+/// Ordinary timestamp jitter leaves notices, edits and long-term sync alone.
 #[test]
 fn m1_white_jitter_within_the_threshold_moves_nothing() {
     let mut card = Card::new("M1 no fault, white jitter up to ±0.5 ms");
@@ -68,8 +69,7 @@ fn m1_white_jitter_within_the_threshold_moves_nothing() {
                 judge.require("no notice", run.found.is_empty());
                 untouched_by(&mut judge, &run);
                 judge.at_most("apart (ms)", run.apart(&twin, 0.0), 1.5);
-                let walked = walk_size(&run, &twin);
-                judge.at_most("walk (ms)", walked, 1.5);
+                no_walk(&mut judge, &run, &twin, 1.5);
                 let case = format!("{rate} Hz, {frames} frames, ±{peak} ms, seed {seed}");
                 card.add(case, judge, numbers(&run, &twin));
             }
@@ -78,6 +78,7 @@ fn m1_white_jitter_within_the_threshold_moves_nothing() {
     card.finish();
 }
 
+/// Noisy stamps alone cannot become lost audio, a rewind or a moving map.
 #[test]
 fn m2_white_jitter_beyond_the_threshold_is_no_rewind_no_gap_and_no_walk() {
     let mut card = Card::new("M2 white jitter ±0.75 to ±2 ms, 128 to 1024 frames");
@@ -106,6 +107,7 @@ fn m2_white_jitter_beyond_the_threshold_is_no_rewind_no_gap_and_no_walk() {
     card.finish();
 }
 
+/// Repeated jitter bursts cannot accumulate lasting timing error.
 #[test]
 fn m3_bursts_of_jitter_are_no_rewind_and_no_walk() {
     let mut card = Card::new("M3 bursts of ±1.25 to ±2 ms, 0.3 s every 5 to 60 s");
@@ -169,6 +171,7 @@ fn ramps(
         .collect()
 }
 
+/// A late ramp followed by a snap home leaves the map where it started.
 #[test]
 fn m4_host_times_that_ramp_late_and_snap_back_are_no_rewind_and_no_walk() {
     let mut card = Card::new("M4 ramp then snap every 10 s");
@@ -192,8 +195,7 @@ fn m4_host_times_that_ramp_late_and_snap_back_are_no_rewind_and_no_walk() {
                 let run = play(jittered(rate, frames, JITTER, 1).with(&events), seconds);
                 let mut judge = Judge::default();
                 judge.require("no rewind", Notices::of(&run).rewinds.is_empty());
-                let walked = walk_size(&run, &twin);
-                judge.at_most("walk (ms)", walked, 1.5);
+                no_walk(&mut judge, &run, &twin, 1.5);
                 let (steps, step) = pattern;
                 let case = format!(
                     "{rate} Hz, {frames} frames, {steps} x {} ms, phase {phase}",
@@ -206,6 +208,7 @@ fn m4_host_times_that_ramp_late_and_snap_back_are_no_rewind_and_no_walk() {
     card.finish();
 }
 
+/// Resampling cancels a real sample-clock error despite timestamp jitter.
 #[test]
 fn m10_a_clock_far_off_the_hosts_under_jitter_is_corrected_with_no_notice_and_no_walk() {
     let mut card = Card::new("M10 sample clock ±200 ppm, white jitter ±0.5 ms");
@@ -234,8 +237,7 @@ fn m10_a_clock_far_off_the_hosts_under_jitter_is_corrected_with_no_notice_and_no
             let cancels = -ppm / (1.0 + ppm * 1e-6);
             let off = (run.view.correction_ppm - cancels).abs();
             judge.at_most("correction off its settling (ppm)", off, dead_band);
-            let walked = walk_size(&run, &twin);
-            judge.at_most("walk (ms)", walked, 1.5);
+            no_walk(&mut judge, &run, &twin, 1.5);
             let case = format!("{rate} Hz, {frames} frames, {ppm:+} ppm");
             card.add(case, judge, numbers(&run, &twin));
         }
@@ -243,6 +245,7 @@ fn m10_a_clock_far_off_the_hosts_under_jitter_is_corrected_with_no_notice_and_no
     card.finish();
 }
 
+/// Long buffers split by the hand-off do not ratchet noisy timestamps.
 #[test]
 fn should_s2_white_jitter_beyond_the_threshold_on_long_buffers_does_not_walk() {
     let mut card = Card::new("S2 white jitter ±1 to ±2 ms, 2048 and 4096 frames");
@@ -262,8 +265,7 @@ fn should_s2_white_jitter_beyond_the_threshold_on_long_buffers_does_not_walk() {
             for &seed in &seeds {
                 let run = play(jittered(rate, frames, peak / 1000.0, seed), seconds);
                 let mut judge = Judge::default();
-                let walked = walk_size(&run, &twin);
-                judge.at_most("walk (ms)", walked, 2.0);
+                no_walk(&mut judge, &run, &twin, 2.0);
                 let case = format!("{rate} Hz, {frames} frames, ±{peak} ms, seed {seed}");
                 card.add(case, judge, numbers(&run, &twin));
             }

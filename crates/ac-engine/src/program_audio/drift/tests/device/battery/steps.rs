@@ -109,7 +109,8 @@ fn rewinds(
             let (view, alones) = (&run.view, &alone.view);
             judge.require(
                 "the loss made up once",
-                (view.drift_steps, view.drift_resets) == (alones.drift_steps, alones.drift_resets),
+                (view.drift_steps, view.drift_resets) == (1, 0)
+                    && (alones.drift_steps, alones.drift_resets) == (1, 0),
             );
             judge.require(
                 "no pacer edit beyond the loss alone's",
@@ -150,6 +151,7 @@ fn grid(sizes: &[u64], backs: &[f64], peaks: &[f64], phases: u64) -> Vec<Rewind>
     cases
 }
 
+/// A noisy permanent rewind keeps audio whole, including a later loss.
 #[test]
 fn m5_a_lasting_rewind_under_jitter_is_one_rewind_and_a_loss_after_it_made_up_once() {
     let mut card = Card::new("M5 lasting rewind under white jitter up to ±0.5 ms");
@@ -166,6 +168,7 @@ fn m5_a_lasting_rewind_under_jitter_is_one_rewind_and_a_loss_after_it_made_up_on
     card.finish();
 }
 
+/// Larger jitter still must not turn a lasting rewind into an audio cut.
 #[test]
 fn should_s1_a_lasting_rewind_under_jitter_beyond_the_threshold_is_one_rewind_and_no_cut() {
     let mut card = Card::new("S1 lasting rewind under white jitter ±0.75 to ±1.5 ms");
@@ -290,6 +293,7 @@ fn glitches(card: &mut Card, grid: &Glitches) {
     }
 }
 
+/// Returning timestamp excursions cannot permanently move the audio.
 #[test]
 fn m6_glitches_ahead_and_back_leave_no_lasting_offset() {
     let mut card = Card::new("M6 glitches of 3 to 30 ms, jitter 0.03 ms");
@@ -308,6 +312,7 @@ fn m6_glitches_ahead_and_back_leave_no_lasting_offset() {
     card.finish();
 }
 
+/// Noisy longer glitches return the audio to its twin's position.
 #[test]
 fn should_s3_a_glitch_back_of_four_buffers_or_more_under_jitter_leaves_no_lasting_offset() {
     let mut card = Card::new("S3 glitch back of 4+ buffers under ±0.5 ms jitter");
@@ -341,6 +346,7 @@ enum Loss {
     Ms(f64),
 }
 
+/// A known loss is reported and filled once, preserving final alignment.
 #[test]
 fn m7_a_real_loss_is_one_gap_made_up_once() {
     let mut card = Card::new("M7 real losses, a cycle to 99.9 ms");
@@ -396,6 +402,13 @@ fn m7_a_real_loss_is_one_gap_made_up_once() {
                     );
                     let left = lasting_offset(&run, &twin).abs();
                     judge.at_most("lasting offset (ms)", left, 0.5);
+                    let filled = net_edit(&run) - net_edit(&twin);
+                    let wrong = (filled - i128::from(lost)).abs() as f64;
+                    judge.at_most(
+                        "net edit beyond the known loss (ms)",
+                        wrong * 1000.0 / f64::from(AT),
+                        0.5,
+                    );
                     let case = format!(
                         "{loss:?} at {frames} frames, phase {phase}, output at tick {output_at}"
                     );
