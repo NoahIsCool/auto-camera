@@ -493,41 +493,106 @@ fn a_device_that_never_delivers_is_cut_at_the_open_timeout() {
     );
 }
 
+/// A device behind a FIFO that delivered a few frames and fell silent:
+/// its writer holds the FIFO open, so ffmpeg sees no end of input, until
+/// [`Silent::end`].
+#[cfg(unix)]
+struct Silent {
+    /// Raised to let the writer close the FIFO.
+    done: Arc<AtomicBool>,
+    /// The writer.
+    writer: JoinHandle<()>,
+}
+
+#[cfg(unix)]
+impl Silent {
+    /// Writes `frames` mid-grey frames of [`tiny`]'s size into `fifo` once
+    /// ffmpeg has opened it, then holds it open.
+    fn after(fifo: &Path, frames: usize) -> Self {
+        use std::io::Write;
+        let (w, h) = tiny().size();
+        let bytes = vec![128u8; w as usize * h as usize * 4 * frames];
+        let (path, done) = (fifo.to_owned(), Arc::new(AtomicBool::new(false)));
+        let held = done.clone();
+        let writer = std::thread::spawn(move || {
+            let mut device = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let _ = device.write_all(&bytes);
+            while !held.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        Self { done, writer }
+    }
+
+    /// Closes the FIFO and waits for the writer.
+    fn end(self) {
+        self.done.store(true, Ordering::Release);
+        self.writer.join().unwrap();
+    }
+}
+
 /// A device that delivers and then falls silent without its ffmpeg
 /// exiting (a dongle that lost its signal) is cut at the stall timeout.
 #[cfg(unix)]
 #[test]
 fn a_device_that_falls_silent_is_cut_at_the_stall_timeout() {
-    use std::io::Write;
     let Some(tools) = tools() else { return };
     let (_dir, fifo) = fifo("stall");
     let inventory = FakeInventory::new(PROFILER_THREE, FFMPEG_THREE);
     let input = |_: &ResolvedDevice, format: &CaptureFormat| from_fifo(&fifo, format);
-    let limits = options(&tools, Duration::from_secs(20), Duration::from_millis(300));
+    // Both limits end well inside the wait below, so a failure shows which
+    // one cut the source, or that neither did.
+    let limits = options(&tools, Duration::from_secs(10), Duration::from_millis(300));
     let mut src =
         CaptureSource::open_input(cam(), BRIO, &tiny(), &*inventory, limits, &input).unwrap();
     // Three frames, then silence with the FIFO held open until the source
     // has given up on it.
-    let (path, done) = (fifo.clone(), Arc::new(AtomicBool::new(false)));
-    let held = done.clone();
-    let writer = std::thread::spawn(move || {
-        let mut device = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-        let _ = device.write_all(&vec![128u8; 64 * 36 * 4 * 3]);
-        while !held.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+    let device = Silent::after(&fifo, 3);
+    let stopped = eventually(Duration::from_secs(20), || {
+        src.state() == SourceState::Stopped
     });
-    assert!(eventually(Duration::from_secs(20), || src.state()
-        == SourceState::Stopped));
-    done.store(true, Ordering::Release);
-    writer.join().unwrap();
-    assert!(src.latest().is_some(), "it delivered before falling silent");
+    let (state, newest) = (src.state(), src.latest().map(|f| f.seq));
+    device.end();
+    assert!(stopped, "still {state:?}, newest frame {newest:?}");
+    assert!(newest.is_some(), "it delivered before falling silent");
     let e = src.error().unwrap();
     assert!(
         e.contains("stopped delivering pictures: none for 0.3 s"),
         "{e}"
     );
     src.stop();
+    assert!(src.child_pids().is_empty());
+}
+
+/// Every frame is published as soon as the device delivers it, not when a
+/// later one arrives: the last frame before a silence is on air during the
+/// silence. (A frame-threaded encoder in ffmpeg held back one frame, and
+/// under load every frame of a short burst, so that a device that fell
+/// silent could look as if it had never opened.)
+#[cfg(unix)]
+#[test]
+fn a_frame_is_published_without_waiting_for_the_next() {
+    let Some(tools) = tools() else { return };
+    let (_dir, fifo) = fifo("held");
+    let inventory = FakeInventory::new(PROFILER_THREE, FFMPEG_THREE);
+    let input = |_: &ResolvedDevice, format: &CaptureFormat| from_fifo(&fifo, format);
+    let limits = options(&tools, Duration::from_secs(20), Duration::from_secs(20));
+    let mut src =
+        CaptureSource::open_input(cam(), BRIO, &tiny(), &*inventory, limits, &input).unwrap();
+    let device = Silent::after(&fifo, 3);
+    // Well inside both limits: the source is not cut while it waits.
+    let last = src.wait_newer(Some(1), Duration::from_secs(10));
+    let newest = src.latest().map(|f| f.seq);
+    let state = src.state();
+    src.stop();
+    device.end();
+    assert_eq!(
+        last.map(|f| f.seq),
+        Some(2),
+        "the third frame never came; newest {newest:?}"
+    );
+    assert_eq!(state, SourceState::Running, "on air while silent");
+    assert_eq!(src.error(), None, "a stop that was asked for is no error");
     assert!(src.child_pids().is_empty());
 }
 

@@ -40,6 +40,14 @@
 //!   filter chain ends in an explicit `scale` and `format=rgba`, and `-r`
 //!   makes the rate constant, so PTS is `seq / fps` and every read of
 //!   `width * height * 4` bytes is one frame.
+//! * ffmpeg passes every frame on as soon as it has it: its encoder runs
+//!   on one thread (`-threads 1`, an output option). ffmpeg's rawvideo
+//!   encoder is frame-threaded by default, and a frame-threaded encoder
+//!   hands a frame out only when a later one comes in, so it would hold
+//!   back one frame, and up to one per core while its threads wait for a
+//!   CPU: latency for a live picture, and a device that falls silent
+//!   would keep its last frames (all of them after a short burst) from the
+//!   source. Encoding raw frames is a copy, which threads do not speed up.
 //! * Capture devices tag no colour matrix, so the untagged rule applies:
 //!   BT.709 at HD and above, BT.601 below.
 //! * A pixel format is always asked for: the configured one, else
@@ -226,7 +234,8 @@ pub(crate) fn avfoundation_input(device: &ResolvedDevice, format: &CaptureFormat
 
 /// The whole ffmpeg command line of a capture connection: `input` (the
 /// options that open the device, ending in its `-i`), then raw RGBA frames
-/// of the requested size at the requested rate on stdout.
+/// of the requested size at the requested rate on stdout, each as soon as
+/// ffmpeg has it (one encoder thread; see the module docs).
 pub(crate) fn capture_args(input: Vec<OsString>, format: &CaptureFormat) -> Vec<OsString> {
     let size = format.size();
     let mut args: Vec<OsString> = COMMON.iter().map(OsString::from).collect();
@@ -245,6 +254,8 @@ pub(crate) fn capture_args(input: Vec<OsString>, format: &CaptureFormat) -> Vec<
         "rgba".into(),
         "-r".into(),
         format.rate.to_string(),
+        "-threads".into(),
+        "1".into(),
         "-f".into(),
         "rawvideo".into(),
         "pipe:1".into(),
@@ -367,6 +378,10 @@ mod tests {
             "scale=w=1920:h=1080:in_color_matrix=bt709,format=rgba"
         );
         assert_eq!(after(&args, "-r"), "60000/1001");
+        // One encoder thread, given for the output, not the input.
+        let threads = args.iter().position(|a| a == "-threads").unwrap();
+        assert!(threads > args.iter().position(|a| a == "-i").unwrap());
+        assert_eq!(args[threads + 1], "1");
         assert_eq!(after(&args, "-f"), "avfoundation", "the input's format");
         assert_eq!(args[args.len() - 3..], ["-f", "rawvideo", "pipe:1"]);
         let sd = CaptureFormat::new(640, 480, 30.0, None).unwrap();
