@@ -51,7 +51,9 @@
 //! on the engine's clock always do. A step in the PTS is not drift: lost
 //! audio up to the pacer's slack is made up with silence once the few
 //! blocks after it confirm it ([`AudioInputView::drift_steps`]), a
-//! timestamp that strays and comes back is left alone, and a larger step
+//! timestamp that strays for up to three blocks and comes back is left
+//! alone (one off for longer is made up and taken back, with no lasting
+//! offset), and a larger step
 //! (a reconnection) is a break that restarts the measurement
 //! ([`AudioInputView::drift_resets`]). A video source's embedded audio is
 //! never resampled, and drift of the video itself is not corrected.

@@ -2,9 +2,11 @@
 //! a board 100 ppm off the engine's clock kept in sync for three hours
 //! without silence or cuts, steps in its PTS taken for breaks or made up
 //! once (in a connection's first second, and its first tenth of a second,
-//! too) and never taken for drift, timestamps that stray and come back
-//! left alone, and audio on the engine's clock (a file input, a camera's)
-//! passed on untouched.
+//! too) and never taken for drift, timestamps that stray for up to three
+//! blocks and come back left alone (four blocks off are made up and taken
+//! back), and audio on the engine's clock (a file input, a camera's) passed on
+//! untouched. Audio lost close to the pacer's slack, with timestamps shaped
+//! as a device input stamps them, is checked in [`near_slack`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +19,8 @@ use crate::audio::{AudioPacer, AudioPacerStats};
 use crate::output::AUDIO_MAX_LEAD;
 use crate::program_audio::tests::{camera, scripted};
 use crate::program_audio::{AudioInputView, Origin, ProgramAudio};
+
+mod near_slack;
 
 /// The board's sample rate: low, so that three hours of it simulate in
 /// about a second; the resampler holds back 3 ms at it.
@@ -581,5 +585,33 @@ fn a_stray_timestamp_leaves_the_boards_audio_alone() {
                 assert_eq!(run.resampled, 0, "{what}");
             }
         }
+    }
+}
+
+#[test]
+fn a_stray_of_four_blocks_is_made_up_and_taken_back() {
+    // Four blocks stamped 8 ms late (as if 8 ms were lost), then back: the
+    // fourth confirms a step, made up with 8 ms of silence, and the fourth
+    // block back confirms the way back, cut again. Two edits of the
+    // stray's size, the pacer left nothing to do, and the board's audio
+    // ends where a twin without the stray has it.
+    for ppm in [0.0, 100.0] {
+        let twin = play(&mut Board::new(ppm), 120, 0);
+        let mut board = Board::new(ppm);
+        board.stray = Some((3_000..3_004, 0.008));
+        let run = play(&mut board, 120, 0);
+        let what = format!("{ppm} ppm: {:?}, {:?}", run.pacer, run.view);
+        assert_eq!(
+            (run.view.drift_steps, run.view.drift_resets),
+            (2, 0),
+            "{what}"
+        );
+        assert_eq!((run.pacer.silence, run.pacer.dropped), (0, 0), "{what}");
+        assert!(-SYNC_MS <= run.low && run.high <= SYNC_MS, "{what}");
+        assert!(
+            (run.pacer.lead_ms - twin.pacer.lead_ms).abs() <= 1,
+            "{what}, twin {:?}",
+            twin.pacer
+        );
     }
 }

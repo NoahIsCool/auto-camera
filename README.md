@@ -503,12 +503,20 @@ made up once the next few blocks confirm it, with that much silence (or,
 for timestamps that step back, that much cut), from a connection's third
 block on as later, and the drift measurement carries on; beyond 100 ms (a
 reconnection, a long loss) it is a break: the pacing above fills the gap
-and the measurement starts again. A timestamp that strays for a block or a
-few and comes back (a glitch in the device's clock) is not a step: no
-block is edited for it. What is not corrected: blocks within a dead band
-of 2 ppm pass through bit for bit, as a file input on the engine's clock
-always does; a source's embedded audio is never resampled, and drift of
-the video itself (a camera against the engine) is not corrected; drift
+and the measurement starts again. A loss close to 100 ms can run the
+pacing out of slack before the blocks after it confirm the step; it then
+fills the gap itself and cuts exactly the silence it filled from the late
+audio (splitting a block where the cut ends), so the gap is made up once.
+A timestamp that strays and comes back within three blocks (a glitch in
+the device's clock) is not a step: no block is edited for it. One that
+stays off for four blocks or more (spanning at least 6 ms, should its
+blocks be shorter than 2 ms) is taken for a step and made up, then taken
+back once four blocks confirm the way back: two short edits of its size
+(silence and a cut), audio off by that much for about as long as the stray
+lasted, and no lasting offset. What is not corrected: blocks within a dead
+band of 2 ppm pass through bit for bit, as a file input on the engine's
+clock always does; a source's embedded audio is never resampled, and drift
+of the video itself (a camera against the engine) is not corrected; drift
 beyond 1000 ppm is left to the fills and cuts. The window's output panel
 shows the program input's correction, its resets and the steps made up
 (or, while the input is not running, its state and why, in amber), and a

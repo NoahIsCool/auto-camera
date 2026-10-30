@@ -1,5 +1,6 @@
-//! Tests of the audio pacer: unit cases, then a simulated source that
-//! stalls and bursts, measuring lip sync from the blocks' timestamps.
+//! Tests of the audio pacer: unit cases (owed silence cut to the frame),
+//! then a simulated source that stalls and bursts, measuring lip sync from
+//! the blocks' timestamps.
 
 use super::*;
 use ac_core::SourceId;
@@ -112,6 +113,135 @@ fn mismatched_and_empty_blocks_are_dropped() {
     assert!(out.is_empty());
     assert_eq!(p.stats().mismatched_blocks, 2);
     assert_eq!(p.stats().pushed, 0);
+}
+
+/// A block of `frames` frames starting at `pts` whose samples count up
+/// from `first` (both channels alike), so a cut shows where it fell.
+fn counted(frames: usize, first: usize, pts: Duration) -> AudioBlock {
+    AudioBlock {
+        samples: (first..first + frames)
+            .flat_map(|n| [n as f32; 2])
+            .collect::<Vec<_>>()
+            .into(),
+        seq: first as u64,
+        ..timed(frames, RATE, 2, pts)
+    }
+}
+
+#[test]
+fn owed_silence_is_cut_to_the_frame_splitting_a_block() {
+    let mut p = pacer();
+    // Four ticks of nothing: 6400 frames of silence owed.
+    p.plan(4, vec![]);
+    assert_eq!(p.stats().silence, 6400);
+    // The stall's 150 ms arrive late in three blocks of 2400 frames: the
+    // first 6400 frames are cut, ending 1600 frames into the third block,
+    // whose rest is pushed with its PTS moved on by them.
+    let ms = Duration::from_millis;
+    let late = (0..3).map(|k| counted(2400, 2400 * k, ms(50 * k as u64)));
+    let out = p.plan(5, late.collect());
+    let [PacedAudio::Block(rest)] = out.as_slice() else {
+        panic!("one block, got {out:?}");
+    };
+    assert_eq!(rest.frames(), 800);
+    assert_eq!((rest.seq, rest.samples[0]), (4800, 6400.0));
+    assert_eq!(rest.pts, ms(100) + Duration::from_nanos(33_333_333));
+    let s = p.stats();
+    assert_eq!((s.silence, s.dropped, s.pushed), (6400, 6400, 800));
+    // Nothing is owed any more: a later block early by more than the
+    // tolerance (and less than the lead limit) is not cut.
+    p.plan(6, vec![block(4000, RATE, 2)]);
+    assert_eq!(p.stats().dropped, 6400);
+}
+
+#[test]
+fn late_audio_well_short_of_the_debt_is_cut_only_down_to_the_target() {
+    // A second of nothing, then a fresh source: aligned to the target, it
+    // owes nothing late. A tick of it 1500 frames early (jitter beyond the
+    // tolerance) is cut down to the target, not by the second owed.
+    let mut p = pacer();
+    p.plan(30, vec![]);
+    assert_eq!(p.stats().silence, 48_000);
+    p.plan(31, vec![block(1600, RATE, 2)]);
+    assert_eq!(p.stats().lead_ms, 0);
+    let ms = Duration::from_millis;
+    let out = p.plan(
+        32,
+        vec![counted(1550, 0, ms(0)), counted(1550, 1550, ms(32))],
+    );
+    let s = p.stats();
+    assert_eq!((s.dropped, s.lead_ms), (1500, 0), "{s:?}");
+    let [PacedAudio::Block(a), PacedAudio::Block(b)] = out.as_slice() else {
+        panic!("two blocks, got {out:?}");
+    };
+    assert_eq!((a.frames(), a.samples[0], b.frames()), (50, 1500.0, 1550));
+}
+
+#[test]
+fn a_debt_repaid_in_full_is_cut_from_the_next_ticks_audio_too() {
+    // 1600 frames, then a gap: at tick 5 the source is more than the slack
+    // short, and 5400 frames of silence fill it up to the target ahead of
+    // its 1000 frames. Its late 4800 frames at tick 6 cover the debt to
+    // within half the slack: they are its backlog, all cut, and the 600
+    // frames still owed are cut from the start of the next tick's audio,
+    // nothing more.
+    let mut p = pacer();
+    p.plan(1, vec![block(1600, RATE, 2)]);
+    p.plan(4, vec![]);
+    let out = p.plan(5, vec![block(1000, RATE, 2)]);
+    assert!(matches!(
+        out[..],
+        [PacedAudio::Silence(5400), PacedAudio::Block(_)]
+    ));
+    assert!(p.plan(6, vec![block(4800, RATE, 2)]).is_empty());
+    let out = p.plan(7, vec![counted(1600, 0, Duration::from_secs(1))]);
+    let [PacedAudio::Block(rest)] = out.as_slice() else {
+        panic!("one block, got {out:?}");
+    };
+    assert_eq!((rest.frames(), rest.samples[0]), (1000, 600.0));
+    assert_eq!(
+        rest.pts,
+        Duration::from_millis(1_012) + Duration::from_micros(500)
+    );
+    let s = p.stats();
+    assert_eq!((s.silence, s.dropped), (5400, 5400), "{s:?}");
+    p.plan(8, vec![block(1600, RATE, 2)]);
+    assert_eq!(p.stats().dropped, 5400);
+}
+
+#[test]
+fn a_cut_splits_blocks_at_the_frame() {
+    let ms = Duration::from_millis;
+    let blocks = || vec![counted(480, 0, ms(0)), counted(480, 480, ms(10))];
+    let frames = |b: &[AudioBlock]| {
+        b.iter()
+            .map(|b| (b.frames(), b.samples[0]))
+            .collect::<Vec<_>>()
+    };
+    // Nothing, a whole block, part of the next, everything.
+    let mut b = blocks();
+    cut_start(&mut b, 0);
+    assert_eq!(frames(&b), [(480, 0.0), (480, 480.0)]);
+    let mut b = blocks();
+    cut_start(&mut b, 480);
+    assert_eq!(frames(&b), [(480, 480.0)]);
+    assert_eq!(b[0].pts, ms(10));
+    let mut b = blocks();
+    cut_start(&mut b, 481);
+    assert_eq!(frames(&b), [(479, 481.0)]);
+    assert_eq!(
+        (b[0].pts, b[0].seq),
+        (ms(10) + Duration::from_nanos(20_833), 480)
+    );
+    let mut b = blocks();
+    cut_start(&mut b, 960);
+    assert!(b.is_empty());
+    // A block's PTS that would overflow saturates rather than panics.
+    let late = AudioBlock {
+        pts: Duration::MAX,
+        ..counted(4, 0, ms(0))
+    };
+    assert_eq!(without_start(&late, 1).pts, Duration::MAX);
 }
 
 #[test]
@@ -238,6 +368,26 @@ fn lip_sync_returns_after_a_source_stall_and_burst() {
             );
             assert!(s.silence > 0, "{s:?}");
             assert!(s.lead_ms.abs() <= 15, "{s:?}");
+        }
+    }
+}
+
+#[test]
+fn a_stalls_backlog_repays_exactly_the_silence_owed() {
+    // Whatever the stall and however fast its backlog comes, exactly the
+    // silence inserted is cut, so the lag is zero to the frame.
+    for stall_ms in [150u64, 300, 600, 800, 2000] {
+        for catch_up in [None, Some(6)] {
+            let mut sim = Sim::new();
+            let (start, end) = (ticks(8.0), ticks(8.0) + stall_ms * 30 / 1000);
+            for t in 1..ticks(20.0) {
+                let limit = if t >= end { catch_up } else { None };
+                sim.tick(t, (start..end).contains(&t), limit);
+            }
+            let s = sim.pacer.stats();
+            let what = format!("stall {stall_ms} ms, catch-up {catch_up:?}: {s:?}");
+            assert!(s.silence > 0 && s.dropped == s.silence, "{what}");
+            assert!(sim.lag_ms().abs() < 1e-9, "{what}: {} ms", sim.lag_ms());
         }
     }
 }

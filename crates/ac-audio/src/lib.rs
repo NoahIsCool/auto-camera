@@ -65,7 +65,8 @@
 //! (master-clock times) against their sample counts, filtering the PTS's
 //! jitter and never taking a step in them for drift: a small one (audio
 //! lost) is timing error, a large one (a reconnection) a break, and a
-//! timestamp that strays for a block or a few and comes back is neither.
+//! timestamp that strays for up to three blocks and comes back is neither
+//! (one off for longer is made up and taken back, with no lasting offset).
 //! [`correct`] cancels the drift by resampling the input a few ppm with
 //! [`resample`]'s band-limited windowed-sinc resampler, whose ratio ramps
 //! and never jumps, makes up a small step with silence or a cut once the
