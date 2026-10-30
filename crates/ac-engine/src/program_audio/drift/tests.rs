@@ -3,7 +3,9 @@
 //! without silence or cuts, steps in its PTS taken for breaks or made up
 //! once (in a connection's first second too) and never taken for drift,
 //! timestamps that stray and come back left alone, and audio on the
-//! engine's clock (a file input, a camera's) passed on untouched.
+//! engine's clock (a file input, a camera's) passed on untouched. A
+//! CoreAudio board's timestamps, from the device input's own stamper, are
+//! taken through the same path in [`device`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +18,8 @@ use crate::audio::{AudioPacer, AudioPacerStats};
 use crate::output::AUDIO_MAX_LEAD;
 use crate::program_audio::tests::{camera, scripted};
 use crate::program_audio::{AudioInputView, Origin, ProgramAudio};
+
+mod device;
 
 /// The board's sample rate: low, so that three hours of it simulate in
 /// about a second; the resampler holds back 3 ms at it.
