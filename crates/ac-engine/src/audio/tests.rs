@@ -136,6 +136,45 @@ fn audio_dropped_at_the_lead_limit_comes_back_when_the_silence_that_lifted_it_go
 }
 
 #[test]
+fn a_gap_after_audio_dropped_at_the_lead_limit_is_filled_from_its_credit() {
+    // The corrector's 95 ms of silence comes in one block with a tick of
+    // the board's audio, 15 ms ahead: over the limit, the block is dropped
+    // whole. Taking the silence out again over three ticks leaves the
+    // pacer more than the slack short. The gap's silence gives back the
+    // credit, owing nothing, and the rest of the credit goes in on the next
+    // tick: the lead is where it was.
+    let mut p = pacer();
+    p.plan(1, vec![block(1600 + 720, RATE, 2)]);
+    for tick in 2..10 {
+        p.plan(tick, vec![block(1600, RATE, 2)]);
+    }
+    let before = p.stats().lead_ms;
+    assert!(p.plan(10, vec![block(4560 + 1600, RATE, 2)]).is_empty());
+    assert_eq!(p.stats().dropped, 6160);
+    p.plan(11, vec![]);
+    p.plan(12, vec![]);
+    let out = p.plan(13, vec![block(3 * 1600 - 4560, RATE, 2)]);
+    assert!(
+        matches!(out[..], [PacedAudio::Silence(5440), PacedAudio::Block(_)]),
+        "{out:?}"
+    );
+    let out = p.plan(14, vec![block(1600, RATE, 2)]);
+    assert!(
+        matches!(out[..], [PacedAudio::Silence(720), PacedAudio::Block(_)]),
+        "{out:?}"
+    );
+    for tick in 15..=90 {
+        p.plan(tick, vec![block(1600, RATE, 2)]);
+    }
+    let s = p.stats();
+    assert_eq!(
+        (s.lead_ms, s.silence, s.dropped),
+        (before, 6160, 6160),
+        "{s:?}"
+    );
+}
+
+#[test]
 fn a_bursts_credit_is_kept_while_its_audio_holds_the_lead_up_then_forgotten() {
     // 100 ms of backlog beyond the limit at once: a block is dropped, and
     // the source's audio keeps the lead at the limit, so nothing is given
