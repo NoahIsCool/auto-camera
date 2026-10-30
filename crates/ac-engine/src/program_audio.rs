@@ -52,9 +52,11 @@
 //! to the pacer's slack is made up with silence once the few blocks after
 //! it confirm it ([`AudioInputView::drift_steps`]), a timestamp that strays
 //! for up to three blocks and comes back is left alone (one off for longer
-//! is made up and taken back, with no lasting offset, the pacer giving back
-//! what its limit dropped meanwhile), and a larger step (a reconnection) is
-//! a break that restarts the measurement
+//! is made up and taken back, with no lasting offset as long as the pacer
+//! can give back what its limit dropped meanwhile: within a second of the
+//! drop, while it owes no silence of its own, and with room for it within
+//! half its limit; see [`crate::audio`]), and a larger step (a
+//! reconnection) is a break that restarts the measurement
 //! ([`AudioInputView::drift_resets`]). A video source's embedded audio is
 //! never resampled, and drift of the video itself is not corrected.
 //!

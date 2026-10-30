@@ -6,11 +6,12 @@
 //! format restarted the measurement, and how many smaller steps in them
 //! (audio lost, timestamps that went back) it made up with silence or a
 //! cut. Over a long run with a board as program audio, a correction that
-//! settles near the board's drift with no resets and no steps, and an
-//! output that counted no inserted silence, say that the board was kept in
-//! sync. An input is named by its id and name, and
-//! marked when it is program audio; nothing else of its health is here. A
-//! studio without audio inputs has an empty list.
+//! settles near minus the board's drift (about −37 ppm for a board 37 ppm
+//! fast, which cancels it), with no resets and no steps, and an output that
+//! counted no inserted silence, say that the board was kept in sync. An
+//! input is named by its id and name, and marked when it is program audio;
+//! nothing else of its health is here. A studio without audio inputs has an
+//! empty list.
 
 use ac_engine::{AudioInputView, EngineSnapshot};
 use serde::Serialize;
