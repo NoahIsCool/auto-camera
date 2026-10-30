@@ -27,9 +27,11 @@
 //! device's latency and safety offset; and the callback, at the buffer's
 //! end plus up to [`CALLBACK_DELAY`]. Its events are buffers whose host
 //! time is off (a glitch of one buffer, an excursion of several), IO
-//! cycles it skips (their audio lost, as in an overload) and a change of
-//! buffer size. The engine ticks at [`FPS`] and drains what was delivered
-//! by then.
+//! cycles it skips (their audio lost, as in an overload), frames its
+//! sample clock skips (audio lost, the HAL resuming at a sample time of
+//! its own) and a change of buffer size. The engine ticks at [`FPS`] and
+//! drains what was delivered by then; the output starts with the device
+//! input, or a given number of ticks later.
 //!
 //! What reaches the encoder is read from the pacer's lead (audio pushed,
 //! silence included, less the video's share), which only audio added or
@@ -37,6 +39,9 @@
 //! without the event: every buffer jitters by its own frame number, so the
 //! twin's blocks come at the same ticks with the same frames, and the
 //! difference of the two leads is what was put in or cut for the event.
+//! Where frames the sample clock skipped move the blocks after them to
+//! other ticks, each pushed block's offset (the encoder's position at it
+//! less its PTS) is compared instead ([`near_slack`]).
 //!
 //! # Invariants checked
 //!
@@ -75,6 +80,10 @@
 //! * Buffers switching between 512 and 128 frames every 30 s on a device
 //!   that does not report its buffer size: the same PTS and lead as a
 //!   device that does, with nothing reported or made up.
+//! * 85 to 99.9 ms lost, close to the pacer's slack, at 512 or 1024
+//!   frames: made up once, any silence the pacer filled cut exactly, the
+//!   board's audio left within 5 ms of its twin's and in sync but for the
+//!   blocks that confirm the step ([`near_slack`]).
 
 use std::time::Duration;
 
@@ -83,10 +92,12 @@ use ac_core::SourceId;
 use ac_media::AudioBlock;
 use ac_sources::audio_input::device::{CaptureLatency, Discontinuity, Stamper, handoff};
 
-use crate::audio::{AudioPacer, AudioPacerStats};
+use crate::audio::{AudioPacer, AudioPacerStats, PacedAudio};
 use crate::output::{AUDIO_MAX_LEAD, AUDIO_SLACK};
 use crate::program_audio::tests::scripted;
 use crate::program_audio::{AudioInputView, Origin, ProgramAudio};
+
+mod near_slack;
 
 /// Host time of the device's first frame, in seconds.
 const HOST0: f64 = 100.0;
@@ -145,6 +156,10 @@ enum Event {
     Off(u64, f64),
     /// It skips this many IO cycles: their audio is lost.
     Lose(u64),
+    /// Its sample clock skips this many frames, their audio lost: an
+    /// overload after which the HAL resumes at a sample time of its own,
+    /// not a whole number of IO cycles on.
+    Skip(u64),
 }
 
 /// A CoreAudio device as cpal delivers it, and the device input's capture
@@ -211,6 +226,7 @@ impl Device {
                 Event::Buffer(frames) => self.buffer = frames,
                 Event::Off(buffers, by) => self.off = (buffers, by),
                 Event::Lose(cycles) => self.frame += cycles * self.buffer,
+                Event::Skip(frames) => self.frame += frames,
             }
         }
         let frames = self.buffer;
@@ -234,8 +250,11 @@ impl Device {
 
 /// What the device input and the engine made of a device's audio.
 struct Run {
-    /// The pacer's lead after each tick, in ms.
+    /// The pacer's lead after each tick of the output, in ms.
     lead: Vec<f64>,
+    /// Each block the pacer pushed: its PTS and its offset (the encoder's
+    /// position at it less its PTS), in seconds.
+    offsets: Vec<(f64, f64)>,
     /// What the device input reported.
     found: Vec<Discontinuity>,
     /// Frames the drift correction passed on less those it was given:
@@ -266,8 +285,15 @@ fn frames(block: &AudioBlock) -> i64 {
 }
 
 /// Plays `device` for `seconds` through the device input's hand-off and
-/// stamper, program audio and the output's pacer; see the module docs.
-fn play(mut device: Device, seconds: u64) -> Run {
+/// stamper, program audio and the output's pacer, the output starting as
+/// the device input opens; see the module docs.
+fn play(device: Device, seconds: u64) -> Run {
+    play_from(device, seconds, 0)
+}
+
+/// [`play`], the output starting (its frame count zero) at tick
+/// `output_at`: the board's blocks drained before then are not heard.
+fn play_from(mut device: Device, seconds: u64, output_at: u64) -> Run {
     let rate = device.rate;
     let (mut sink, reader) = handoff(2, rate, MAX_FRAMES, 64);
     let mut stamper = Stamper::new(SourceId("board".into()), rate, 2, secs(OPENED));
@@ -276,6 +302,7 @@ fn play(mut device: Device, seconds: u64) -> Run {
     let mut pacer = AudioPacer::new(rate, 2, FPS as u32, AUDIO_SLACK, AUDIO_MAX_LEAD);
     let silence = [0.0; 2 * MAX_FRAMES];
     let (mut lead, mut found, mut edited) = (Vec::new(), Vec::new(), 0);
+    let (mut position, mut offsets) = (0u64, Vec::new());
     let mut next = device.callback();
     for tick in 1..=seconds * FPS {
         let now = OPENED + tick as f64 / FPS as f64;
@@ -295,13 +322,27 @@ fn play(mut device: Device, seconds: u64) -> Run {
         handles.queue.push(blocks);
         let taken = audio.take(&[]);
         edited += taken.iter().map(frames).sum::<i64>();
-        pacer.plan(tick, taken);
+        if tick <= output_at {
+            continue;
+        }
+        let ticks = tick - output_at;
+        for item in pacer.plan(ticks, taken) {
+            match item {
+                PacedAudio::Silence(n) => position += n,
+                PacedAudio::Block(block) => {
+                    let pts = block.pts.as_secs_f64();
+                    offsets.push((pts, position as f64 / f64::from(rate) - pts));
+                    position += frames(&block) as u64;
+                }
+            }
+        }
         let stats = pacer.stats();
-        let ahead = (stats.pushed + stats.silence) as f64 - pacer.target(tick) as f64;
+        let ahead = (stats.pushed + stats.silence) as f64 - pacer.target(ticks) as f64;
         lead.push(ahead * 1000.0 / f64::from(rate));
     }
     Run {
         lead,
+        offsets,
         found,
         edited,
         pacer: pacer.stats(),
