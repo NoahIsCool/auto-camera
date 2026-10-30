@@ -11,12 +11,13 @@
 //! * A block held out of the fit enters no sum: it only moves the origin,
 //!   and `error` along the fitted line with it.
 //! * A held run ends at the first block back within the threshold, at
-//!   [`CONFIRM_BLOCKS`] blocks in a row at one level, or once it has
-//!   lasted its limit, whichever comes first.
+//!   [`CONFIRM_BLOCKS`] blocks in a row at one level spanning
+//!   [`CONFIRM_THRESHOLDS`] times the threshold of input time, or once it
+//!   has lasted its limit, whichever comes first.
 
 use std::time::Duration;
 
-use super::CONFIRM_BLOCKS;
+use super::{CONFIRM_BLOCKS, CONFIRM_THRESHOLDS};
 
 /// One epoch's state: the running sums of its weighted fit, with input
 /// time `x` measured from the latest block's first frame. The sums `w` to
@@ -60,7 +61,13 @@ pub(super) struct Epoch {
     wrr: f64,
     /// `Σw` over the same blocks: the input time of the predictions
     /// scored, faded like the rest.
-    pub(super) wr: f64,
+    wr: f64,
+    /// `Σw·r²` over the residuals `r` of the blocks weighed against the
+    /// level alone, early in the epoch (from the second block on, held
+    /// blocks left out).
+    lrr: f64,
+    /// `Σw` over the same blocks.
+    lr: f64,
     /// Fitted timing error `û` at the latest block, in seconds, from the
     /// epoch's first block.
     pub(super) error: f64,
@@ -101,6 +108,24 @@ impl Epoch {
         }
     }
 
+    /// The blocks' scatter about the epoch's level, in seconds, over the
+    /// blocks weighed against it: zero until one was.
+    pub(super) fn level_scatter(&self) -> f64 {
+        if self.lr > 0.0 {
+            (self.lrr / self.lr).sqrt()
+        } else {
+            0.0
+        }
+    }
+
+    /// Scores the residual `r` against the level alone of a block of
+    /// `frames` frames taken in early in the epoch.
+    pub(super) fn score_level(&mut self, r: f64, frames: u64, rate: f64) {
+        let weight = frames as f64 / rate;
+        self.lrr += weight * r * r;
+        self.lr += weight;
+    }
+
     /// Ages the sums by `dx` seconds of input time (memory `smoothing`),
     /// moving their origin to the new block's first frame.
     pub(super) fn age(&mut self, dx: f64, smoothing: f64) {
@@ -121,6 +146,18 @@ impl Epoch {
         self.cww *= fade2;
         self.wrr *= fade;
         self.wr *= fade;
+        self.lrr *= fade;
+        self.lr *= fade;
+    }
+
+    /// The current segment's level: the weighted mean of its blocks'
+    /// timing error, in seconds, what the fit predicts with no slope.
+    pub(super) fn level(&self) -> f64 {
+        if self.w > 0.0 {
+            self.wu / self.w
+        } else {
+            self.error
+        }
     }
 
     /// Carries the fit along its line to an origin `dx` seconds on, for a
@@ -188,6 +225,9 @@ pub(super) struct Held {
     level: f64,
     /// Blocks of the current run, its first included.
     run: u64,
+    /// Input time from the current run's first block to the latest, in
+    /// seconds.
+    span: f64,
     /// Input time from the first held block to the latest, in seconds.
     since: f64,
 }
@@ -200,7 +240,8 @@ pub(super) enum Verdict {
     Back,
     /// The block is held: it starts a run or the run goes on.
     Held,
-    /// The block makes [`CONFIRM_BLOCKS`] in a row at one level: a step.
+    /// The block makes [`CONFIRM_BLOCKS`] in a row at one level, over
+    /// [`CONFIRM_THRESHOLDS`] times the threshold of input time: a step.
     Step,
     /// The run lasted its limit without settling or coming back.
     Lost,
@@ -212,6 +253,7 @@ impl Held {
         Self {
             level: residual,
             run: 1,
+            span: 0.0,
             since: 0.0,
         }
     }
@@ -227,10 +269,11 @@ impl Held {
         self.since += dx;
         if (residual - self.level).abs() <= threshold {
             self.run += 1;
+            self.span += dx;
         } else {
-            (self.level, self.run) = (residual, 1);
+            (self.level, self.run, self.span) = (residual, 1, 0.0);
         }
-        if self.run >= CONFIRM_BLOCKS {
+        if self.run >= CONFIRM_BLOCKS && self.span >= CONFIRM_THRESHOLDS * threshold {
             Verdict::Step
         } else if self.since > limit {
             Verdict::Lost
@@ -275,5 +318,28 @@ mod tests {
         }
         assert_eq!(seen, Verdict::Lost);
         assert!(held.since > limit);
+    }
+
+    #[test]
+    fn a_run_of_short_blocks_confirms_a_level_only_over_its_span() {
+        // 32-frame blocks at 48 kHz, 0.67 ms of input each, beyond a 2 ms
+        // threshold: four in a row at one level are not yet a step, a run
+        // spanning three thresholds of input time is.
+        let (step, limit, dx) = (0.002, 0.2, 32.0 / 48_000.0);
+        let mut held = Held::new(-0.015);
+        let blocks = (CONFIRM_THRESHOLDS * step / dx).ceil() as u64 + 1;
+        for k in 2..blocks {
+            assert_eq!(held.weigh(-0.015, dx, step, limit), Verdict::Held, "{k}");
+        }
+        assert!(blocks > CONFIRM_BLOCKS);
+        assert_eq!(held.weigh(-0.015, dx, step, limit), Verdict::Step);
+        // Residuals rising by a block's length a block (PTS held from going
+        // back after a glitch ahead) never stay at one level that long.
+        let mut held = Held::new(-0.015);
+        for k in 1..19 {
+            let r = -0.015 + dx * f64::from(k);
+            assert_eq!(held.weigh(r, dx, step, limit), Verdict::Held, "{k}");
+        }
+        assert_eq!(held.weigh(-0.0015, dx, step, limit), Verdict::Back);
     }
 }
