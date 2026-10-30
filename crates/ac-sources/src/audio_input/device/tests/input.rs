@@ -1,11 +1,14 @@
 //! The device input driven through a fake backend: the test plays the
 //! device's callbacks (its buffers, an overload, the device going away),
-//! so the input's worker, its health and its supervision run here as they
-//! would on CoreAudio.
+//! so the input's worker, its health, its log lines and its supervision
+//! run here as they would on CoreAudio. The log lines are read through a
+//! subscriber that this test binary installs once as its global one, as
+//! the worker logs from a thread of its own.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::*;
 use crate::audio_input::supervised::SupervisedAudio;
@@ -475,12 +478,15 @@ fn a_supervisor_shows_the_trouble_and_reopens_the_board_when_it_is_back() {
     };
     let mut input = SupervisedAudio::start(opener, offline, clock, quick).unwrap();
     let mut cb = backend.callbacks();
+    // The gap after the second block: one at the second is taken for the
+    // first block's host time being off (see `timing`).
     play(&mut cb.sink, start, 0);
-    for k in 1..=52 {
+    play(&mut cb.sink, start, 1);
+    for k in 2..=53 {
         play(&mut cb.sink, start + ms(30), k);
     }
     let mut got = Vec::new();
-    drain_until(&input, &mut got, 53);
+    drain_until(&input, &mut got, 54);
     // The gap is shown while the board stays on air.
     assert!(eventually(|| input.error().is_some_and(
         |e| e.starts_with("audio discontinuity (1 so far)")
@@ -504,10 +510,10 @@ fn a_supervisor_shows_the_trouble_and_reopens_the_board_when_it_is_back() {
     for k in 0..3 {
         play(&mut again.sink, start + ms(500), k);
     }
-    drain_until(&input, &mut got, 56);
+    drain_until(&input, &mut got, 57);
     assert_eq!(input.state(), SourceState::Running);
     assert_eq!(input.error(), None);
-    assert_eq!(seqs(&got), (0..56).collect::<Vec<u64>>());
+    assert_eq!(seqs(&got), (0..57).collect::<Vec<u64>>());
     assert!(got.windows(2).all(|w| w[0].pts < w[1].pts), "PTS go on");
     input.stop();
     assert!(again.dropped.load(Ordering::SeqCst));
@@ -516,4 +522,126 @@ fn a_supervisor_shows_the_trouble_and_reopens_the_board_when_it_is_back() {
 /// The sequence numbers of `blocks`.
 fn seqs(blocks: &[AudioBlock]) -> Vec<u64> {
     blocks.iter().map(|b| b.seq).collect()
+}
+
+/// Log lines as (the event's `input` field, its message), in order.
+type Lines = Arc<Mutex<Vec<(String, String)>>>;
+
+/// The log lines of the device inputs' target, from the subscriber this
+/// test binary installs as its global one on the first call.
+fn logged() -> Lines {
+    /// The lines, shared with the subscriber.
+    static LINES: OnceLock<Lines> = OnceLock::new();
+    LINES
+        .get_or_init(|| {
+            let lines = Arc::new(Mutex::new(Vec::new()));
+            let capture = Capture {
+                lines: lines.clone(),
+                spans: AtomicU64::new(1),
+            };
+            tracing::subscriber::set_global_default(capture)
+                .expect("no other global subscriber in this test binary");
+            lines
+        })
+        .clone()
+}
+
+/// A subscriber that keeps the device inputs' log lines.
+struct Capture {
+    /// The lines, in order.
+    lines: Lines,
+    /// Next span id (spans are not used, but must get ids).
+    spans: AtomicU64,
+}
+
+/// An event's `input` field and message.
+#[derive(Default)]
+struct Fields {
+    /// Its `input` field.
+    input: String,
+    /// Its message.
+    message: String,
+}
+
+impl tracing::field::Visit for Fields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        match field.name() {
+            "input" => self.input = format!("{value:?}"),
+            "message" => self.message = format!("{value:?}"),
+            _ => {}
+        }
+    }
+}
+
+impl tracing::Subscriber for Capture {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        // The target of the device inputs' own lines (see `input`).
+        metadata.target() == "ac_sources::audio_device"
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(self.spans.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        lock(&self.lines).push((fields.input, fields.message));
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[test]
+fn an_overloads_log_line_leaves_the_gap_it_left_a_line_of_its_own() {
+    let lines = logged();
+    let start = Duration::from_secs(5);
+    let backend = FakeDevices::new(table(), start);
+    let id = SourceId("logged-board".into());
+    let clock = Arc::new(VirtualClock::new());
+    let mut input = DeviceInput::open(
+        id.clone(),
+        BOARD,
+        &*backend,
+        DeviceOptions::default(),
+        clock,
+    )
+    .unwrap();
+    let mut cb = backend.callbacks();
+    for k in 0..3 {
+        play(&mut cb.sink, start, k);
+    }
+    // The cycle ran late and lost a block's audio: an overload now, the
+    // gap half a second of audio later.
+    cb.events.overload();
+    assert!(eventually(|| input.overloads() == 1));
+    for k in 3..60 {
+        play(&mut cb.sink, start + ms(10), k);
+    }
+    let mut got = Vec::new();
+    drain_until(&input, &mut got, 60);
+    let mine = || -> Vec<String> {
+        lock(&lines)
+            .iter()
+            .filter(|(input, _)| *input == id.0)
+            .map(|(_, message)| message.clone())
+            .collect()
+    };
+    let gap = "audio discontinuity (1 so far; the device reported 1 overload): 10.0 ms of \
+               audio missing before block 3 (its host time jumped ahead)";
+    assert!(
+        eventually(|| mine().iter().any(|m| m == gap)),
+        "{:?}",
+        mine()
+    );
+    let overload = "the device reported an overload (1 so far): its I/O cycle ran late, so its \
+                    audio may have a gap";
+    assert!(mine().iter().any(|m| m == overload), "{:?}", mine());
+    input.stop();
 }

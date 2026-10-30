@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use super::input::{LOG_QUIET, QuietLog};
+use super::input::{LOG_QUIET, NoticeLog, QuietLog};
 use super::*;
 use crate::audio_input::fake::fake_sample;
 use crate::audio_input::{AudioInputConfig, open_audio_input};
@@ -301,6 +301,29 @@ fn the_log_takes_a_line_per_quiet_time_and_counts_the_rest() {
     assert_eq!(log.admit(t0 + LOG_QUIET - ms(1)), None);
     assert_eq!(log.admit(t0 + LOG_QUIET), Some(2), "two held back");
     assert_eq!(log.admit(t0 + LOG_QUIET * 3), Some(0));
+}
+
+#[test]
+fn an_overloads_line_does_not_hold_back_the_line_of_the_gap_it_left() {
+    let mut log = NoticeLog::default();
+    let t0 = Instant::now();
+    let overload = "the device reported an overload (1 so far)";
+    let gap = "audio discontinuity (1 so far): 10.0 ms of audio missing before block 3";
+    assert_eq!(log.line(overload, true, t0).as_deref(), Some(overload));
+    // Its gap is measured half a second later, and logged.
+    assert_eq!(log.line(gap, false, t0 + ms(500)).as_deref(), Some(gap));
+    // Each kind is still quiet on its own, and counts what it held back.
+    assert_eq!(log.line(overload, true, t0 + ms(600)), None);
+    assert_eq!(log.line(gap, false, t0 + ms(1100)), None);
+    assert_eq!(
+        log.line("the second", true, t0 + LOG_QUIET).as_deref(),
+        Some("the second (1 more since the last line)")
+    );
+    assert_eq!(
+        log.line("the third", false, t0 + LOG_QUIET + ms(500))
+            .as_deref(),
+        Some("the third (1 more since the last line)")
+    );
 }
 
 #[test]
