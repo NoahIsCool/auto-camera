@@ -38,7 +38,7 @@
 //!
 //! The log is kept quiet apart for each: at most a line per [`LOG_QUIET`]
 //! for the discontinuities and another for the overloads, the ones held
-//! back counted on the next line of their kind ([`NoticeLog`]). With one
+//! back counted on the next line of their kind (`NoticeLog`). With one
 //! quiet time for both, an overload's line would hold back the line of
 //! the gap it left, half a second later, and the log would never say how
 //! much audio was lost.
@@ -77,8 +77,9 @@ const TARGET: &str = "ac_sources::audio_device";
 /// How often the worker looks at the hand-off.
 pub const HANDOFF_POLL: Duration = Duration::from_millis(2);
 
-/// Least time between two log lines about one input's discontinuities;
-/// the ones in between are counted on the next line.
+/// Least time between two log lines of one kind (discontinuities, or
+/// overloads) about one input; the ones of that kind in between are counted
+/// on its next line.
 pub const LOG_QUIET: Duration = Duration::from_secs(10);
 
 /// How a device is read.
@@ -298,7 +299,7 @@ impl Drop for DeviceInput {
 pub(crate) struct QuietLog {
     /// When the newest line was logged.
     last: Option<Instant>,
-    /// Discontinuities held back since.
+    /// Notices of its kind held back since.
     held: u64,
 }
 
