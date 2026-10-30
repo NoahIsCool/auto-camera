@@ -81,13 +81,13 @@
 //! A smaller residual well clear of the PTS's jitter, beyond
 //! [`DriftSettings::step`] (2 ms) and [`STEP_SIGMAS`] times the blocks'
 //! scatter about their predictions, may be a **step**: audio lost in a
-//! stall or dropped by a full ring (the PTS step forward by its length),
-//! or PTS that went back. It may also be a timestamp gone astray for a
-//! block or a few (a host-time glitch), which the blocks after it put
-//! right. So the block is first *held* ([`Observation::Held`]): kept out
-//! of the fit and of the scatter, the fit carried on along its line, and
-//! nothing is told yet. A block back within the threshold of the fit ends
-//! the hold: the held blocks strayed, nothing is made up, and the
+//! stall or dropped by a full ring (the PTS step forward by its length), or
+//! PTS that went back. It may also be a timestamp gone astray for a few
+//! blocks (a host-time glitch; how few, below), which the blocks after it
+//! put right. So the block is first *held* ([`Observation::Held`]): kept
+//! out of the fit and of the scatter, the fit carried on along its line,
+//! and nothing is told yet. A block back within the threshold of the fit
+//! ends the hold: the held blocks strayed, nothing is made up, and the
 //! estimates are as if they had never come. Residuals that stay at one
 //! level (each within the threshold of the first of the run) for
 //! [`CONFIRM_BLOCKS`] blocks in a row, the first included, and over at
@@ -100,6 +100,20 @@
 //! blocks it leaves the threshold before it has lasted that long, and is
 //! never taken for a level. Held blocks that have neither settled nor come
 //! back after twice the discontinuity of input time are a break.
+//!
+//! A stray is therefore left alone only while it is shorter than what
+//! confirms a step: it must come back within three blocks (the fourth at
+//! its level would confirm it) or, with blocks shorter than the threshold,
+//! before its run spans three thresholds of input time (6 ms at the default
+//! 2 ms step) from its first block's start to a later block's start,
+//! whichever is the longer. A stray that stays off at one level longer
+//! cannot be told from a step and is told as one, at the block that
+//! confirms it; the PTS coming back are then a step the other way, held and
+//! confirmed in turn, the fourth block back (or the one completing the
+//! span) told as a step of the opposite size. Made up by the corrector,
+//! that is two edits of the stray's size (silence and a cut), a timing
+//! error of that size for about as long as the stray lasted, and no lasting
+//! offset.
 //!
 //! Steps are told from an epoch's third block on (a second block that is
 //! off starts the epoch again, above), so that a loss or a stray timestamp

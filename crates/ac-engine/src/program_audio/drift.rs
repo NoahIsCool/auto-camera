@@ -33,13 +33,21 @@
 //! few blocks after it confirm it, in the first second of a connection as
 //! later: that much silence ahead of the block that confirms it, or for a
 //! step back that much cut, and counted ([`InputDrift::steps`]). A
-//! timestamp that strays for a block or a few and comes back (a host-time
+//! timestamp that strays and comes back within three blocks (a host-time
 //! glitch) is not a step: those blocks pass as they are and nothing is
-//! made up. A loss close to the slack can run the pacer out of slack too;
-//! then the pacer's silence comes first, and the corrector's comes after
-//! it as late audio, which the pacer cuts against the silence it owes, so
-//! the gap is made up once either way. A stall whose audio arrives late
-//! keeps its PTS and is not a step.
+//! made up. One that stays off for four blocks or more (and, should the
+//! blocks be shorter than the step threshold, 2 ms, for at least three
+//! thresholds of input from its first block to its fourth or a later one)
+//! is confirmed at that block like a loss and made up, and taken back
+//! once the fourth block back confirms the way back: two short edits
+//! the size of the stray (silence and a cut, for PTS stamped late), a sync
+//! error that size for about as long as it lasted, and no lasting offset
+//! ([`ac_audio::drift`] has the rule). A loss close to the slack can run
+//! the pacer out of slack too; then the pacer's silence comes first, and
+//! the corrector's comes after it as late audio, from which the pacer cuts
+//! exactly the silence it owes, splitting a block ([`crate::audio`]), so
+//! the gap is made up once either way and the audio ends where it was. A
+//! stall whose audio arrives late keeps its PTS and is not a step.
 //!
 //! A change of format (a reconnection at another rate) starts a new
 //! corrector, counted as a reset too. The few frames the old one held back

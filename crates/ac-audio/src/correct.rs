@@ -62,16 +62,20 @@
 //! block is held back while the estimator waits for the blocks that confirm
 //! a step ([`Observation::Held`]): they pass as they would have, a few
 //! blocks of audio `g` early (or late), and a timestamp that strayed and
-//! came back is never made up at all: a glitch in the PTS is not edited
-//! into the audio. A step in an epoch's first second is made up too, and
-//! the timing reference is net of it, so `E` counts from the level before
-//! the step and the silence is not taken back over the settle. Making up
-//! lost audio here, once the PTS show it, is what keeps it from being made
-//! up twice. The program pacer fills a gap only when its slack runs out
-//! before the audio after it comes, which a loss close to the slack can do
-//! as well; its silence then comes first, and the corrector's arrives after
-//! it like the late backlog of a stall, which the pacer cuts against the
-//! silence it owes. Every step made up is counted ([`DriftStats::steps`]).
+//! came back before the blocks confirmed it (within three blocks; see
+//! [`crate::drift`]) is never made up at all: a glitch in the PTS is not
+//! edited into the audio. One that stayed off long enough to be confirmed
+//! is made up like a step, and its way back is a step the other way, made
+//! up in turn once confirmed: two edits of its size that cancel. A step in
+//! an epoch's first second is made up too, and the timing reference is net
+//! of it, so `E` counts from the level before the step and the silence is
+//! not taken back over the settle. Making up lost audio here, once the PTS
+//! show it, is what keeps it from being made up twice. The program pacer
+//! fills a gap only when its slack runs out before the audio after it
+//! comes, which a loss close to the slack can do as well; its silence then
+//! comes first, and the corrector's arrives after it like the late backlog
+//! of a stall, from which the pacer cuts exactly the silence it owes. Every
+//! step made up is counted ([`DriftStats::steps`]).
 //!
 //! # Breaks
 //!
