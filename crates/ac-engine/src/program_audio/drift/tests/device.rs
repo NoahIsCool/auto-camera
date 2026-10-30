@@ -21,17 +21,20 @@
 //!
 //! The device is a model of what cpal's CoreAudio host delivers: a sample
 //! clock some ppm off the host clock; IO buffers of a size that may change;
-//! for each, `mHostTime`, the host time of its first frame give or take
-//! [`JITTER`]; cpal's capture time, that less the IO buffer (this
-//! callback's own length when the device does not report its size) and the
-//! device's latency and safety offset; and the callback, at the buffer's
-//! end plus up to [`CALLBACK_DELAY`]. Its events are buffers whose host
-//! time is off (a glitch of one buffer, an excursion of several), IO
-//! cycles it skips (their audio lost, as in an overload), frames its
-//! sample clock skips (audio lost, the HAL resuming at a sample time of
-//! its own) and a change of buffer size. The engine ticks at [`FPS`] and
-//! drains what was delivered by then; the output starts with the device
-//! input, or a given number of ticks later.
+//! for each, `mHostTime`, the host time of its first frame give or take its
+//! jitter ([`JITTER`] for CoreAudio's own, more for a noisier driver);
+//! cpal's capture time, that less the IO buffer (this callback's own length
+//! when the device does not report its size) and the device's latency and
+//! safety offset; and the callback, at the buffer's end plus up to
+//! [`CALLBACK_DELAY`]. Its events are buffers whose host time is off (a
+//! glitch of one buffer, an excursion of several), IO cycles it skips
+//! (their audio lost, as in an overload), frames its sample clock skips
+//! (audio lost, the HAL resuming at a sample time of its own) and a change
+//! of buffer size. The connection opens just before the device's first
+//! frame, which was then captured before it (a device already running), or
+//! a given time before that capture. The engine ticks at [`FPS`] from the
+//! open and drains what was delivered by then; the output starts with the
+//! device input, or a given number of ticks later.
 //!
 //! What reaches the encoder is read from the pacer's lead (audio pushed,
 //! silence included, less the video's share), which only audio added or
@@ -51,13 +54,16 @@
 //!   the device input reports one glitch when the glitch was beyond its
 //!   tolerance, else nothing.
 //! * Four buffers off as much: no lasting offset and no break. (The drift
-//!   correction may take such an excursion for a step once its fourth
-//!   block confirms it, and take it back once the blocks after it confirm
-//!   the way back: the silence and the cut cancel.) So may a one-buffer
-//!   glitch of an IO buffer longer than three hand-off blocks (more than
-//!   3072 frames), which the hand-off cuts into four blocks or more: a
-//!   limit known and accepted, as CoreAudio's default IO buffer is far
-//!   shorter.
+//!   correction may take such an excursion for a step once its fourth block
+//!   confirms it, and take it back once the blocks after it confirm the way
+//!   back: the silence and the cut cancel.) So may a one-buffer glitch of
+//!   an IO buffer longer than three hand-off blocks (more than 3072
+//!   frames), which the hand-off cuts into four blocks or more: a limit
+//!   known and accepted, as CoreAudio's default IO buffer is far shorter.
+//!   Four or ten buffers 60 to 99 ms ahead, the output started after the
+//!   board: the correction's silence lifts the pacer's lead over its limit,
+//!   what the pacer drops there it gives back, and the lead ends its twin's
+//!   ([`lead_limit`]).
 //! * A one-buffer glitch of 8 to 60 ms either way at the smallest buffers
 //!   (32 frames at 48 kHz, 64 at 96 kHz, 128 at 192 kHz), whose PTS the
 //!   device input holds at the newest one for dozens of blocks after a
@@ -84,6 +90,12 @@
 //!   frames: made up once, any silence the pacer filled cut exactly, the
 //!   board's audio left within 5 ms of its twin's and in sync but for the
 //!   blocks that confirm the step ([`near_slack`]).
+//! * Host times that two readings fit ([`told_apart`]): a glitch of a
+//!   connection's second buffer, nothing filled or cut; a first buffer
+//!   off and a cycle lost right after it, the loss made up once; a glitch
+//!   back that comes home in steps, one glitch and nothing filled; and
+//!   jitter of ±1 to ±1.5 ms on every buffer for minutes, no rewind, no
+//!   step and nothing for the pacer.
 
 use std::time::Duration;
 
@@ -97,7 +109,9 @@ use crate::output::{AUDIO_MAX_LEAD, AUDIO_SLACK};
 use crate::program_audio::tests::scripted;
 use crate::program_audio::{AudioInputView, Origin, ProgramAudio};
 
+mod lead_limit;
 mod near_slack;
+mod told_apart;
 
 /// Host time of the device's first frame, in seconds.
 const HOST0: f64 = 100.0;
@@ -114,7 +128,7 @@ const FPS: u64 = 30;
 const EXTRA: u64 = 40;
 
 /// Most a buffer's host time is off its first frame's, either way, in
-/// seconds.
+/// seconds, for CoreAudio's own timestamps.
 const JITTER: f64 = 30e-6;
 
 /// Most a callback runs after its buffer ends, in seconds.
@@ -122,6 +136,9 @@ const CALLBACK_DELAY: f64 = 150e-6;
 
 /// The hand-off's largest block, in frames.
 const MAX_FRAMES: usize = 1024;
+
+/// The longest IO buffer a device here may have, in frames.
+const LONGEST_BUFFER: usize = 4096;
 
 /// The rate the short runs play at, in Hz.
 const RATE: u32 = 48_000;
@@ -169,6 +186,12 @@ struct Device {
     rate: u32,
     /// How fast its sample clock runs, in ppm of the host clock.
     ppm: f64,
+    /// Most a buffer's host time is off its first frame's, either way, in
+    /// seconds: [`JITTER`], or more for a noisier driver.
+    jitter: f64,
+    /// Host time at which the connection opened, in seconds: the PTS
+    /// origin and the start of the video's timeline.
+    opened: f64,
     /// Frames per IO buffer now.
     buffer: u64,
     /// The IO buffer size cpal read when the stream was built, if it could.
@@ -193,6 +216,8 @@ impl Device {
         Self {
             rate,
             ppm: 0.5,
+            jitter: JITTER,
+            opened: OPENED,
             buffer,
             reported: Some(buffer),
             events: Vec::new(),
@@ -206,6 +231,15 @@ impl Device {
     /// The device with `events`.
     fn with(mut self, events: &[(f64, Event)]) -> Self {
         self.events = events.to_vec();
+        self
+    }
+
+    /// The device with the connection opened `s` seconds before its first
+    /// frame was captured (its host time less the latency cpal takes off),
+    /// not just after: the first block's PTS is then `s`, not zero.
+    fn opened_before(mut self, s: f64) -> Self {
+        let latency = (self.reported.unwrap_or(self.buffer) + EXTRA) as f64;
+        self.opened = HOST0 - latency / f64::from(self.rate) - s;
         self
     }
 
@@ -230,7 +264,7 @@ impl Device {
             }
         }
         let frames = self.buffer;
-        let mut host = self.host_of(self.frame) + spread(2 * self.frame) * JITTER;
+        let mut host = self.host_of(self.frame) + spread(2 * self.frame) * self.jitter;
         if self.off.0 > 0 {
             host += self.off.1;
             self.off.0 -= 1;
@@ -294,18 +328,18 @@ fn play(device: Device, seconds: u64) -> Run {
 /// [`play`], the output starting (its frame count zero) at tick
 /// `output_at`: the board's blocks drained before then are not heard.
 fn play_from(mut device: Device, seconds: u64, output_at: u64) -> Run {
-    let rate = device.rate;
+    let (rate, opened) = (device.rate, device.opened);
     let (mut sink, reader) = handoff(2, rate, MAX_FRAMES, 64);
-    let mut stamper = Stamper::new(SourceId("board".into()), rate, 2, secs(OPENED));
+    let mut stamper = Stamper::new(SourceId("board".into()), rate, 2, secs(opened));
     let (slot, handles) = scripted("board", Some((rate, 2)), None);
     let mut audio = ProgramAudio::with_inputs(Some(Origin::Input(0)), vec![slot]);
     let mut pacer = AudioPacer::new(rate, 2, FPS as u32, AUDIO_SLACK, AUDIO_MAX_LEAD);
-    let silence = [0.0; 2 * MAX_FRAMES];
+    let silence = vec![0.0; 2 * LONGEST_BUFFER];
     let (mut lead, mut found, mut edited) = (Vec::new(), Vec::new(), 0);
     let (mut position, mut offsets) = (0u64, Vec::new());
     let mut next = device.callback();
     for tick in 1..=seconds * FPS {
-        let now = OPENED + tick as f64 / FPS as f64;
+        let now = opened + tick as f64 / FPS as f64;
         let mut blocks = Vec::new();
         while next.0 <= now {
             let (_, at, length) = next;
