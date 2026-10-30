@@ -48,8 +48,27 @@
 //! * Four buffers off as much: no lasting offset and no break. (The drift
 //!   correction may take such an excursion for a step once its fourth
 //!   block confirms it, and take it back once the blocks after it confirm
-//!   the way back: the silence and the cut cancel.)
-//! * One IO cycle lost: made up once, by the frames lost.
+//!   the way back: the silence and the cut cancel.) So may a one-buffer
+//!   glitch of an IO buffer longer than three hand-off blocks (more than
+//!   3072 frames), which the hand-off cuts into four blocks or more: a
+//!   limit known and accepted, as CoreAudio's default IO buffer is far
+//!   shorter.
+//! * A one-buffer glitch of 8 to 60 ms either way at the smallest buffers
+//!   (32 frames at 48 kHz, 64 at 96 kHz, 128 at 192 kHz), whose PTS the
+//!   device input holds at the newest one for dozens of blocks after a
+//!   glitch ahead: nothing filled or cut, one glitch reported.
+//! * One IO cycle lost: made up once, by the frames lost; so are a cycle
+//!   lost in a connection's first tenth of a second and one lost after it,
+//!   at 0.4 or 1 s.
+//! * A first buffer whose host time is off by 8 to 30 ms either way, or
+//!   timestamps that step back for good by 15 or 30 ms, and then a cycle
+//!   lost (at 0.25 s; three or ten callbacks after the rewind): the loss
+//!   is made up once, the lead that of the loss alone within 0.1 ms.
+//! * Timestamps that step back for good by 2 to 15 ms at 512 or 1024
+//!   frames, below half a buffer or above it: absorbed by the device
+//!   input, which reports one rewind, and nothing cut (at most the
+//!   resampler's half kernel held back, should the jitter left in the
+//!   device input's map tip the drift estimate past its dead band).
 //! * A board 37 ppm fast for three hours, a cycle lost every ten minutes:
 //!   the lead within 20 ms of where it settled throughout, each loss made
 //!   up once, the drift corrected.
@@ -59,6 +78,7 @@
 
 use std::time::Duration;
 
+use ac_audio::resample::HALF_TAPS;
 use ac_core::SourceId;
 use ac_media::AudioBlock;
 use ac_sources::audio_input::device::{CaptureLatency, Discontinuity, Stamper, handoff};
@@ -289,10 +309,10 @@ fn play(mut device: Device, seconds: u64) -> Run {
     }
 }
 
-/// The device input's tolerance after a block of `frames` at [`RATE`], in
+/// The device input's tolerance after a block of `frames` at `rate`, in
 /// seconds: half the block, at least 1 ms.
-fn tolerance(frames: u64) -> f64 {
-    (frames as f64 / 2.0 / f64::from(RATE)).max(0.001)
+fn tolerance(frames: u64, rate: u32) -> f64 {
+    (frames as f64 / 2.0 / f64::from(rate)).max(0.001)
 }
 
 /// Checks that `run` made up nothing and left the pacer nothing to do,
@@ -321,7 +341,7 @@ fn a_one_buffer_host_time_glitch_is_neither_filled_nor_cut() {
                 untouched(&run, &what);
                 assert_eq!(run.edited, 0, "{what}");
                 assert!(run.apart(&twin, 0.0) <= 1.0, "{what}");
-                if ms / 1000.0 > tolerance(frames) {
+                if ms / 1000.0 > tolerance(frames, RATE) {
                     assert!(
                         matches!(run.found[..], [Discontinuity::Glitch { blocks: 1, .. }]),
                         "{what}"
@@ -356,7 +376,7 @@ fn an_excursion_of_four_buffers_leaves_no_lasting_offset() {
                 assert_eq!((run.pacer.silence, run.pacer.dropped), (0, 0), "{what}");
                 assert!(run.apart(&twin, EVENT_AT + 2.0) <= 1.0, "{what}");
                 assert!(run.edited.abs() <= 3, "{what}");
-                if ms / 1000.0 > tolerance(frames) {
+                if ms / 1000.0 > tolerance(frames, RATE) {
                     assert!(
                         matches!(run.found[..], [Discontinuity::Glitch { blocks: 4, .. }]),
                         "{what}"
@@ -484,4 +504,174 @@ fn callbacks_switching_between_512_and_128_frames_move_nothing() {
     );
     let late = unheld.lead.last().unwrap() - reported.lead.last().unwrap();
     assert!((late - 16.0).abs() < 1.0, "{late} ms");
+}
+
+/// `n` IO buffers of `frames` frames at [`RATE`], in seconds.
+fn buffers(n: u64, frames: u64) -> f64 {
+    (n * frames) as f64 / f64::from(RATE)
+}
+
+/// The sum of the gaps the device input reported in `run`, in seconds,
+/// when it reported nothing else.
+fn gaps(run: &Run) -> Option<f64> {
+    run.found
+        .iter()
+        .map(|d| match d {
+            Discontinuity::Gap { by, .. } => Some(by.as_secs_f64()),
+            _ => None,
+        })
+        .sum()
+}
+
+#[test]
+fn a_one_buffer_glitch_of_the_smallest_buffers_is_neither_filled_nor_cut() {
+    // After a glitch ahead the device input holds the PTS at the newest
+    // one until the timeline catches up: for a 60 ms glitch of 32-frame
+    // buffers, 90 blocks with the same PTS, which the drift correction
+    // must not confirm as a step. Twelve seconds, the glitch at six.
+    for (rate, frames) in [(48_000, 32u64), (96_000, 64), (192_000, 128)] {
+        let twin = play(Device::new(rate, frames), 12);
+        untouched(&twin, "twin");
+        assert!(twin.found.is_empty() && twin.edited == 0);
+        for ms in [8.0, 15.0, 30.0, 60.0] {
+            for by in [ms, -ms] {
+                let off = [(6.0, Event::Off(1, by / 1000.0))];
+                let run = play(Device::new(rate, frames).with(&off), 12);
+                let what = format!("{by} ms at {frames} frames, {rate} Hz: {:?}", run.found);
+                untouched(&run, &what);
+                assert_eq!(run.edited, 0, "{what}");
+                assert!(run.apart(&twin, 0.0) <= 1.0, "{what}");
+                assert!(ms / 1000.0 > tolerance(frames, rate));
+                assert!(
+                    matches!(run.found[..], [Discontinuity::Glitch { blocks: 1, .. }]),
+                    "{what}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_cycle_lost_in_a_connections_first_tenth_of_a_second_and_one_after_are_each_made_up() {
+    // The first loss before the third 1024-frame block (the sixth of 512
+    // frames); the second while the threshold of a fit bent by the first
+    // would still be wide, or after its gap was reported.
+    for frames in [512u64, 1024] {
+        let twin = play(Device::new(RATE, frames), 10);
+        for second in [0.4, 1.0] {
+            let lose = [(0.05, Event::Lose(1)), (second, Event::Lose(1))];
+            let run = play(Device::new(RATE, frames).with(&lose), 10);
+            let what = format!(
+                "{frames} frames, second loss at {second} s: {:?}, {:?}, {:?}",
+                run.found, run.view, run.pacer
+            );
+            // Both lost buffers in the PTS: one gap, or two once the first
+            // was reported before the second.
+            let lost = gaps(&run).expect("gaps alone");
+            assert!(
+                (lost - buffers(2, frames)).abs() <= 4.0 * JITTER,
+                "{lost} s: {what}"
+            );
+            assert_eq!(
+                (run.view.drift_steps, run.view.drift_resets),
+                (2, 0),
+                "{what}"
+            );
+            assert!((run.edited - 2 * frames as i64).abs() <= 6, "{what}");
+            assert_eq!((run.pacer.silence, run.pacer.dropped), (0, 0), "{what}");
+            assert!(run.apart(&twin, second + 1.0) <= 1.0, "{what}");
+        }
+    }
+}
+
+#[test]
+fn a_first_buffer_stamped_off_leaves_a_loss_after_it_made_up_once() {
+    for (frames, ms) in [(512u64, 8.0), (1024, 15.0), (1024, 30.0)] {
+        let lose = (0.25, Event::Lose(1));
+        let alone = play(Device::new(RATE, frames).with(&[lose]), 10);
+        for by in [ms, -ms] {
+            let first = (0.0, Event::Off(1, by / 1000.0));
+            let run = play(Device::new(RATE, frames).with(&[first, lose]), 10);
+            let what = format!(
+                "first buffer {by} ms at {frames} frames: {:?}, {:?}, {:?}",
+                run.found, run.view, run.pacer
+            );
+            // Nothing for the first buffer; the loss whole.
+            let lost = gaps(&run).expect("a gap alone");
+            assert_eq!(run.found.len(), 1, "{what}");
+            assert!((lost - buffers(1, frames)).abs() <= 2.0 * JITTER, "{what}");
+            assert_eq!(
+                (run.view.drift_steps, run.view.drift_resets),
+                (1, 0),
+                "{what}"
+            );
+            assert_eq!((run.pacer.silence, run.pacer.dropped), (0, 0), "{what}");
+            assert!(run.apart(&alone, 2.0) <= 0.1, "{what}");
+        }
+    }
+}
+
+#[test]
+fn a_lasting_rewind_leaves_a_loss_after_it_made_up_once() {
+    for frames in [512u64, 1024] {
+        for ms in [15.0, 30.0] {
+            for after in [3, 10] {
+                let at = EVENT_AT + buffers(after, frames);
+                let lose = (at, Event::Lose(1));
+                let alone = play(Device::new(RATE, frames).with(&[lose]), SECONDS);
+                let back = (EVENT_AT, Event::Off(u64::MAX, -ms / 1000.0));
+                let run = play(Device::new(RATE, frames).with(&[back, lose]), SECONDS);
+                let what = format!(
+                    "{ms} ms back at {frames} frames, a loss {after} buffers on: {:?}, {:?}, {:?}",
+                    run.found, run.view, run.pacer
+                );
+                // The rewind when the loss comes, the loss whole after its
+                // window.
+                assert!(
+                    matches!(&run.found[..], [
+                        Discontinuity::Rewind { by: back, .. },
+                        Discontinuity::Gap { by: lost, .. },
+                    ] if (back.as_secs_f64() - ms / 1000.0).abs() <= 2.0 * JITTER
+                        && (lost.as_secs_f64() - buffers(1, frames)).abs() <= 2.0 * JITTER),
+                    "{what}"
+                );
+                assert_eq!(
+                    (run.view.drift_steps, run.view.drift_resets),
+                    (1, 0),
+                    "{what}"
+                );
+                assert_eq!((run.pacer.silence, run.pacer.dropped), (0, 0), "{what}");
+                assert!(run.apart(&alone, at + 2.0) <= 0.1, "{what}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_lasting_step_back_is_absorbed_whatever_its_size() {
+    // Below half a buffer as above it: the device input moves its map,
+    // reports a rewind, and the drift correction has nothing to cut. The
+    // map keeps the jitter of the blocks either side of the jump (tens of
+    // microseconds), which can tip the drift estimate past its dead band:
+    // the resampler then takes over from the bit-for-bit path, which holds
+    // back its kernel's half length, and nothing more.
+    for frames in [512u64, 1024] {
+        let twin = play(Device::new(RATE, frames), SECONDS);
+        for ms in [2.02, 4.0, 5.0, 8.0, 10.0, 15.0] {
+            let back = [(EVENT_AT, Event::Off(u64::MAX, -ms / 1000.0))];
+            let run = play(Device::new(RATE, frames).with(&back), SECONDS);
+            let what = format!(
+                "{ms} ms back at {frames} frames: {:?}, {:?}, {:?}, edited {}",
+                run.found, run.view, run.pacer, run.edited
+            );
+            untouched(&run, &what);
+            assert!(run.edited.abs() <= HALF_TAPS as i64 + 3, "{what}");
+            assert!(run.apart(&twin, 0.0) <= 1.0, "{what}");
+            assert!(
+                matches!(run.found[..], [Discontinuity::Rewind { by, .. }]
+                    if (by.as_secs_f64() - ms / 1000.0).abs() <= 2.0 * JITTER),
+                "{what}"
+            );
+        }
+    }
 }

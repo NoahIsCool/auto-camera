@@ -18,7 +18,7 @@ use ac_output::{EncoderStats, StreamHealth, StreamState};
 
 mod audio;
 
-pub use audio::drift_line;
+pub use audio::{drift_line, drift_notice};
 
 /// Shown for a value that is not known.
 pub const NONE: &str = "–";

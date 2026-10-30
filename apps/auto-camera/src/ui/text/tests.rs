@@ -800,11 +800,51 @@ fn a_program_input_that_is_not_running_shows_why_not_a_stale_correction() {
     snap.audio_inputs[0].state = SourceState::Stopped;
     let stopped = Some(("Soundboard stopped".to_owned(), Tone::Warning));
     assert_eq!(drift_line(&snap), stopped);
-    // Running with an error (a discontinuity it reported): the error.
+    // Not running, the error is the drift line's alone.
+    assert_eq!(drift_notice(&snap), None);
+    // Running with an error (a discontinuity it delivered through): the
+    // correction, still applied, and the error on a line of its own.
     snap.audio_inputs[0].state = SourceState::Running;
     snap.audio_inputs[0].error = Some("audio discontinuity (1 so far)".into());
-    let running = "Soundboard: audio discontinuity (1 so far)".to_owned();
-    assert_eq!(drift_line(&snap), Some((running, Tone::Warning)));
+    let running = "Soundboard drift correction 0.0 ppm".to_owned();
+    assert_eq!(drift_line(&snap), Some((running, Tone::Plain)));
+    let notice = drift_notice(&snap);
+    assert_eq!(notice.as_deref(), Some("audio discontinuity (1 so far)"));
+}
+
+#[test]
+fn a_running_inputs_notice_leaves_its_correction_and_steps_in_view() {
+    // One harmless timestamp glitch, or a loss the correction made up, is
+    // kept as the board's error for the rest of the connection: the drift
+    // line stays plain with the correction and its steps, and the notice
+    // goes on a weak line under it.
+    let mut snap = snapshot();
+    let glitch = "audio discontinuity (1 so far): host time of 1 block(s) from block 10 was up \
+                  to 30.0 ms off, then came back: no audio missing";
+    let gap = "audio discontinuity (1 so far; the device reported 1 overload): 10.7 ms of \
+               audio missing before block 1406 (its host time jumped ahead)";
+    for notice in [glitch, gap] {
+        snap.audio_inputs = vec![ac_engine::AudioInputView {
+            error: Some(notice.into()),
+            drift_steps: 1,
+            ..board(-37.26)
+        }];
+        assert_eq!(
+            drift_line(&snap),
+            Some((
+                "Soundboard drift correction -37.3 ppm · 1 step made up".into(),
+                Tone::Plain
+            ))
+        );
+        assert_eq!(drift_notice(&snap).as_deref(), Some(notice));
+    }
+    // No notice, no line for it.
+    snap.audio_inputs[0].error = None;
+    assert_eq!(drift_notice(&snap), None);
+    // Not program audio: neither line.
+    snap.audio_inputs[0].error = Some(glitch.into());
+    snap.audio_inputs[0].program = false;
+    assert_eq!((drift_line(&snap), drift_notice(&snap)), (None, None));
 }
 
 #[test]
@@ -822,6 +862,7 @@ fn a_program_input_not_heard_for_its_rate_shows_why_alone() {
         ..board(-12.0)
     }];
     assert_eq!(drift_line(&snap), Some((why, Tone::Warning)));
+    assert_eq!(drift_notice(&snap), None, "the error is the drift line's");
     // Without the error (a view built by hand) it still says so.
     snap.audio_inputs[0].error = None;
     let bare = "Soundboard is not heard at its rate".to_owned();

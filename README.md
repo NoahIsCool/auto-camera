@@ -516,11 +516,13 @@ of 2 ppm pass through bit for bit, as a file input on the engine's clock
 always does; a source's embedded audio is never resampled, and drift of
 the video itself (a camera against the engine) is not corrected; drift
 beyond 1000 ppm is left to the fills and cuts. The window's output panel
-shows the program input's correction, its resets and the steps made up
-(or, while the input is not running or reports an error, its state and
-why, in amber, and while it is not heard for its rate, only why), and a
-headless summary reports them for every input (`audio_inputs`: `id`,
-`name`, `program`, `correction_ppm`, `drift_resets`, `drift_steps`).
+shows the program input's correction, its resets and the steps made up,
+with the trouble a running input delivered through (a device's
+discontinuities) on a weak line under it (while the input is not running,
+its state and why instead, in amber, and while it is not heard for its
+rate, only why), and a headless summary reports them for every input
+(`audio_inputs`: `id`, `name`, `program`, `correction_ppm`,
+`drift_resets`, `drift_steps`).
 
 On the Mac the board is an input of `kind = "device"`: its USB audio
 interface is a CoreAudio device, and so is anything else with a CoreAudio
@@ -581,13 +583,14 @@ not wait behind the overload's. A jump in the timestamps of more than a
 millisecond is reported half a second after it, once it has lasted (a
 rewind sooner, when audio is lost after it); timestamps that are off for a
 few blocks and then back are one timestamp glitch, with no audio missing
-and the input's timeline as it was. A device that sends nothing for 2 s is reopened. Device
-inputs need macOS and a build with `--features coreaudio`, which is opt-in
-like `onnx`; any other build loads the config, `--check` reports the input
-as a problem saying how to build, and the input stays offline with that
-message. macOS asks once whether the app (or the terminal it runs in) may
-use audio input; refused, the input runs on silence, until it is allowed
-in System Settings, Privacy & Security, Microphone.
+and the input's timeline as it was. A device that sends nothing for 2 s
+is reopened. Device inputs need macOS and a build with `--features
+coreaudio`, which is opt-in like `onnx`; any other build loads the
+config, `--check` reports the input as a problem saying how to build,
+and the input stays offline with that message. macOS asks once whether
+the app (or the terminal it runs in) may use audio input; refused, the
+input runs on silence, until it is allowed in System Settings, Privacy &
+Security, Microphone.
 
 A source's embedded audio is mixed to stereo by ffmpeg as it is decoded,
 with the matrix the encoder used on it before: a stereo track as it is, a
