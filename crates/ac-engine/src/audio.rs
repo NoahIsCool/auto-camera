@@ -34,7 +34,8 @@
 //!   than `slack` short of the target (the source stalled or stopped),
 //!   silence fills up to the exact target, *before* this tick's blocks
 //!   (the gap is in the past), because ffmpeg interleaves by timestamp and
-//!   would otherwise hold the video back. The silence is remembered as owed.
+//!   would otherwise hold the video back. The silence is remembered as
+//!   owed (but for the credit it gives back, below).
 //! * **Resuming.** The first audio after inserted silence is aligned to the
 //!   target: a deficit, however small, is filled, so a source that stopped
 //!   and restarted fresh does not play up to `slack` early.
@@ -93,8 +94,14 @@
 //!   was before the step. A real burst's audio keeps the lead near the
 //!   limit, so its credit is never given back and is forgotten after the
 //!   window; the half of the limit left free keeps the silence given back
-//!   from tripping the limit again. A lead already beyond half the limit
-//!   before such a step keeps the loss.
+//!   from tripping the limit again. The silence may come in one block
+//!   with the audio after it, which the limit then drops whole, silence
+//!   and all; taking the silence out again can then leave the pacer more
+//!   than the slack short, and the silence that fills that gap gives the
+//!   credit back first, only the rest of it owed by late audio (so a real
+//!   stall within the window after a burst leaves the burst's audio as
+//!   late as the burst left it, within `max_lead`). A lead already beyond
+//!   half the limit before such a step keeps the loss.
 //! * Blocks in another format than the encoder was opened with are dropped.
 //!
 //! The slack keeps ordinary block jitter from inserting silence and
@@ -239,9 +246,13 @@ impl AudioPacer {
         let tolerated = if resuming { 0 } else { self.slack };
         let mut out = Vec::with_capacity(kept.len() + 1);
         if have + incoming + tolerated < target {
+            // Silence for a gap gives back the credit first: only the rest
+            // is owed by late audio.
             let gap = target - have - incoming;
+            let given = gap.min(self.credit);
+            self.credit -= given;
             self.stats.silence += gap;
-            self.owed = self.owed.saturating_add(gap);
+            self.owed = self.owed.saturating_add(gap - given);
             self.owed_until = target.saturating_add(self.recovery);
             self.repaying = 0;
             self.starved = incoming == 0;
