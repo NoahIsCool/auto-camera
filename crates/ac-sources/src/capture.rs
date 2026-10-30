@@ -23,11 +23,12 @@
 //! [`LatestFrame`] mailbox as soon as it is read: a camera runs in real
 //! time, so its frames are not paced on a clock (there is nothing to wait
 //! for, and waiting would only add latency). ffmpeg does not wait either:
-//! its encoder runs on one thread, because a frame-threaded one hands a
-//! frame out only when a later one comes in ([`format`]), which would add
-//! a frame of latency, several under load, and keep a device's last frames
-//! from the source when it falls silent. The first frame moves the source
-//! from `Starting` to `Running`.
+//! its encoder takes no frame threads, because a frame-threaded one hands
+//! a frame out only when a later one comes in ([`format`]), which would
+//! add a frame of latency, several under load, and keep a device's last
+//! frames from the source when it falls silent. Its filter chain, which
+//! converts the picture to RGBA, keeps its threads, which 4K needs. The
+//! first frame moves the source from `Starting` to `Running`.
 //!
 //! # Failure
 //!
