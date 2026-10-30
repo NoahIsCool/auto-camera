@@ -317,7 +317,7 @@ fn a_video_sources_audio_is_taken_as_it_is() {
     );
     let format = audio.format(&sources).unwrap();
     let mut pacer = AudioPacer::new(format.sample_rate, 2, 30, AUDIO_SLACK, AUDIO_MAX_LEAD);
-    pacer.plan(1, out);
+    pacer.plan(1, out, Duration::ZERO);
     assert_eq!(
         (pacer.stats().pushed, pacer.stats().mismatched_blocks),
         (480, 1)
@@ -382,7 +382,7 @@ fn pace(plan: FakeAudio, seconds: u64) -> (Vec<i64>, crate::audio::AudioPacerSta
         board
             .queue
             .push(feed.until(Duration::from_secs_f64(tick as f64 / 30.0)));
-        let items = pacer.plan(tick, audio.take(&[]));
+        let items = pacer.plan(tick, audio.take(&[]), Duration::ZERO);
         assert!(items.iter().all(|i| match i {
             PacedAudio::Block(b) => b.channels == 2,
             PacedAudio::Silence(_) => true,

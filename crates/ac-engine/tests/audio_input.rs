@@ -16,6 +16,11 @@
 //! leaves ffmpeg a quarter of that to start, which a loaded machine misses
 //! for a short file; the silence the pacer then inserts would read here as
 //! lost audio.
+//!
+//! One engine runs on a wall clock that holds its engine thread up now and
+//! then ([`Hitching`]), the board's input keeping real time meanwhile: an
+//! engine that runs late must not cost the program any of the board's
+//! audio (the pacer's counters say so, read from the last snapshot).
 
 #![cfg(unix)]
 
@@ -24,6 +29,8 @@ mod common;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ac_core::ShotId;
 use ac_engine::{
@@ -31,7 +38,9 @@ use ac_engine::{
     OutputState, StudioConfig,
 };
 use ac_media::{ChannelPick, SourceState};
-use ac_sources::{AudioInputConfig, SourceConfig, WavEncoding, fake_sample, write_fake_wav};
+use ac_sources::{
+    AudioInputConfig, Clock, SourceConfig, WallClock, WavEncoding, fake_sample, write_fake_wav,
+};
 
 use common::{WAIT, have, studio, temp_path};
 
@@ -378,5 +387,103 @@ fn an_input_without_the_picked_channels_stays_offline_with_the_reason() {
     );
     assert_eq!((view.blocks, view.format), (0, None));
     engine.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The wall clock, except that the engine thread, waiting for its next
+/// tick, oversleeps by `stall` once every `every`: an engine that hitches.
+/// Its ticks then run late, and back to back as it catches up, while the
+/// sources and audio inputs keep real time on their own threads.
+struct Hitching {
+    /// Real time.
+    wall: WallClock,
+    /// How long each hitch holds the engine thread.
+    stall: Duration,
+    /// Time from one hitch to the next.
+    every: Duration,
+    /// Clock reading of the next hitch, and the hitches so far.
+    next: Mutex<(Duration, u64)>,
+}
+
+impl Hitching {
+    /// An engine thread that hitches for `stall` every `every`.
+    fn new(stall: Duration, every: Duration) -> Self {
+        Self {
+            wall: WallClock::new(),
+            stall,
+            every,
+            next: Mutex::new((every, 0)),
+        }
+    }
+
+    /// The hitches so far.
+    fn hitches(&self) -> u64 {
+        self.next.lock().unwrap().1
+    }
+}
+
+impl Clock for Hitching {
+    fn now(&self) -> Duration {
+        self.wall.now()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        let mut extra = Duration::ZERO;
+        if std::thread::current().name() == Some("ac-engine") {
+            let now = self.wall.now();
+            let mut next = self.next.lock().unwrap();
+            if now >= next.0 {
+                *next = (now + self.every, next.1 + 1);
+                extra = self.stall;
+            }
+        }
+        std::thread::sleep(duration + extra);
+    }
+}
+
+/// An engine thread that hitches for 150 ms every 2 s takes each late
+/// tick's audio with 150 ms more of the board's than the tick's share,
+/// over the pacer's 100 ms lead limit: none of it is dropped, as it is the
+/// engine that is late, not the audio, and so no silence goes in to give
+/// it back. The video source runs at 25 fps, so that the phase lock
+/// (which takes the frames a late tick skips at the tick rate for a
+/// collision, and delays the schedule) stays out of the measurement.
+#[test]
+fn an_engine_that_hitches_drops_none_of_the_boards_audio() {
+    if !have("ffmpeg") {
+        eprintln!("skipped: ffmpeg is not installed");
+        return;
+    }
+    let dir = folder("hitches");
+    let wav = dir.join("board.wav");
+    write_fake_wav(&wav, 48_000, 2, 48_000 * 30, WavEncoding::Pcm16, false).unwrap();
+    let clock = Arc::new(Hitching::new(
+        Duration::from_millis(150),
+        Duration::from_secs(2),
+    ));
+    let options = EngineOptions {
+        clock: clock.clone(),
+        ..EngineOptions::default()
+    };
+    let mut config = board_studio(board(&wav, None, None), "ffmpeg".into());
+    config.sources[0].input = SourceConfig::Synthetic {
+        width: 320,
+        height: 180,
+        fps: 25.0,
+        subjects: 1,
+    };
+    let engine = Engine::start_with(config, options).expect("engine starts");
+    let before = clock.hitches();
+    record_program(&engine.handle(), &dir.join("program.mp4"), 8);
+    let hitches = clock.hitches() - before;
+    let report = engine.shutdown().unwrap();
+    let snap = &report.final_snapshot;
+    let audio = snap.output.audio.expect("program audio");
+    assert!(
+        hitches >= 3 && snap.timing.late_ticks >= 3,
+        "{hitches}, {:?}",
+        snap.timing
+    );
+    assert_eq!((audio.dropped, audio.silence), (0, 0), "{audio:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

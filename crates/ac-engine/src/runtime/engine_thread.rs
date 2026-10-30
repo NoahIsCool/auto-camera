@@ -6,8 +6,10 @@
 //! [`WAIT_SLICE`] at a time. A tick applies the pending commands, feeds the
 //! core the newest frame of every source and the discovery results that
 //! arrived, hands the core's requests to the workers, pushes the program
-//! frame and audio to the output, sends the tick's trace record (when the
-//! engine traces; [`crate::trace`]) and the passes it applied (when it logs
+//! frame and audio to the output (with how far behind its due time the
+//! tick took the audio, which the output's pacer allows for; see
+//! [`crate::audio`]), sends the tick's trace record (when the engine
+//! traces; [`crate::trace`]) and the passes it applied (when it logs
 //! detections; [`crate::detection_log`]) and publishes a snapshot. The
 //! frame the tick read from the phase reference (the video source whose
 //! audio is program audio, else the first source) goes to the
@@ -161,7 +163,8 @@ impl Runtime {
 
     /// One tick, due at clock reading `due`: feed the core, dispatch
     /// discovery, push the program (owing the encoder a repeat for each of
-    /// the `skipped` ticks before). Returns the sequence number and PTS of
+    /// the `skipped` ticks before, and telling the pacer how far behind
+    /// `due` the audio was taken). Returns the sequence number and PTS of
     /// the frame the tick read from the phase reference (the program audio
     /// source, else the first source), for the [`PhaseLock`].
     fn tick(
@@ -206,8 +209,13 @@ impl Runtime {
         for pass in out.applied {
             self.detections.send(pass);
         }
+        // Read just before the audio is taken: a source on time has
+        // delivered that much more than the tick's share (see
+        // `crate::audio`).
+        let behind = self.clock.now().saturating_sub(due);
         let program_audio = self.audio.take(&self.sources);
-        self.output.push(&out.program, program_audio, skipped);
+        self.output
+            .push(&out.program, program_audio, behind, skipped);
         reference
     }
 

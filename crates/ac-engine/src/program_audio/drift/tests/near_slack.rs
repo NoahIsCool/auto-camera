@@ -190,7 +190,7 @@ fn play(board: &Board, output_at: u64) -> Run {
         if tick <= output_at {
             continue;
         }
-        for item in pacer.plan(tick - output_at, taken) {
+        for item in pacer.plan(tick - output_at, taken, Duration::ZERO) {
             match item {
                 PacedAudio::Silence(n) => position += n,
                 PacedAudio::Block(b) => {

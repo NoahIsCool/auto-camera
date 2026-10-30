@@ -207,7 +207,7 @@ fn play(board: &mut Board, seconds: u64, watch: u64) -> Run {
         handles.queue.push(board.until(now));
         let blocks = audio.take(&[]);
         resampled += blocks.iter().filter(|b| !board.shares(&b.samples)).count() as u64;
-        pacer.plan(tick, blocks);
+        pacer.plan(tick, blocks, Duration::ZERO);
         if tick >= watch * FPS {
             let lead = pacer.stats().lead_ms;
             (low, high) = (low.min(lead), high.max(lead));
@@ -357,7 +357,7 @@ fn a_file_input_on_the_engines_clock_passes_through_untouched() {
             );
             assert_eq!((got.seq, got.pts), (sent.seq, sent.pts));
         }
-        pacer.plan(tick, taken);
+        pacer.plan(tick, taken, Duration::ZERO);
     }
     let view = &audio.views()[0];
     assert_eq!((view.correction_ppm, view.drift_resets), (0.0, 0));

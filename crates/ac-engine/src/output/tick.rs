@@ -5,8 +5,11 @@
 //! plus a repeat owed for each tick the engine skipped, so the encoded
 //! frame count is the master clock; the [`AudioPacer`] then plans the
 //! program audio against that count, filling a lag with silence and
-//! dropping audio that runs too far ahead. Neither call blocks: the
-//! encoder's queues drop instead (see `ac_output`).
+//! dropping audio that runs too far ahead. On a tick the engine ran late
+//! it allows for the audio a source on time made meanwhile: the runtime
+//! says how far behind its due time it took the tick's audio (see
+//! [`crate::audio`]). Neither call blocks: the encoder's queues drop
+//! instead (see `ac_output`).
 //!
 //! Each item the pacer plans is measured by the session's program meter
 //! ([`LoudnessMeter`], spec M12) just before it goes to the encoder:
@@ -18,6 +21,8 @@
 //! (see `ac_output`): the meter has then measured audio the recording
 //! lacks, but the two timelines stay the same length.
 
+use std::time::Duration;
+
 use ac_audio::LoudnessMeter;
 use ac_media::{AudioBlock, VideoFrame};
 use ac_output::ProgramEncoder;
@@ -27,11 +32,19 @@ use crate::audio::{AudioPacer, PacedAudio};
 use crate::snapshot::OutputView;
 
 impl OutputController {
-    /// Pushes one program frame and the program audio drained this tick.
-    /// `skipped` ticks were skipped just before this one; the encoder is
-    /// owed a repeated frame for each, and they count as pushed, so the
-    /// encoded timeline and the audio target stay on the master clock.
-    pub fn push(&mut self, frame: &VideoFrame, audio: Vec<AudioBlock>, skipped: u64) {
+    /// Pushes one program frame and the program audio drained this tick,
+    /// `behind` after the tick was due on the engine's clock (for the
+    /// pacer; see [`AudioPacer::plan`]). `skipped` ticks were skipped just
+    /// before this one; the encoder is owed a repeated frame for each, and
+    /// they count as pushed, so the encoded timeline and the audio target
+    /// stay on the master clock.
+    pub fn push(
+        &mut self,
+        frame: &VideoFrame,
+        audio: Vec<AudioBlock>,
+        behind: Duration,
+        skipped: u64,
+    ) {
         let Some(encoder) = &self.encoder else {
             return;
         };
@@ -42,7 +55,7 @@ impl OutputController {
         let Some(pacer) = &mut self.pacer else {
             return;
         };
-        for item in pacer.plan(self.frames_pushed, audio) {
+        for item in pacer.plan(self.frames_pushed, audio, behind) {
             measure(self.meter.as_mut(), &item);
             let _ = match item {
                 PacedAudio::Block(block) => encoder.push_audio_block(&block),
@@ -92,7 +105,6 @@ fn measure(meter: Option<&mut LoudnessMeter>, item: &PacedAudio) {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Duration;
 
     use ac_core::SourceId;
 
