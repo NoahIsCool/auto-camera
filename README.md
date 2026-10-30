@@ -588,17 +588,18 @@ and written to the log, at most a line every 10 s. Overloads are counted
 and logged apart from what the input measures, since one that lost audio
 also shows as the gap it left, and the line saying how much it lost must
 not wait behind the overload's. A jump in the timestamps of more than a
-millisecond is reported half a second after it, once it has lasted (a
-rewind sooner, when audio is lost after it); timestamps that are off for a
-few blocks and then back are one timestamp glitch, with no audio missing
-and the input's timeline as it was. A device that sends nothing for 2 s
-is reopened. Device inputs need macOS and a build with `--features
-coreaudio`, which is opt-in like `onnx`; any other build loads the
-config, `--check` reports the input as a problem saying how to build,
-and the input stays offline with that message. macOS asks once whether
-the app (or the terminal it runs in) may use audio input; refused, the
-input runs on silence, until it is allowed in System Settings, Privacy &
-Security, Microphone.
+millisecond is reported half a second after it, once it has lasted;
+timestamps that are off for a few blocks and then back, in one step or
+several, are one timestamp glitch, with no audio missing and the input's
+timeline as it was, and timestamps that only scatter by more than a
+millisecond move nothing for good. A device that sends nothing for 2 s
+is reopened. Device inputs need macOS and a build with
+`--features coreaudio`, which is opt-in like `onnx`; any other build
+loads the config, `--check` reports the input as a problem saying how to
+build, and the input stays offline with that message. macOS asks once
+whether the app (or the terminal it runs in) may use audio input;
+refused, the input runs on silence, until it is allowed in System
+Settings, Privacy & Security, Microphone.
 
 A source's embedded audio is mixed to stereo by ffmpeg as it is decoded,
 with the matrix the encoder used on it before: a stereo track as it is, a

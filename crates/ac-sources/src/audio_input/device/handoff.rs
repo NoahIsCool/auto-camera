@@ -18,7 +18,9 @@
 //!
 //! * A callback buffer longer than `max_frames` is cut into several
 //!   blocks, each stamped with its own host time: the buffer's, plus its
-//!   offset into the buffer at the nominal rate.
+//!   offset into the buffer at the nominal rate. The blocks after the
+//!   first are marked as cut ([`Captured::cut`]): their host times are not
+//!   readings of their own, so they share the buffer's error.
 //! * When the free queue is empty (the worker is behind by the whole pool)
 //!   the block is dropped. It is counted ([`HandoffReader::lost`]), and the
 //!   next block that gets through carries how many blocks and sample frames
@@ -58,6 +60,10 @@ use std::time::Duration;
 pub struct Captured {
     /// Host time at which its first sample frame was captured.
     pub host_time: Duration,
+    /// True for a block cut from a callback buffer after its first: its
+    /// host time is the buffer's plus its offset, not a reading of its
+    /// own.
+    pub cut: bool,
     /// Interleaved samples, whole frames.
     pub samples: Vec<f32>,
     /// Blocks dropped just before this one because no buffer was free.
@@ -120,6 +126,7 @@ pub fn handoff(
         // Room for every buffer: this send cannot fail.
         let _ = free_tx.try_send(Captured {
             host_time: Duration::ZERO,
+            cut: false,
             samples: Vec::with_capacity(max_frames * channels),
             lost_blocks: 0,
             lost_frames: 0,
@@ -166,13 +173,14 @@ impl CaptureSink {
         for (i, chunk) in samples[..whole].chunks(step).enumerate() {
             let offset = (i * self.max_frames) as u64;
             let at = host_time.saturating_add(frames_duration(offset, self.sample_rate));
-            self.put(at, chunk);
+            self.put(at, i > 0, chunk);
         }
     }
 
     /// Queues `chunk` (whole frames, at most `max_frames`) as one block
-    /// captured at `at`, or counts it as dropped.
-    fn put(&mut self, at: Duration, chunk: &[f32]) {
+    /// captured at `at` (`cut` from a longer buffer after its first), or
+    /// counts it as dropped.
+    fn put(&mut self, at: Duration, cut: bool, chunk: &[f32]) {
         let frames = (chunk.len() / self.channels) as u64;
         let Some(mut buffer) = self.spare.take().or_else(|| self.free.try_recv().ok()) else {
             self.drop_block(frames);
@@ -182,6 +190,7 @@ impl CaptureSink {
         // Within the capacity every pool buffer was made with.
         buffer.samples.extend_from_slice(chunk);
         buffer.host_time = at;
+        buffer.cut = cut;
         buffer.lost_blocks = std::mem::take(&mut self.lost_blocks);
         buffer.lost_frames = std::mem::take(&mut self.lost_frames);
         if let Err(TrySendError::Full(back) | TrySendError::Disconnected(back)) =
