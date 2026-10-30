@@ -88,9 +88,10 @@ pub(super) struct Epoch {
     /// from blocks within its threshold; a returning excursion must first
     /// be measured against the same line that made its forward edit.
     pub(super) settling: f64,
-    /// Slope carried during settling; zero before the epoch's reference
-    /// exists, when a handful of jittered timestamps cannot predict it.
-    pub(super) settling_slope: f64,
+    /// Prediction slope until the first normal refit after settling, or
+    /// none outside settling. Zero before the timing reference exists,
+    /// when a handful of jittered timestamps cannot predict it.
+    pub(super) settling_slope: Option<f64>,
     /// The blocks held out of the fit, while there are.
     pub(super) held: Option<Held>,
 }
@@ -171,20 +172,17 @@ impl Epoch {
         }
     }
 
-    /// Carries the prediction to an origin `dx` seconds on for a block
-    /// held out of the fit (the sums were aged already), using the guarded
-    /// slope while a confirmed step's new level is settling.
-    pub(super) fn pass(&mut self, dx: f64) {
-        self.error += self.carried_slope() * dx;
+    /// Carries the already computed `prediction` to the new origin for a
+    /// block held out of the fit (the sums were aged already). Its slope
+    /// was chosen at the previous observation, before this block could
+    /// end a confirmed step's settling interval.
+    pub(super) fn pass(&mut self, prediction: f64) {
+        self.error = prediction;
     }
 
     /// The slope used to predict blocks while a step's level settles.
     pub(super) fn carried_slope(&self) -> f64 {
-        if self.settling > 0.0 {
-            self.settling_slope
-        } else {
-            self.slope
-        }
+        self.settling_slope.unwrap_or(self.slope)
     }
 
     /// Ends the current segment at a step: its sums, centred on its own

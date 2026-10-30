@@ -378,10 +378,12 @@ impl DriftEstimator {
         };
         let measured = epoch.frames as f64 / self.rate - seconds_between(pts, epoch.anchor);
         let dx = epoch.latest as f64 / self.rate;
-        epoch.settling = (epoch.settling - dx).max(0.0);
         // Where the fitted line puts the block, and where the estimates
-        // do: the line, or early in the epoch its level alone.
+        // do: the line, or early in the epoch its level alone. The last
+        // observation's guarded slope predicts the whole interval even
+        // when this block ends the guard; only its new reading can refit.
         let line = epoch.error + epoch.carried_slope() * dx;
+        epoch.settling = (epoch.settling - dx).max(0.0);
         let early = (epoch.frames as f64 / self.rate) < SLOPE_AFTER.as_secs_f64();
         let residual = measured - if early { epoch.level() } else { line };
         if residual.is_nan() || residual.abs() > self.discontinuity {
@@ -411,13 +413,13 @@ impl DriftEstimator {
         epoch.age(dx, self.smoothing);
         let seen = match verdict {
             Verdict::Held => {
-                epoch.pass(dx);
+                epoch.pass(line);
                 Observation::Held
             }
             Verdict::Back => {
                 epoch.held = None;
                 if epoch.settling > 0.0 {
-                    epoch.pass(dx);
+                    epoch.pass(line);
                 } else {
                     let scored = epoch.blocks >= 2;
                     if early {
@@ -425,6 +427,7 @@ impl DriftEstimator {
                     }
                     let off_line = measured - line;
                     epoch.take(measured, scored.then_some(off_line), frames, self.rate);
+                    epoch.settling_slope = None;
                 }
                 Observation::Tracked
             }
@@ -433,11 +436,11 @@ impl DriftEstimator {
                 epoch.split();
                 epoch.take(measured, None, frames, self.rate);
                 epoch.settling = STEP_SETTLE.as_secs_f64();
-                epoch.settling_slope = if epoch.reference.is_some() {
+                epoch.settling_slope = Some(if epoch.reference.is_some() {
                     epoch.slope
                 } else {
                     0.0
-                };
+                });
                 if epoch.reference.is_none() {
                     epoch.stepped += residual;
                 }

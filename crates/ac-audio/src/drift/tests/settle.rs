@@ -52,6 +52,33 @@ fn the_settling_window_counts_only_time_after_confirmation() {
     assert_eq!(e.epoch.unwrap().settling, 0.0);
 }
 
+/// A long block crossing an early guard's expiry cannot extrapolate the
+/// unreliable pre-reference slope across the whole interval.
+#[test]
+fn a_long_block_after_an_early_step_does_not_invent_an_inverse_step() {
+    for loss in [0.0, 0.03] {
+        let mut e = estimator();
+        let mut frame = 0;
+        for jitter in [-0.00003, 0.0, 0.00003] {
+            e.observe(pts(frame, 0.0, 1.0 + jitter), BLOCK);
+            frame += BLOCK;
+        }
+        let mut steps = Vec::new();
+        for k in 0..200 {
+            let n = if k == 4 { 48_000 } else { BLOCK };
+            let off = 1.02 + if k >= 5 { loss } else { 0.0 };
+            if let Observation::Step(by) = e.observe(pts(frame, 0.0, off), n) {
+                steps.push(by);
+            }
+            frame += n;
+        }
+        let expected = 1 + u64::from(loss > 0.0);
+        assert_eq!((e.steps(), e.resets()), (expected, 0), "{e:?}");
+        assert!((steps.iter().sum::<f64>() + 0.02 + loss).abs() < 0.0001);
+        assert!(e.drift_ppm().abs() < 1.0, "{e:?}");
+    }
+}
+
 /// Freezing the post-step prediction delays learning a changed crystal
 /// rate only until the guard ends; positive and negative drift still fit.
 #[test]
