@@ -8,11 +8,13 @@
 //! first two buffers cannot say which of them was: only the blocks after
 //! them can. A first buffer off is a constant in the connection's PTS,
 //! like its latency, so nothing may be reported, filled or cut for it,
-//! and a loss right after it must be kept whole (not less the first
-//! buffer's error) to be made up once: by a drift step, or, for a cycle
+//! and an identifiable loss right after it must be kept whole (not less
+//! the first buffer's error) to be made up once: by a drift step, or, for a cycle
 //! shorter than drift correction's step (128 frames at 96 kHz), as timing
 //! error with no step, as the loss alone is. A second buffer's glitch is a
-//! glitch like any other. Longer IO buffers than a hand-off block are cut
+//! glitch like any other. Where the startup histories are observationally
+//! identical, [`ambiguity`] checks the conservative glitch policy instead.
+//! Longer IO buffers than a hand-off block are cut
 //! into blocks that share their buffer's host time, so at 2048 and 4096
 //! frames the second *block* is still the first buffer's, and the buffers
 //! are told apart by later blocks than at short sizes. Both open the
@@ -21,11 +23,16 @@
 //!
 //! # Invariants checked
 //!
-//! The families' pass criteria, as [`super`] lists them: M8 and M9.
+//! The families' pass criteria, as [`super`] lists them: M8 and M9. M8's
+//! identifiable cases retain exact loss and audio checks. Its 24 collision
+//! cases have a separate policy family and a proof of identical observable
+//! inputs in [`ambiguity`]; they are not successful loss reconstructions.
 
 use ac_audio::DriftSettings;
 
 use super::*;
+
+mod ambiguity;
 
 /// When the connection opened against its first frame's capture: just
 /// after it (a device already running), or this many seconds before.
@@ -49,10 +56,10 @@ fn open_name(opened: Option<f64>) -> String {
     }
 }
 
-/// A first buffer's timestamp error cannot hide or invent a later loss.
+/// Identifiable first-buffer errors cannot hide or invent a later loss.
 #[test]
 fn m8_a_first_buffer_stamped_off_is_not_reported_and_a_loss_after_it_is_made_up_once() {
-    let mut card = Card::new("M8 first buffer off by ±3 to 30 ms");
+    let mut card = Card::new("M8 identifiable first-buffer errors and losses");
     let sweep = card.sweep;
     let rates = sweep.pick(&[RATE], &[44_100, 48_000, 96_000]);
     let sizes = sweep.pick(&[256, 1024, 2048, 4096], &[128, 256, 512, 1024, 2048, 4096]);
@@ -75,6 +82,11 @@ fn m8_a_first_buffer_stamped_off_is_not_reported_and_a_loss_after_it_is_made_up_
                     let twin = play(device(rate, frames, opened, &lose), seconds);
                     for &ms in &sizes_ms {
                         for by in [ms, -ms] {
+                            if ambiguity::collides(rate, frames, by, loss) {
+                                // The separate policy family exercises
+                                // these inputs and their competing history.
+                                continue;
+                            }
                             let mut events = vec![(0.0, Event::Off(1, by / 1000.0))];
                             events.extend(&lose);
                             let run = play(device(rate, frames, opened, &events), seconds);
@@ -117,6 +129,7 @@ fn m8_a_first_buffer_stamped_off_is_not_reported_and_a_loss_after_it_is_made_up_
             }
         }
     }
+    assert_eq!(card.verdicts.len(), sweep.of(96, 1416));
     card.finish();
 }
 

@@ -86,7 +86,13 @@
 //!   first frame captured before the open and after it: nothing reported,
 //!   no step, apart within 1 ms; with a cycle lost before callback 2 to 5:
 //!   the loss's gap alone, made up once (no step for a cycle shorter than
-//!   drift correction's), apart from the loss alone within 1 ms.
+//!   drift correction's), apart from the loss alone within 1 ms. The full
+//!   grid has 1416 identifiable cases checked this way. Its 24 remaining
+//!   cases also describe a later-starting device with ordinary startup
+//!   noise and a short glitch: a separate M8 policy family requires one
+//!   glitch, no inferred gap or drift edit, a bounded initial offset and
+//!   no subsequent walk. Exact input-pair tests prove that ambiguity (see
+//!   [`start`]); those 24 are not counted as exact-loss recoveries.
 //! * **M9** a one-buffer glitch of the second buffer, ±3 to 30 ms: no
 //!   rewind and no gap; one glitch beyond the tolerance, none within it;
 //!   no lasting lead offset beyond 0.5 ms or the resampler's half kernel
