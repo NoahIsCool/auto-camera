@@ -6,18 +6,22 @@
 //! device delivers), which leave the PTS on the stream's old timeline and
 //! are reported once, when they went beyond their tolerance. A loss is
 //! kept whole after a first block stamped off and after a rewind that
-//! lasted, which is reported when the loss comes. Last, the capture
-//! latency held for a connection, so that callbacks of another length do
-//! not move the PTS.
+//! lasted, which is reported once the loss's window has passed. Last, the
+//! capture latency held for a connection, so that callbacks of another
+//! length do not move the PTS. Readings that two events fit, which the
+//! blocks after them tell apart, are tested in [`told_apart`].
 
 use super::*;
 use crate::audio_input::device::timing::{GLITCH_WINDOW, REWIND_BLOCKS};
+
+mod told_apart;
 
 /// A captured block of `frames` stereo frames at `host`, nothing lost
 /// before it.
 fn captured(host: Duration, frames: usize) -> Captured {
     Captured {
         host_time: host,
+        cut: false,
         samples: vec![0.0; frames * 2],
         lost_blocks: 0,
         lost_frames: 0,
@@ -568,10 +572,21 @@ fn a_first_block_stamped_off_is_not_a_jump_and_a_loss_after_it_is_kept_whole() {
             )],
             "{case}: the loss, whole, and nothing for the first block"
         );
-        assert_eq!(pts[1..20], want[1..20], "{case}: on the open's timeline");
+        // The PTS run on from the first block's, the first block's error
+        // a constant in all of them.
+        let shift = |by: Duration| move |&p: &Duration| p + by;
+        let error = pts[0] - want[0];
+        assert_eq!(
+            pts[..20],
+            want[..20].iter().map(shift(error)).collect::<Vec<_>>(),
+            "{case}: on from the first block"
+        );
         assert_eq!(
             pts[20..],
-            want[20..].iter().map(|&p| p + ms(20)).collect::<Vec<_>>(),
+            want[20..]
+                .iter()
+                .map(shift(error + ms(20)))
+                .collect::<Vec<_>>(),
             "{case}: the whole loss in the PTS"
         );
     }
@@ -592,7 +607,7 @@ fn a_rewind_that_lasted_is_reported_before_a_loss_after_it_and_the_loss_kept_who
             found,
             [
                 (
-                    at,
+                    at + 51,
                     Discontinuity::Rewind {
                         seq: 10,
                         by: ms(10)
@@ -606,7 +621,7 @@ fn a_rewind_that_lasted_is_reported_before_a_loss_after_it_and_the_loss_kept_who
                     }
                 ),
             ],
-            "{after} blocks on: the rewind when the loss comes, the loss after its window"
+            "{after} blocks on: the rewind and the loss after the loss's window"
         );
         assert_eq!(pts[..at], want[..at], "{after}: the rewind absorbed");
         assert_eq!(

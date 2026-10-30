@@ -241,6 +241,8 @@ fn a_long_callback_buffer_is_cut_into_blocks_with_their_own_host_times() {
     assert_eq!(sizes, [480, 480, 240]);
     let times: Vec<Duration> = blocks.iter().map(|b| b.host_time).collect();
     assert_eq!(times, [ms(500), ms(510), ms(520)]);
+    let cut: Vec<bool> = blocks.iter().map(|b| b.cut).collect();
+    assert_eq!(cut, [false, true, true], "the buffer's own host time first");
     assert_eq!(blocks[2].samples[0], fake_sample(0, 960));
     // Nothing at all: no block.
     sink.deliver(ms(600), &[]);

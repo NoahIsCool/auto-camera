@@ -48,12 +48,9 @@
 //!
 //! The first block's host time is provisional. A device's first IO cycle
 //! is the likeliest to be stamped off, and two blocks cannot tell which of
-//! them is: a second block that jumped from the first is stamped as if it
-//! were the first, its host time less the first block's length and what
-//! was dropped between them taken for the first block's (so the origin is
-//! the open's again, unless that is after it), and nothing is reported.
-//! Only the first block's own PTS then carry its error; audio lost between
-//! the first two blocks stays in the PTS, as any gap, but is not reported.
+//! them is: a second block that jumped from the first opens the
+//! connection's *first excursion* (below), which the blocks after it tell
+//! apart.
 //!
 //! # Excursions
 //!
@@ -81,22 +78,63 @@
 //!   the old timeline again (held at the newest PTS until it catches up,
 //!   as PTS never go back), and, when it went beyond its tolerance, one
 //!   glitch is reported: no audio missing.
+//! * Only a *steady* excursion back is a rewind that lasted. A real step
+//!   back leaves the blocks after it at one level, give or take the
+//!   timestamps' jitter (tens of microseconds) and drift (as little over a
+//!   few blocks). Jitter beyond the jump threshold scatters them instead: a
+//!   block a millisecond off its neighbour sets the old timeline that far
+//!   off, and the blocks after it read as back (or ahead) by their own
+//!   jitter less its. Moving the map for such an excursion would move it
+//!   by jitter, and only ever forward (an excursion ahead keeps the map),
+//!   so the PTS would creep ahead of the audio, and drift correction would
+//!   take that for a slow clock. So the newest blocks back must have
+//!   stayed within a quarter of [`MIN_TOLERANCE`] of one level for
+//!   [`REWIND_BLOCKS`] readings of the host time in a row. The blocks a
+//!   long buffer is cut into share its one reading
+//!   ([`Captured::cut`](super::handoff::Captured::cut)), so they count
+//!   once.
 //! * A glitch's way back lands on the old timeline; audio lost after the
 //!   timestamps went back for good does not, unless it happens to be as
-//!   long as the rewind. So an excursion that has been back for
-//!   [`REWIND_BLOCKS`] blocks in a row and then jumps ahead without landing
-//!   there lasted: it is reported as a **rewind** at once, the map left
-//!   moved forward, and the jump ahead is a new jump from there, kept in
-//!   PTS like any other. Otherwise the part of the loss that the rewind
-//!   cancelled would be missing from the PTS, and so from what program
-//!   audio makes up.
+//!   long as the rewind. So an excursion that has been back, steady, and
+//!   then jumps ahead without landing there may have lasted: the map is
+//!   left moved forward, and the jump ahead is a new jump from there, kept
+//!   in PTS like any other, so that the part of a loss that the rewind
+//!   would cancel is not missing from the PTS (and so from what program
+//!   audio makes up). It is not reported yet: a glitch back that returns
+//!   in steps, or a glitch ahead during a rewind, jumps ahead the same
+//!   way. A block of the new excursion back within [`MIN_TOLERANCE`] of
+//!   the timeline from before the excursion back says it was such a glitch
+//!   (the whole is closed as one glitch from the first block back, and the
+//!   map from before it put back); one back on the level of the excursion
+//!   back says the jump ahead was a glitch within it (the excursion back
+//!   goes on, its window counted from its first block). Otherwise the
+//!   rewind is reported once the new excursion's window has passed,
+//!   before what that is reported as.
 //! * An excursion still open once the window has passed lasts: the map
 //!   stays as its net offset left it, and it is reported once, at the
 //!   block that jumped, on the first block after the window. Ahead beyond
 //!   its tolerance it is **a gap**, kept in PTS as time with no audio
 //!   (ahead within it, a glitch when it went beyond its tolerance and came
-//!   back within it, else nothing); back it is **a rewind**, whatever its
-//!   size, as the map moved for it.
+//!   back within it, else nothing); back and steady it is **a rewind**,
+//!   whatever its size, as the map moved for it. Back and scattered, it is
+//!   jitter about the old timeline, and closed like a glitch: the old map
+//!   put back, and a glitch reported when it went beyond its tolerance.
+//!   Back for fewer readings than a steady run needs, it is decided once
+//!   it has been back for that many, or is no longer back.
+//! * **The first excursion**, opened by a connection's second block
+//!   jumping from its first, is followed the same way but for three
+//!   things. Its map moves by the net offset either way, ahead too, so its
+//!   blocks are stamped where the first block's timeline has them and the
+//!   PTS run on from the first block's without a step, whichever of the
+//!   two was off. Back on that timeline, it closes as a glitch of the
+//!   blocks from the second on, as any excursion. A block that jumps again
+//!   without landing there, or the window passing, says the first block
+//!   was off instead: the map stays where the excursion left it, nothing
+//!   is reported, and the jump is a new one from there (so a loss after
+//!   the first block is kept whole, and drift correction sees the PTS
+//!   step by it alone). The PTS then carry the first block's error for the
+//!   connection: a constant like the latency, which shifts where the
+//!   timeline starts and nothing else.
 //!
 //! A real loss or a real rewind on its own is thus stamped at once exactly
 //! as before; only its report waits for the window. No audio waits: each
@@ -108,6 +146,14 @@
 //! longer than it is taken as lasting, and one still open when the stream
 //! ends is not reported (the stream's end is).
 //!
+//! Timestamps alone cannot tell some pairs of events apart, which are
+//! taken the likelier way: a back glitch of [`REWIND_BLOCKS`] blocks or
+//! more that returns in the very cycle a loss comes is a rewind and a loss
+//! of both; a loss fewer than [`REWIND_BLOCKS`] blocks after a rewind is
+//! cancelled by it, up to its size; a second block that glitched and a
+//! loss on its way back are a first block off and the loss less the
+//! glitch.
+//!
 //! **An overflow** (the hand-off dropped blocks) is reported at once,
 //! since the hand-off counted it: the blocks' sequence numbers are skipped
 //! and their time is a gap in PTS.
@@ -118,12 +164,13 @@
 //!   block; PTS never decrease.
 //! * Every excursion beyond its tolerance is reported once, as one glitch
 //!   or as the gap or the rewind it lasted as, and so is every rewind that
-//!   lasted, whatever its size; an excursion within its tolerance that did
-//!   not last back is not reported.
-//! * The map moves only within an excursion, at a rewind that lasted, and
-//!   for the first two blocks (a first block captured before the open, a
-//!   second one that jumped from it): one that closes leaves it as it was
-//!   before the jump, one that lasts as its net offset left it.
+//!   lasted steady, whatever its size; an excursion within its tolerance
+//!   that did not last back steady is not reported, nor is a first block
+//!   that was off.
+//! * The map moves only within an excursion, at a rewind that lasted
+//!   steady, and for a first block captured before the open: an excursion
+//!   that closes, or lasted back scattered, leaves it as it was before the
+//!   jump, one that lasts as its net offset left it.
 //! * The stamper is pure: it does no I/O and reads no clock, so every rule
 //!   above is tested with made-up host times.
 
@@ -135,6 +182,10 @@ use ac_core::SourceId;
 use ac_media::AudioBlock;
 
 use super::handoff::{Captured, frames_duration};
+
+mod excursion;
+
+use excursion::{Excursion, Rewound};
 
 /// Distance from the expected capture time beyond which a block jumped,
 /// either way, however long the blocks: well above the jitter of
@@ -242,77 +293,6 @@ struct Expected {
     tolerance: Duration,
 }
 
-/// A jump not reported yet, which may still come back; see the module
-/// docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Excursion {
-    /// The map before the jump, in nanoseconds, put back if it comes back.
-    origin: i128,
-    /// The block that jumped.
-    seq: u64,
-    /// The newest block's net offset from the old timeline, in
-    /// nanoseconds: positive ahead.
-    offset: i128,
-    /// The largest net offset so far, either way, in nanoseconds.
-    widest: i128,
-    /// The tolerance it is reported by, in nanoseconds: half the block
-    /// before the jump, at least [`MIN_TOLERANCE`].
-    tolerance: i128,
-    /// The block after the newest one that was beyond the tolerance.
-    beyond: u64,
-    /// Blocks in a row, the newest included, that were back by more than
-    /// [`MIN_TOLERANCE`].
-    back: u64,
-    /// Sample frames from the start of the block that jumped to the start
-    /// of the next block expected, dropped ones included.
-    frames: u64,
-}
-
-impl Excursion {
-    /// The excursion that block `seq` opens by jumping `off` nanoseconds
-    /// from the map `origin`, reported by `tolerance`.
-    fn new(origin: i128, seq: u64, off: i128, tolerance: i128) -> Self {
-        Self {
-            origin,
-            seq,
-            offset: off,
-            widest: off.abs(),
-            tolerance,
-            beyond: if off.abs() > tolerance { seq + 1 } else { seq },
-            back: u64::from(off < 0),
-            frames: 0,
-        }
-    }
-
-    /// What is reported when block `seq` is back on the old timeline: a
-    /// glitch, when the excursion went beyond its tolerance.
-    fn closed(&self, seq: u64) -> Option<Discontinuity> {
-        (self.widest > self.tolerance).then(|| Discontinuity::Glitch {
-            seq: self.seq,
-            blocks: seq.saturating_sub(self.seq),
-            by: duration(self.widest),
-        })
-    }
-
-    /// What is reported when it lasted: a rewind, a gap beyond its
-    /// tolerance or, within it, a glitch when it went beyond it.
-    fn lasting(&self) -> Option<Discontinuity> {
-        if self.offset < 0 {
-            Some(Discontinuity::Rewind {
-                seq: self.seq,
-                by: duration(-self.offset),
-            })
-        } else if self.offset > self.tolerance {
-            Some(Discontinuity::Gap {
-                seq: self.seq,
-                by: duration(self.offset),
-            })
-        } else {
-            self.closed(self.beyond)
-        }
-    }
-}
-
 /// A connection's capture latency, fixed by its first buffer: what cpal
 /// takes off that buffer's host time for its capture time, taken off every
 /// later buffer's too, so that a change in the callbacks' length cannot
@@ -348,12 +328,9 @@ pub struct Stamper {
     /// Host time that maps to PTS 0, in nanoseconds; signed so that a
     /// rewind can move the map either way of the host clock's zero.
     origin: i128,
-    /// The origin it was made with, in nanoseconds: the host time of the
-    /// open.
-    opened: i128,
-    /// The first block's host time, in nanoseconds, until the second
-    /// block is stamped: provisional, see the module docs.
-    first: Option<i128>,
+    /// True from the first block on until the second is stamped: a jump
+    /// between them opens the first excursion (see the module docs).
+    second: bool,
     /// Sequence number of the next block.
     next_seq: u64,
     /// The previous block's end, once there was one.
@@ -384,8 +361,7 @@ impl Stamper {
             sample_rate,
             channels,
             origin: nanos(origin),
-            opened: nanos(origin),
-            first: None,
+            second: false,
             next_seq: 0,
             expected: None,
             excursion: None,
@@ -400,10 +376,11 @@ impl Stamper {
     }
 
     /// The block `captured` holds, and what is reported with it, in this
-    /// order: an excursion whose window has passed (a gap or a rewind, at
-    /// the block that jumped), the blocks dropped just before this one (an
-    /// overflow), and an excursion this block came back from (a glitch);
-    /// see the module docs.
+    /// order: an excursion whose window has passed (a rewind it ended, then
+    /// a gap or a rewind, at the block that jumped), the blocks dropped
+    /// just before this one (an overflow), and an excursion this block came
+    /// back from (a rewind it ended and a glitch, or one glitch); see the
+    /// module docs.
     pub fn stamp(&mut self, captured: &Captured) -> (AudioBlock, Vec<Discontinuity>) {
         let mut found = Vec::new();
         let rate = self.sample_rate;
@@ -412,9 +389,8 @@ impl Stamper {
         self.next_seq = self.next_seq.saturating_add(1);
         if let Some(mut e) = self.excursion.take() {
             e.frames = e.frames.saturating_add(captured.lost_frames);
-            if frames_duration(e.frames, rate) > GLITCH_WINDOW {
-                // It lasted; the map stays where its offset left it.
-                found.extend(e.lasting());
+            if frames_duration(e.frames, rate) > GLITCH_WINDOW && !e.undecided() {
+                self.settle(e, &mut found);
             } else {
                 self.excursion = Some(e);
             }
@@ -431,18 +407,18 @@ impl Stamper {
         match self.expected {
             None => {
                 self.origin = self.origin.min(host);
-                self.first = Some(host);
+                self.second = true;
             }
             Some(expected) => {
                 let due = nanos(expected.host) + nanos(frames_duration(captured.lost_frames, rate));
-                let off = host - due;
-                match self.first.take() {
-                    // The second block jumped from the first: stamped as
-                    // if it were the first (see the module docs).
-                    Some(first) if off.abs() > nanos(MIN_TOLERANCE) => {
-                        self.origin = self.opened.min(host - (due - first));
-                    }
-                    _ => self.follow(seq, off, nanos(expected.tolerance), &mut found),
+                let (off, tolerance) = (host - due, nanos(expected.tolerance));
+                if std::mem::take(&mut self.second) && off.abs() > nanos(MIN_TOLERANCE) {
+                    // Stamped where the first block's timeline has it.
+                    self.excursion = Some(Excursion::first(self.origin, seq, off, tolerance));
+                    self.origin += off;
+                } else {
+                    let reading = !captured.cut;
+                    self.follow(seq, (off, tolerance), reading, &mut found);
                 }
             }
         }
@@ -469,13 +445,41 @@ impl Stamper {
         (block, found)
     }
 
+    /// Ends excursion `e`, whose window has passed, in `found`: a rewind
+    /// it ended lasted; the first excursion leaves the map as it is (the
+    /// first block was off) and is not reported; one back and scattered
+    /// puts the map back; any other lasted as its net offset left it.
+    fn settle(&mut self, e: Excursion, found: &mut Vec<Discontinuity>) {
+        found.extend(e.rewound.map(|r| r.lasted()));
+        if e.first {
+            return;
+        }
+        if e.offset < 0 && !e.steady() {
+            found.extend(e.closed(e.beyond));
+            self.origin = e.origin;
+        } else {
+            found.extend(e.lasting());
+        }
+    }
+
     /// Sets the map for block `seq`, captured `off` nanoseconds from where
     /// it was expected (within [`MIN_TOLERANCE`] either way is no jump; a
-    /// jump is reported by `tolerance`): opens an excursion on a jump, else
-    /// follows the one under way, ending it in `found` as a glitch when the
-    /// block is back, or as a rewind when it lasted back and the block
-    /// jumped ahead; see the module docs.
-    fn follow(&mut self, seq: u64, off: i128, tolerance: i128, found: &mut Vec<Discontinuity>) {
+    /// jump is reported by `tolerance`), a `reading` of the host time of
+    /// its own unless it was cut from a longer buffer. Opens an excursion
+    /// on a jump, else follows the one under way: ends it in `found` as a
+    /// glitch when the block is back (on the timeline before an excursion
+    /// back it ended, one glitch of both), or the first one as the first
+    /// block's error when the block jumped again; keeps a steady excursion
+    /// back that the block jumped ahead from in the excursion that jump
+    /// opens, and resumes it when the block is back on its level; see the
+    /// module docs.
+    fn follow(
+        &mut self,
+        seq: u64,
+        (off, tolerance): (i128, i128),
+        reading: bool,
+        found: &mut Vec<Discontinuity>,
+    ) {
         let jump = nanos(MIN_TOLERANCE);
         let Some(mut e) = self.excursion.take() else {
             self.open(seq, off, tolerance);
@@ -483,26 +487,57 @@ impl Stamper {
         };
         let before = e.offset;
         e.offset += off;
-        if before < -jump && e.back >= REWIND_BLOCKS && off > jump && e.offset.abs() > jump {
-            // It lasted back: the map stays moved forward by it, and this
-            // block's jump ahead is a new one from there.
-            found.push(Discontinuity::Rewind {
-                seq: e.seq,
-                by: duration(-before),
-            });
+        if e.first {
+            if e.offset.abs() <= jump {
+                found.extend(e.closed(seq));
+                self.origin = e.origin;
+            } else if off.abs() > jump {
+                // The first block was off: the map stays, and this jump is
+                // a new one from there.
+                self.open(seq, off, tolerance);
+            } else {
+                e.widen(seq, reading);
+                self.origin = e.origin + e.offset;
+                self.excursion = Some(e);
+            }
+            return;
+        }
+        if let Some(r) = &mut e.rewound {
+            let old = e.offset - r.by;
+            if old.abs() <= jump {
+                // Back where it was before the excursion back: one glitch.
+                found.extend(r.closed(seq));
+                self.origin = r.origin;
+                return;
+            }
+            r.widest = r.widest.max(old.abs());
+        }
+        let steady_back = before < -jump && e.steady();
+        if steady_back && off > jump && e.offset.abs() > jump {
+            // It may have lasted back: the map stays moved forward by it,
+            // and this block's jump ahead is a new one from there.
+            found.extend(e.rewound.map(|r| r.lasted()));
+            let rewound = Rewound::of(&e, -before, e.offset);
             self.open(seq, off, tolerance);
+            if let Some(next) = &mut self.excursion {
+                next.rewound = Some(rewound);
+            }
             return;
         }
         if e.offset.abs() <= jump {
-            found.extend(e.closed(seq));
-            self.origin = e.origin;
+            if let Some(r) = e.rewound {
+                // Back on the excursion back's level: the jump ahead was a
+                // glitch within it, which goes on.
+                let back = r.resume(seq, e.offset - r.by, e.frames, reading);
+                self.origin = back.origin + back.offset.min(0);
+                self.excursion = Some(back);
+            } else {
+                found.extend(e.closed(seq));
+                self.origin = e.origin;
+            }
             return;
         }
-        e.widest = e.widest.max(e.offset.abs());
-        if e.offset.abs() > e.tolerance {
-            e.beyond = seq + 1;
-        }
-        e.back = if e.offset < -jump { e.back + 1 } else { 0 };
+        e.widen(seq, reading);
         self.origin = e.origin + e.offset.min(0);
         self.excursion = Some(e);
     }
