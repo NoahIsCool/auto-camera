@@ -29,9 +29,19 @@
 //! audio is measured too, as the gap the stamper finds in the stream after
 //! it, so counting the two together would count it twice; an overload that
 //! lost nothing is still shown, on its own count. Within a poll the
-//! overloads are noted first, so a discontinuity measured in the same poll
-//! is the notice that stays: it says what was lost, the overload only that
-//! something may have been.
+//! overloads are noted first, so a discontinuity reported in the same poll
+//! (blocks the hand-off dropped) is the notice that stays. The gap an
+//! overload left comes later: the stamper reports a jump once its window
+//! has passed, half a second of audio after it ([`super::timing`]), and
+//! the gap then takes over the notice. Either way the notice that stays
+//! says what was lost, the overload's only that something may have been.
+//!
+//! The log is kept quiet apart for each: at most a line per [`LOG_QUIET`]
+//! for the discontinuities and another for the overloads, the ones held
+//! back counted on the next line of their kind ([`NoticeLog`]). With one
+//! quiet time for both, an overload's line would hold back the line of
+//! the gap it left, half a second later, and the log would never say how
+//! much audio was lost.
 //!
 //! Polling, rather than waiting on the hand-off, is what keeps the
 //! device's callback free of locks (see [`mod@super::handoff`]); a few
@@ -199,7 +209,7 @@ impl DeviceInput {
             reader,
             events,
             overloads: 0,
-            log: QuietLog::default(),
+            log: NoticeLog::default(),
             input: id.0.clone(),
             name: device.name.clone(),
             options,
@@ -282,8 +292,8 @@ impl Drop for DeviceInput {
     }
 }
 
-/// Decides which notices are logged: one line per [`LOG_QUIET`] at most,
-/// the ones held back counted on the next.
+/// Decides which notices of a kind are logged: one line per [`LOG_QUIET`]
+/// at most, the ones held back counted on the next.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct QuietLog {
     /// When the newest line was logged.
@@ -309,6 +319,34 @@ impl QuietLog {
     }
 }
 
+/// Which of an input's notices are logged: the discontinuities and the
+/// overloads each by a [`QuietLog`] of their own, so that an overload's
+/// line cannot hold back the line of the gap it caused; see the module
+/// docs.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct NoticeLog {
+    /// The discontinuities' lines.
+    measured: QuietLog,
+    /// The overloads' lines.
+    reported: QuietLog,
+}
+
+impl NoticeLog {
+    /// The line to log at `now` for `notice` (an overload's when
+    /// `overload`), counting the ones of its kind held back since the last
+    /// line of that kind; `None` when one was logged within [`LOG_QUIET`].
+    pub(crate) fn line(&mut self, notice: &str, overload: bool, now: Instant) -> Option<String> {
+        let log = match overload {
+            true => &mut self.reported,
+            false => &mut self.measured,
+        };
+        log.admit(now).map(|held| match held {
+            0 => notice.to_owned(),
+            h => format!("{notice} ({h} more since the last line)"),
+        })
+    }
+}
+
 /// The worker's state; see the module docs.
 struct Worker {
     /// Stamps the blocks.
@@ -322,7 +360,7 @@ struct Worker {
     /// Overloads already turned into notices.
     overloads: u64,
     /// Which notices are logged.
-    log: QuietLog,
+    log: NoticeLog,
     /// The input's id, for the log.
     input: String,
     /// The device's name, for messages.
@@ -399,6 +437,7 @@ impl Worker {
         self.publish(
             shared,
             format!("audio discontinuity ({n} so far{reported}): {d}"),
+            false,
         );
     }
 
@@ -417,22 +456,20 @@ impl Worker {
                 "the device reported an overload ({m} so far{measured}): its I/O cycle ran \
                  late, so its audio may have a gap"
             ),
+            true,
         );
     }
 
-    /// Makes `notice` the input's notice and logs it unless a line was
-    /// logged within [`LOG_QUIET`].
-    fn publish(&mut self, shared: &Shared, notice: String) {
-        if let Some(held) = self.log.admit(Instant::now()) {
-            let more = match held {
-                0 => String::new(),
-                h => format!(" ({h} more since the last line)"),
-            };
+    /// Makes `notice` the input's notice and logs it unless a line of its
+    /// kind (an overload's when `overload`) was logged within
+    /// [`LOG_QUIET`].
+    fn publish(&mut self, shared: &Shared, notice: String, overload: bool) {
+        if let Some(line) = self.log.line(&notice, overload, Instant::now()) {
             tracing::warn!(
                 target: TARGET,
                 input = %self.input,
                 device = %self.name,
-                "{notice}{more}"
+                "{line}"
             );
         }
         *lock(&shared.notice) = Some(notice);

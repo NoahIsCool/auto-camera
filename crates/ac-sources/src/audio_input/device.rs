@@ -46,9 +46,9 @@
 //!   an **overload** the device reported does not stop the input: it is
 //!   counted, the two on counts of their own (an overload that lost audio
 //!   is measured as a discontinuity too; see [`input`]), logged (at most a
-//!   line per [`input::LOG_QUIET`], counting the rest) and shown as the
-//!   input's error while it keeps running, with both counts. Blocks the
-//!   hand-off dropped count in
+//!   line per [`input::LOG_QUIET`] for each of the two, counting the rest)
+//!   and shown as the input's error while it keeps running, with both
+//!   counts. Blocks the hand-off dropped count in
 //!   [`AudioInput::dropped`](ac_media::AudioInput::dropped) too.
 //! * The device **going away** (unplugged; its sample rate changed under
 //!   the stream) stops the input with that error, and so does a device

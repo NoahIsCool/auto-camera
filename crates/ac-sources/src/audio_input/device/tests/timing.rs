@@ -1,14 +1,17 @@
 //! The stamper on made-up host times: sequence numbers and PTS of a
 //! steady, a drifting and a jittery stream; jumps that last (a gap kept in
-//! PTS, a rewind that moves the map), reported once their window has
-//! passed; and excursions that come back (glitches of one block or
-//! several, either way, at the blocks' sizes a device delivers), which
-//! leave the PTS on the stream's old timeline and are reported once. Last,
-//! the capture latency held for a connection, so that callbacks of another
-//! length do not move the PTS.
+//! PTS, a rewind that moves the map, however small beyond a millisecond),
+//! reported once their window has passed; and excursions that come back
+//! (glitches of one block or several, either way, at the blocks' sizes a
+//! device delivers), which leave the PTS on the stream's old timeline and
+//! are reported once, when they went beyond their tolerance. A loss is
+//! kept whole after a first block stamped off and after a rewind that
+//! lasted, which is reported when the loss comes. Last, the capture
+//! latency held for a connection, so that callbacks of another length do
+//! not move the PTS.
 
 use super::*;
-use crate::audio_input::device::timing::GLITCH_WINDOW;
+use crate::audio_input::device::timing::{GLITCH_WINDOW, REWIND_BLOCKS};
 
 /// A captured block of `frames` stereo frames at `host`, nothing lost
 /// before it.
@@ -541,4 +544,119 @@ fn callbacks_of_another_length_do_not_move_the_pts() {
         ] if eight(ahead) && eight(back)),
         "{found:?}"
     );
+}
+
+#[test]
+fn a_first_block_stamped_off_is_not_a_jump_and_a_loss_after_it_is_kept_whole() {
+    let blocks = steady(ms(1000), 480, 120);
+    let (want, none) = run(&mut stamper(ms(1000)), &blocks);
+    assert!(none.is_empty(), "{none:?}");
+    // 20 ms lost before block 20: the blocks from there on 20 ms later.
+    let lost = moved(&blocks, 20..120, ms(20), true);
+    for (first, ahead) in [(ms(8), true), (ms(8), false), (ms(3), false)] {
+        let case = format!("first block {first:?} ahead={ahead}");
+        let host = moved(&lost, 0..1, first, ahead);
+        let (pts, found) = run(&mut stamper(ms(1000)), &host);
+        assert_eq!(
+            found,
+            [(
+                71,
+                Discontinuity::Gap {
+                    seq: 20,
+                    by: ms(20)
+                }
+            )],
+            "{case}: the loss, whole, and nothing for the first block"
+        );
+        assert_eq!(pts[1..20], want[1..20], "{case}: on the open's timeline");
+        assert_eq!(
+            pts[20..],
+            want[20..].iter().map(|&p| p + ms(20)).collect::<Vec<_>>(),
+            "{case}: the whole loss in the PTS"
+        );
+    }
+}
+
+#[test]
+fn a_rewind_that_lasted_is_reported_before_a_loss_after_it_and_the_loss_kept_whole() {
+    let blocks = steady(Duration::ZERO, 480, 200);
+    let (want, _) = run(&mut stamper(Duration::ZERO), &blocks);
+    // The timestamps go back 10 ms at block 10 and stay there; `after`
+    // blocks later 20 ms of audio is lost.
+    for after in [REWIND_BLOCKS as usize, 10] {
+        let at = 10 + after;
+        let mut host = moved(&blocks, 10..200, ms(10), false);
+        host = moved(&host, at..200, ms(20), true);
+        let (pts, found) = run(&mut stamper(Duration::ZERO), &host);
+        assert_eq!(
+            found,
+            [
+                (
+                    at,
+                    Discontinuity::Rewind {
+                        seq: 10,
+                        by: ms(10)
+                    }
+                ),
+                (
+                    at + 51,
+                    Discontinuity::Gap {
+                        seq: at as u64,
+                        by: ms(20)
+                    }
+                ),
+            ],
+            "{after} blocks on: the rewind when the loss comes, the loss after its window"
+        );
+        assert_eq!(pts[..at], want[..at], "{after}: the rewind absorbed");
+        assert_eq!(
+            pts[at..],
+            want[at..].iter().map(|&p| p + ms(20)).collect::<Vec<_>>(),
+            "{after}: the whole loss in the PTS"
+        );
+    }
+}
+
+#[test]
+fn a_rewind_smaller_than_half_a_block_that_lasts_moves_the_map_and_is_reported() {
+    let blocks = steady(Duration::ZERO, 480, 200);
+    let (want, _) = run(&mut stamper(Duration::ZERO), &blocks);
+    for by in [ms(2), ms(4)] {
+        let host = moved(&blocks, 10..200, by, false);
+        let (pts, found) = run(&mut stamper(Duration::ZERO), &host);
+        assert_eq!(
+            pts, want,
+            "{by:?}: every block where the old timeline has it"
+        );
+        assert_eq!(
+            found,
+            [(61, Discontinuity::Rewind { seq: 10, by })],
+            "{by:?}: once, after the window"
+        );
+    }
+    // Within a millisecond it is jitter: the PTS follow the host times.
+    let host = moved(&blocks, 10..200, Duration::from_micros(900), false);
+    let (pts, found) = run(&mut stamper(Duration::ZERO), &host);
+    assert!(found.is_empty(), "{found:?}");
+    assert_eq!(pts[10], want[10] - Duration::from_micros(900));
+}
+
+#[test]
+fn an_excursion_within_half_a_block_that_comes_back_is_not_reported() {
+    let blocks = steady(Duration::ZERO, 480, 200);
+    let (want, _) = run(&mut stamper(Duration::ZERO), &blocks);
+    for blocks_off in [1usize, 2, 4] {
+        for ahead in [true, false] {
+            let case = format!("3 ms ahead={ahead} for {blocks_off} block(s)");
+            let host = moved(&blocks, 10..10 + blocks_off, ms(3), ahead);
+            let (pts, found) = run(&mut stamper(Duration::ZERO), &host);
+            assert!(found.is_empty(), "{case}: {found:?}");
+            let back = 10 + blocks_off;
+            assert_eq!(pts[back..], want[back..], "{case}: on the old timeline");
+            for i in 10..back {
+                let off = if ahead { want[i] + ms(3) } else { want[i] };
+                assert_eq!(pts[i], off, "{case}: block {i}");
+            }
+        }
+    }
 }
