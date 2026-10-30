@@ -6,10 +6,11 @@
 //! # Invariants
 //!
 //! * The sums are about the latest block's first frame (`x = 0`), so they
-//!   stay small over an epoch of any length; `error` and `slope` are the
-//!   fit at that origin.
+//!   stay small over an epoch of any length. `slope` remains the fitted
+//!   slope; `error` is its intercept except while settling carries a
+//!   guarded prediction (without slope before the timing reference).
 //! * A block held out of the fit enters no sum: it only moves the origin,
-//!   and `error` along the fitted line with it.
+//!   and `error` along the prediction's current slope with it.
 //! * A held run ends at the first block back within the threshold, at
 //!   [`CONFIRM_BLOCKS`] blocks in a row at one level spanning
 //!   [`CONFIRM_THRESHOLDS`] times the threshold of input time, or once it
@@ -34,6 +35,9 @@ pub(super) struct Epoch {
     pub(super) latest: u64,
     /// Blocks taken in.
     pub(super) blocks: u64,
+    /// Sample frames whose timestamps were admitted to the fit, excluding
+    /// held blocks and the settling interval after a step.
+    pub(super) measured_frames: u64,
     /// `Σw`: the blocks' weights.
     w: f64,
     /// `Σw·x`.
@@ -76,10 +80,17 @@ pub(super) struct Epoch {
     /// Standard error of `v̂`; infinite until it can be told.
     pub(super) spread: f64,
     /// What the timing error is measured against: `error`, less
-    /// `stepped`, when the epoch had [`super::REFERENCE_AFTER`] of input.
+    /// `stepped`, after [`super::REFERENCE_AFTER`] of admitted input.
     pub(super) reference: Option<f64>,
     /// The sizes of the steps told before the reference, summed.
     pub(super) stepped: f64,
+    /// Input time left before a confirmed step's new segment may learn
+    /// from blocks within its threshold; a returning excursion must first
+    /// be measured against the same line that made its forward edit.
+    pub(super) settling: f64,
+    /// Slope carried during settling; zero before the epoch's reference
+    /// exists, when a handful of jittered timestamps cannot predict it.
+    pub(super) settling_slope: f64,
     /// The blocks held out of the fit, while there are.
     pub(super) held: Option<Held>,
 }
@@ -160,11 +171,20 @@ impl Epoch {
         }
     }
 
-    /// Carries the fit along its line to an origin `dx` seconds on, for a
-    /// block held out of it (the sums were aged already): the fit at the
-    /// new origin is the same line.
+    /// Carries the prediction to an origin `dx` seconds on for a block
+    /// held out of the fit (the sums were aged already), using the guarded
+    /// slope while a confirmed step's new level is settling.
     pub(super) fn pass(&mut self, dx: f64) {
-        self.error += self.slope * dx;
+        self.error += self.carried_slope() * dx;
+    }
+
+    /// The slope used to predict blocks while a step's level settles.
+    pub(super) fn carried_slope(&self) -> f64 {
+        if self.settling > 0.0 {
+            self.settling_slope
+        } else {
+            self.slope
+        }
     }
 
     /// Ends the current segment at a step: its sums, centred on its own
@@ -194,6 +214,7 @@ impl Epoch {
             self.wr += weight;
         }
         self.blocks += 1;
+        self.measured_frames = self.measured_frames.saturating_add(frames);
         // Weighted least squares about the origin (the latest block), one
         // slope through every segment and a level for the current one:
         // `S` is Σw·(x − x̄)², each segment about its own mean.

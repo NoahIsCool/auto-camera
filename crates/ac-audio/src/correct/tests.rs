@@ -472,3 +472,88 @@ fn a_stray_timestamp_leaves_the_audio_alone() {
         assert_eq!((stats.steps, stats.resets, stats.resampling), (0, 0, false));
     }
 }
+
+/// A confirmed excursion returning in smaller steps makes cancelling edits,
+/// rather than teaching the fit the return and leaving its silence behind.
+#[test]
+fn a_confirmed_excursion_returning_in_parts_leaves_no_audio_offset() {
+    for block in [128usize, 1_024] {
+        for tail in [&[0.002, 0.001][..], &[0.0015][..]] {
+            for way in [-1.0, 1.0] {
+                let mut c = corrector();
+                let mut noise = jitter(0.000_03);
+                let rate = f64::from(RATE);
+                let start = 3 * RATE as usize / block;
+                let count = 8 * RATE as usize / block;
+                let samples = vec![0.5; block * 2];
+                let mut output = 0usize;
+                for k in 0..count {
+                    let off = match k.checked_sub(start) {
+                        Some(0..=3) => 0.003,
+                        Some(n) => tail.get(n - 4).copied().unwrap_or(0.0),
+                        None => 0.0,
+                    };
+                    let pts = Duration::from_secs_f64(
+                        1.0 + (k * block) as f64 / rate + way * off + noise(),
+                    );
+                    output += frames(&c.process(pts, &samples), &samples);
+                }
+                let held = c.resampler.as_ref().map_or(0.0, Resampler::waiting);
+                let offset = output as f64 + held - (count * block) as f64;
+                assert!(
+                    offset.abs() < 0.0005 * rate,
+                    "block {block}, tail {tail:?}, way {way}: {offset} frames, {:?}",
+                    c.stats()
+                );
+                assert_eq!(c.stats().resets, 0);
+            }
+        }
+    }
+}
+
+/// Returning excursions cancel before and after reference acquisition,
+/// without changing correction of a fast or slow clock.
+#[test]
+fn returning_excursions_preserve_a_twins_timing_at_any_epoch_age() {
+    for block in [128usize, 1_024] {
+        for start_s in [0.1, 0.4, 3.0] {
+            for ppm in [-100.0, 0.0, 100.0] {
+                for by in [-0.03, -0.003, 0.003, 0.03] {
+                    let (mut c, mut twin) = (corrector(), corrector());
+                    let mut noise = jitter(0.000_03);
+                    let rate = f64::from(RATE);
+                    let start = (start_s * rate / block as f64) as usize;
+                    let count = ((start_s + 8.0) * rate / block as f64) as usize;
+                    let samples = vec![0.0; block * 2];
+                    let (mut output, mut twin_output) = (0usize, 0usize);
+                    for k in 0..count {
+                        let off = match k.checked_sub(start) {
+                            Some(0..=3) => by,
+                            Some(4) => by * 2.0 / 3.0,
+                            Some(5) => by / 3.0,
+                            _ => 0.0,
+                        };
+                        let at = 1.0 + pts(k * block, ppm).as_secs_f64() + noise();
+                        output += frames(
+                            &c.process(Duration::from_secs_f64(at + off), &samples),
+                            &samples,
+                        );
+                        twin_output += frames(
+                            &twin.process(Duration::from_secs_f64(at), &samples),
+                            &samples,
+                        );
+                    }
+                    let held = c.resampler.as_ref().map_or(0.0, Resampler::waiting);
+                    let twin_held = twin.resampler.as_ref().map_or(0.0, Resampler::waiting);
+                    let offset = output as f64 + held - twin_output as f64 - twin_held;
+                    assert!(
+                        offset.abs() < 0.0005 * rate,
+                        "block {block}, at {start_s}, ppm {ppm}, by {by}: {offset} frames, {:?}",
+                        c.stats()
+                    );
+                    assert_eq!(c.stats().resets, 0);
+                }
+            }
+        }
+    }
+}

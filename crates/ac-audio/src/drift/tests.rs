@@ -7,6 +7,8 @@
 
 use super::*;
 
+mod settle;
+
 /// Sample rate of the tests.
 const RATE: u32 = 48_000;
 
@@ -542,9 +544,19 @@ fn a_loss_or_a_stray_among_an_epochs_first_blocks_is_held_out_of_the_fit() {
             // The drift within its uncertainty (the segments before a step
             // give the slope, not the level).
             let doubt = e.drift_uncertainty_ppm();
-            assert!((e.drift_ppm() - twin.drift_ppm()).abs() < doubt, "{what}");
+            assert!(
+                (e.drift_ppm() - twin.drift_ppm()).abs() < doubt,
+                "{what}: {} vs {}, doubt {doubt}",
+                e.drift_ppm(),
+                twin.drift_ppm()
+            );
             let made_up = steps as f64 * length;
-            assert!((e.error() - twin.error() + made_up).abs() < 1e-4, "{what}");
+            assert!(
+                (e.error() - twin.error() + made_up).abs() < 1e-4,
+                "{what}: error {} vs {}, made up {made_up}",
+                e.error(),
+                twin.error()
+            );
         }
     }
     for off in [0.008, -0.008] {

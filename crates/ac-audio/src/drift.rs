@@ -58,7 +58,8 @@
 //! its own error, so that block cannot be what the timing error is
 //! measured against: a first block stamped 30 ms off would read as 30 ms
 //! of timing error for the whole epoch. Once the epoch has
-//! [`REFERENCE_AFTER`] of input (a second, a hundred 10 ms blocks) the
+//! [`REFERENCE_AFTER`] of admitted input (a second, a hundred 10 ms blocks;
+//! held and post-step settling blocks do not count) the
 //! fitted `û`, less the steps told before then (below), is taken as the
 //! reference, and [`DriftEstimator::error`] is `û` less it from then on
 //! (zero until then). One block's error moves the fitted `û` at the far
@@ -116,6 +117,21 @@
 //! error of that size for about as long as the stray lasted, and no lasting
 //! offset.
 //!
+//! A newly confirmed step starts a segment with just one observation.
+//! Learning immediately from a return in small parts can move that
+//! segment's level by most of the return before the full inverse exceeds
+//! the step threshold, leaving the first edit in the audio permanently.
+//! For [`STEP_SETTLE`] of input after each confirmation, the new level is
+//! therefore carried along the prior slope without fitting or scoring
+//! blocks inside its threshold. Step detection continues throughout, so
+//! a returning excursion or a second real loss is still confirmed and
+//! made up at its full size. This interval covers a device's half-second
+//! timestamp-excursion window. Before the epoch has its timing reference,
+//! the level is carried without slope: a handful of jittered observations
+//! cannot reliably extrapolate it. Learning a changed sample-clock slope
+//! may consequently wait up to half a second after a step; a change of
+//! 1,000 ppm then adds half a millisecond before learning resumes.
+//!
 //! Steps are told from an epoch's third block on (a second block that is
 //! off starts the epoch again, above), so that a loss or a stray timestamp
 //! among its first blocks is held out of the fit like any later one,
@@ -163,13 +179,18 @@ mod epoch;
 
 use epoch::{Epoch, Held, Verdict};
 
-/// Input time of an epoch after which its timing reference is taken from
-/// the fit; see the module docs.
+/// Input time admitted to an epoch after which its timing reference is
+/// taken from the fit; see the module docs.
 pub const REFERENCE_AFTER: Duration = Duration::from_secs(1);
 
 /// Input time of an epoch before which a block is weighed against the
 /// epoch's level alone, not its fitted slope; see the module docs.
 pub const SLOPE_AFTER: Duration = Duration::from_millis(100);
+
+/// Input time after a confirmed step during which the estimator carries
+/// its new level along the prior slope without learning transient tails.
+/// This covers a device's timestamp-excursion decision window.
+pub const STEP_SETTLE: Duration = Duration::from_millis(500);
 
 /// Blocks in a row at one level beyond the step threshold, the first
 /// included, that confirm a step; see the module docs.
@@ -286,7 +307,8 @@ pub enum Observation {
     /// the second of an epoch when it is more than a step off the first,
     /// whose PTS was then off (see the module docs).
     Start,
-    /// A block of the current epoch, which the estimates took in.
+    /// A block of the current epoch, admitted to the fit unless a step's
+    /// confirmed level is still settling; see the module docs.
     Tracked,
     /// A block further from where the estimates put it than a step, held
     /// out of them until the blocks after it show whether the PTS stepped
@@ -356,9 +378,10 @@ impl DriftEstimator {
         };
         let measured = epoch.frames as f64 / self.rate - seconds_between(pts, epoch.anchor);
         let dx = epoch.latest as f64 / self.rate;
+        epoch.settling = (epoch.settling - dx).max(0.0);
         // Where the fitted line puts the block, and where the estimates
         // do: the line, or early in the epoch its level alone.
-        let line = epoch.error + epoch.slope * dx;
+        let line = epoch.error + epoch.carried_slope() * dx;
         let early = (epoch.frames as f64 / self.rate) < SLOPE_AFTER.as_secs_f64();
         let residual = measured - if early { epoch.level() } else { line };
         if residual.is_nan() || residual.abs() > self.discontinuity {
@@ -393,18 +416,28 @@ impl DriftEstimator {
             }
             Verdict::Back => {
                 epoch.held = None;
-                let scored = epoch.blocks >= 2;
-                if early {
-                    epoch.score_level(residual, frames, self.rate);
+                if epoch.settling > 0.0 {
+                    epoch.pass(dx);
+                } else {
+                    let scored = epoch.blocks >= 2;
+                    if early {
+                        epoch.score_level(residual, frames, self.rate);
+                    }
+                    let off_line = measured - line;
+                    epoch.take(measured, scored.then_some(off_line), frames, self.rate);
                 }
-                let off_line = measured - line;
-                epoch.take(measured, scored.then_some(off_line), frames, self.rate);
                 Observation::Tracked
             }
             Verdict::Step => {
                 epoch.held = None;
                 epoch.split();
                 epoch.take(measured, None, frames, self.rate);
+                epoch.settling = STEP_SETTLE.as_secs_f64();
+                epoch.settling_slope = if epoch.reference.is_some() {
+                    epoch.slope
+                } else {
+                    0.0
+                };
                 if epoch.reference.is_none() {
                     epoch.stepped += residual;
                 }
@@ -420,7 +453,7 @@ impl DriftEstimator {
         epoch.frames += frames;
         epoch.latest = frames;
         if epoch.reference.is_none()
-            && epoch.frames as f64 / self.rate >= REFERENCE_AFTER.as_secs_f64()
+            && epoch.measured_frames as f64 / self.rate >= REFERENCE_AFTER.as_secs_f64()
         {
             epoch.reference = Some(epoch.error - epoch.stepped);
         }
