@@ -22,7 +22,8 @@
 //! The device is a model of what cpal's CoreAudio host delivers: a sample
 //! clock some ppm off the host clock; IO buffers of a size that may change;
 //! for each, `mHostTime`, the host time of its first frame give or take its
-//! jitter ([`JITTER`] for CoreAudio's own, more for a noisier driver);
+//! jitter ([`JITTER`] for CoreAudio's own, more for a noisier driver: white,
+//! a sequence of its own for each seed, and louder in [`Bursts`] if given);
 //! cpal's capture time, that less the IO buffer (this callback's own length
 //! when the device does not report its size) and the device's latency and
 //! safety offset; and the callback, at the buffer's end plus up to
@@ -44,7 +45,10 @@
 //! difference of the two leads is what was put in or cut for the event.
 //! Where frames the sample clock skipped move the blocks after them to
 //! other ticks, each pushed block's offset (the encoder's position at it
-//! less its PTS) is compared instead ([`near_slack`]).
+//! less its PTS) is compared instead ([`near_slack`]). The device input's
+//! own map is read from each block's *PTS error*: its PTS less where its
+//! first frame's capture belongs on the connection's timeline, a constant
+//! but for what the map got wrong.
 //!
 //! # Invariants checked
 //!
@@ -96,6 +100,9 @@
 //!   back that comes home in steps, one glitch and nothing filled; and
 //!   jitter of ±1 to ±1.5 ms on every buffer for minutes, no rewind, no
 //!   step and nothing for the pacer.
+//! * Every case found so far, as families of scenarios swept over buffer
+//!   sizes, rates, jitter and phases, each with a scorecard
+//!   ([`battery`]).
 
 use std::time::Duration;
 
@@ -109,6 +116,7 @@ use crate::output::{AUDIO_MAX_LEAD, AUDIO_SLACK};
 use crate::program_audio::tests::scripted;
 use crate::program_audio::{AudioInputView, Origin, ProgramAudio};
 
+mod battery;
 mod lead_limit;
 mod near_slack;
 mod told_apart;
@@ -164,6 +172,30 @@ fn secs(s: f64) -> Duration {
     Duration::from_secs_f64(s)
 }
 
+/// Stretches in which a buffer's host time jitters more than the device's
+/// own: a driver or a host that is busy now and then.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Bursts {
+    /// Most a buffer's host time is off in one, in seconds.
+    peak: f64,
+    /// True when a buffer's host time is only ever late in one (a stamp
+    /// taken late), never early.
+    late_only: bool,
+    /// When the first starts, in seconds of the device's clock.
+    from: f64,
+    /// Seconds from the start of one to the start of the next.
+    every: f64,
+    /// How long each lasts, in seconds.
+    lasting: f64,
+}
+
+impl Bursts {
+    /// True while one lasts at `t` seconds of the device's clock.
+    fn during(&self, t: f64) -> bool {
+        t >= self.from && (t - self.from) % self.every < self.lasting
+    }
+}
+
 /// What happens to the device, from a time of its own clock on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Event {
@@ -189,6 +221,11 @@ struct Device {
     /// Most a buffer's host time is off its first frame's, either way, in
     /// seconds: [`JITTER`], or more for a noisier driver.
     jitter: f64,
+    /// Which sequence the jitter takes: devices with the same seed jitter
+    /// alike buffer by buffer (by each buffer's first frame).
+    seed: u64,
+    /// Stretches of louder jitter, if any.
+    bursts: Option<Bursts>,
     /// Host time at which the connection opened, in seconds: the PTS
     /// origin and the start of the video's timeline.
     opened: f64,
@@ -217,6 +254,8 @@ impl Device {
             rate,
             ppm: 0.5,
             jitter: JITTER,
+            seed: 0,
+            bursts: None,
             opened: OPENED,
             buffer,
             reported: Some(buffer),
@@ -248,9 +287,27 @@ impl Device {
         HOST0 + frame as f64 / (f64::from(self.rate) * (1.0 + self.ppm * 1e-6))
     }
 
+    /// How far the host time of a buffer whose first frame is `frame` is
+    /// off by jitter, in seconds: [`spread`] of the frame and the seed,
+    /// times the jitter, or times the peak (only ever late, in a late-only
+    /// burst) while a burst lasts.
+    fn jitter_of(&self, frame: u64) -> f64 {
+        let spread = spread((2 * frame) ^ (self.seed << 40));
+        match self.bursts {
+            Some(b) if b.during(frame as f64 / f64::from(self.rate)) => {
+                if b.late_only {
+                    (spread + 1.0) / 2.0 * b.peak
+                } else {
+                    spread * b.peak
+                }
+            }
+            _ => spread * self.jitter,
+        }
+    }
+
     /// Its next callback: when it runs, in host seconds, the capture time
-    /// handed to the sink, and its frames.
-    fn callback(&mut self) -> (f64, Duration, u64) {
+    /// handed to the sink, its first frame, and its frames.
+    fn callback(&mut self) -> (f64, Duration, u64, u64) {
         let rate = f64::from(self.rate);
         while let Some(&(at, event)) = self.events.first()
             && at <= self.frame as f64 / rate
@@ -264,7 +321,7 @@ impl Device {
             }
         }
         let frames = self.buffer;
-        let mut host = self.host_of(self.frame) + spread(2 * self.frame) * self.jitter;
+        let mut host = self.host_of(self.frame) + self.jitter_of(self.frame);
         if self.off.0 > 0 {
             host += self.off.1;
             self.off.0 -= 1;
@@ -275,10 +332,11 @@ impl Device {
             Some(held) => held.capture(stamp, capture),
             None => capture,
         };
+        let first = self.frame;
         self.frame += frames;
         let delay = (spread(2 * self.frame + 1) + 1.0) / 2.0 * CALLBACK_DELAY;
         self.called = (self.host_of(self.frame) + delay).max(self.called);
-        (self.called, at, frames)
+        (self.called, at, first, frames)
     }
 }
 
@@ -291,6 +349,10 @@ struct Run {
     offsets: Vec<(f64, f64)>,
     /// What the device input reported.
     found: Vec<Discontinuity>,
+    /// Each block the device input stamped: its first frame's time on the
+    /// device's clock and its PTS error (its PTS less where that frame's
+    /// capture belongs on the connection's timeline), in seconds.
+    pts_error: Vec<(f64, f64)>,
     /// Frames the drift correction passed on less those it was given:
     /// silence it put in, less audio it cut, plus what resampling changed.
     edited: i64,
@@ -338,16 +400,26 @@ fn play_from(mut device: Device, seconds: u64, output_at: u64) -> Run {
     let (mut lead, mut found, mut edited) = (Vec::new(), Vec::new(), 0);
     let (mut position, mut offsets) = (0u64, Vec::new());
     let mut next = device.callback();
+    // Where captures belong on the connection's timeline: the first
+    // buffer's latency held, and the origin moved back to the first
+    // capture when it came before the open.
+    let latency = (device.reported.unwrap_or(next.3) + EXTRA) as f64 / f64::from(rate);
+    let origin = opened.min(device.host_of(next.2) - latency);
+    let mut pts_error = Vec::new();
     for tick in 1..=seconds * FPS {
         let now = opened + tick as f64 / FPS as f64;
         let mut blocks = Vec::new();
         while next.0 <= now {
-            let (_, at, length) = next;
+            let (_, at, mut frame, length) = next;
             sink.deliver(at, &silence[..2 * length as usize]);
             while let Some(captured) = reader.take() {
                 let (block, notes) = stamper.stamp(&captured);
                 reader.recycle(captured);
                 found.extend(notes);
+                let belongs = device.host_of(frame) - latency - origin;
+                let time = frame as f64 / f64::from(rate);
+                pts_error.push((time, block.pts.as_secs_f64() - belongs));
+                frame += frames(&block) as u64;
                 edited -= frames(&block);
                 blocks.push(block);
             }
@@ -378,6 +450,7 @@ fn play_from(mut device: Device, seconds: u64, output_at: u64) -> Run {
         lead,
         offsets,
         found,
+        pts_error,
         edited,
         pacer: pacer.stats(),
         view: audio.views(None).remove(0),
