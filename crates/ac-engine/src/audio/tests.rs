@@ -100,6 +100,64 @@ fn a_burst_beyond_the_lead_limit_keeps_the_newest_audio() {
 }
 
 #[test]
+fn audio_dropped_at_the_lead_limit_comes_back_when_the_silence_that_lifted_it_goes() {
+    // A board 15 or 40 ms ahead of the target. A drift corrector makes up
+    // a step in its PTS with 95 ms of silence, which lifts the lead over
+    // the limit, and takes it out again over three ticks (the step was a
+    // glitch). What the limit dropped is given back as silence on the
+    // first tick with audio after that: the lead is where it was.
+    for ahead in [720usize, 1920] {
+        let mut p = pacer();
+        p.plan(1, vec![block(1600 + ahead, RATE, 2)]);
+        for tick in 2..10 {
+            p.plan(tick, vec![block(1600, RATE, 2)]);
+        }
+        let before = p.stats().lead_ms;
+        p.plan(10, vec![block(1600, RATE, 2), block(4560, RATE, 2)]);
+        let dropped = p.stats().dropped;
+        assert!(dropped > 0 && p.stats().lead_ms <= 100, "{:?}", p.stats());
+        for tick in 11..13 {
+            p.plan(tick, vec![block(1600, RATE, 2)]);
+        }
+        assert!(p.plan(13, vec![]).is_empty());
+        assert!(p.plan(14, vec![]).is_empty());
+        let out = p.plan(15, vec![block(3 * 1600 - 4560, RATE, 2)]);
+        assert!(
+            matches!(out[..], [PacedAudio::Silence(n), PacedAudio::Block(_)] if n == dropped),
+            "{ahead}: {out:?}"
+        );
+        for tick in 16..=90 {
+            p.plan(tick, vec![block(1600, RATE, 2)]);
+        }
+        let s = p.stats();
+        assert_eq!(s.lead_ms, before, "{ahead}: {s:?}");
+        assert_eq!(s.silence, s.dropped, "{ahead}: {s:?}");
+    }
+}
+
+#[test]
+fn a_bursts_credit_is_kept_while_its_audio_holds_the_lead_up_then_forgotten() {
+    // 100 ms of backlog beyond the limit at once: a block is dropped, and
+    // the source's audio keeps the lead at the limit, so nothing is given
+    // back. Two seconds later the source sends nothing for three ticks and
+    // goes on fresh, on the target: the credit, which would fit now, is
+    // long forgotten, and no silence goes in.
+    let mut p = pacer();
+    p.plan(1, (0..5).map(|_| block(1600, RATE, 2)).collect());
+    assert_eq!((p.stats().dropped, p.stats().lead_ms), (1600, 100));
+    for tick in 2..62 {
+        p.plan(tick, vec![block(1600, RATE, 2)]);
+        assert_eq!(p.stats().silence, 0, "tick {tick}");
+    }
+    p.plan(65, vec![block(1600, RATE, 2)]);
+    for tick in 66..=90 {
+        p.plan(tick, vec![block(1600, RATE, 2)]);
+    }
+    let s = p.stats();
+    assert_eq!((s.silence, s.dropped, s.lead_ms), (0, 1600, 0), "{s:?}");
+}
+
+#[test]
 fn mismatched_and_empty_blocks_are_dropped() {
     let mut p = pacer();
     let out = p.plan(

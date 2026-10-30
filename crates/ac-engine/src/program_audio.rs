@@ -41,20 +41,20 @@
 //! rate; at another rate its blocks are dropped by the pacer (its
 //! `mismatched_blocks`) until the output is started again.
 //!
-//! What the engine does correct is drift ([`ac_audio::DriftCorrector`]).
-//! An audio input on its own sample clock delivers a little more or less
-//! than its nominal rate per second of the engine's clock (100 ppm is a
-//! second over three hours); its program blocks are measured against their
-//! PTS and resampled by that much, smoothly, before the pacer, so the pacer
-//! neither fills nor cuts for it ([`AudioInputView::correction_ppm`]).
-//! Blocks within the drift's dead band pass as they are, as a file input's
-//! on the engine's clock always do. A step in the PTS is not drift: lost
-//! audio up to the pacer's slack is made up with silence once the few
-//! blocks after it confirm it ([`AudioInputView::drift_steps`]), a
-//! timestamp that strays for up to three blocks and comes back is left
-//! alone (one off for longer is made up and taken back, with no lasting
-//! offset), and a larger step
-//! (a reconnection) is a break that restarts the measurement
+//! What the engine does correct is drift ([`ac_audio::DriftCorrector`]). An
+//! audio input on its own sample clock delivers a little more or less than
+//! its nominal rate per second of the engine's clock (100 ppm is a second
+//! over three hours); its program blocks are measured against their PTS and
+//! resampled by that much, smoothly, before the pacer, so the pacer neither
+//! fills nor cuts for it ([`AudioInputView::correction_ppm`]). Blocks
+//! within the drift's dead band pass as they are, as a file input's on the
+//! engine's clock always do. A step in the PTS is not drift: lost audio up
+//! to the pacer's slack is made up with silence once the few blocks after
+//! it confirm it ([`AudioInputView::drift_steps`]), a timestamp that strays
+//! for up to three blocks and comes back is left alone (one off for longer
+//! is made up and taken back, with no lasting offset, the pacer giving back
+//! what its limit dropped meanwhile), and a larger step (a reconnection) is
+//! a break that restarts the measurement
 //! ([`AudioInputView::drift_resets`]). A video source's embedded audio is
 //! never resampled, and drift of the video itself is not corrected.
 //!
