@@ -506,8 +506,8 @@ board 100 ppm off stays within 20 ms of the video for three hours with no
 silence inserted and nothing cut. A step in the timestamps is never taken
 for drift: up to 100 ms (audio a full ring dropped, a short loss) it is
 made up once the next few blocks confirm it, with that much silence (or,
-for timestamps that step back, that much cut), in a connection's first
-second as later, and the drift measurement carries on; beyond 100 ms (a
+for timestamps that step back, that much cut), from a connection's third
+block on as later, and the drift measurement carries on; beyond 100 ms (a
 reconnection, a long loss) it is a break: the pacing above fills the gap
 and the measurement starts again. A timestamp that strays for a block or a
 few and comes back (a glitch in the device's clock) is not a step: no

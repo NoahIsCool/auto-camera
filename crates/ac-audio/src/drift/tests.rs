@@ -1,8 +1,9 @@
 //! Tests of the drift estimator: an input on the master clock, fast and
 //! slow clocks, exact and jittery PTS and irregular blocks, the timing
 //! reference, steps in the PTS taken for steps (confirmed a few blocks on,
-//! before the reference too) or breaks and never for drift, timestamps
-//! that stray and come back held and left out, and settings it refuses.
+//! before the reference and among an epoch's first blocks too) or breaks
+//! and never for drift, timestamps that stray and come back held and left
+//! out, and settings it refuses.
 
 use super::*;
 
@@ -264,21 +265,30 @@ fn a_stray_timestamp_that_comes_back_is_not_a_step() {
 
 #[test]
 fn an_excursion_held_from_going_back_is_not_a_step() {
-    // One block's host time 30 ms late, and the blocks after it stamped no
-    // earlier than it until the true times catch up, as a device input
-    // keeps its PTS from going back: their residuals come back a block's
-    // length at a time, never settling at one level, so nothing is told.
-    for block in [128, 480, 1_024] {
-        let (mut e, mut twin) = (estimator(), estimator());
-        let (_, frame) = twins((&mut e, &mut twin), (0, block, 30.0, 0.0), |_| 0.0);
-        let length = block as f64 / f64::from(RATE);
-        let tail = |k: u64| (0.03 - k as f64 * length).max(0.0);
-        let (seen, _) = twins((&mut e, &mut twin), (frame, block, 30.0, 0.0), tail);
-        let held = seen.iter().take_while(|&&o| o == Observation::Held).count();
-        assert!(held >= 1, "{block}: {:?}", &seen[..4]);
-        assert!(tracked_after(&seen, held), "{block}");
-        assert_eq!((e.resets(), e.steps()), (0, 0), "{block}");
-        assert!((e.error() - twin.error()).abs() < 1e-6, "{block}");
+    // One block's host time 8 to 60 ms late, and the blocks after it
+    // stamped no earlier than it until the true times catch up, as a
+    // device input keeps its PTS from going back: their residuals come
+    // back a block's length at a time, never settling at one level, so
+    // nothing is told, however short the blocks (32 frames are 0.67 ms, so
+    // four of them stay within the 2 ms threshold of each other).
+    for block in [32, 64, 128, 480, 1_024] {
+        for late in [0.008, 0.015, 0.03, 0.06] {
+            let (mut e, mut twin) = (estimator(), estimator());
+            let what = format!("{block} frames, {late} s late");
+            let (_, frame) = twins((&mut e, &mut twin), (0, block, 30.0, 0.0), |_| 0.0);
+            let length = block as f64 / f64::from(RATE);
+            let tail = |k: u64| (late - k as f64 * length).max(0.0);
+            let (seen, _) = twins((&mut e, &mut twin), (frame, block, 30.0, 0.0), tail);
+            let held = seen.iter().take_while(|&&o| o == Observation::Held).count();
+            assert!(held >= 1, "{what}: {:?}", &seen[..4]);
+            assert!(
+                tracked_after(&seen, held),
+                "{what}: {:?}",
+                &seen[..held + 2]
+            );
+            assert_eq!((e.resets(), e.steps()), (0, 0), "{what}");
+            assert!((e.error() - twin.error()).abs() < 1e-6, "{what}");
+        }
     }
 }
 
@@ -447,12 +457,15 @@ fn the_timing_reference_is_not_one_blocks_pts() {
         assert_eq!((e.resets(), e.steps()), (0, 0), "{off}");
     }
     // A second block within a step of the first keeps the epoch: jitter
-    // starts nothing again.
+    // starts nothing again. A third as far again off the level of the two
+    // is jitter as large, and taken in, not held.
     let mut e = estimator();
     assert_eq!(e.observe(Duration::ZERO, BLOCK), Observation::Start);
     let late = pts(BLOCK, 0.0, 0.001_9);
     assert_eq!(e.observe(late, BLOCK), Observation::Tracked);
     assert!((e.epoch_seconds() - 0.02).abs() < 1e-12);
+    let early = pts(2 * BLOCK, 0.0, -0.001_6);
+    assert_eq!(e.observe(early, BLOCK), Observation::Tracked);
 }
 
 #[test]
@@ -486,12 +499,90 @@ fn a_step_before_the_reference_is_told_and_left_out_of_it() {
         assert!(e.drift_ppm().abs() < 0.5, "{at}: {}", e.drift_ppm());
         assert_eq!(e.resets(), 0);
     }
-    // In the first tenth of a second there is no scatter to tell a step
-    // by yet: the block enters the fit.
-    let mut e = estimator();
-    for k in 0..5 {
-        e.observe(pts(k * BLOCK, 0.0, 0.0), BLOCK);
+}
+
+/// The threshold beyond which `e` holds a block now, in seconds.
+fn threshold(e: &DriftEstimator) -> f64 {
+    e.step
+        .max(STEP_SIGMAS * e.epoch.expect("an epoch").scatter())
+}
+
+#[test]
+fn a_loss_or_a_stray_among_an_epochs_first_blocks_is_held_out_of_the_fit() {
+    // 1,024-frame blocks of a board 37 ppm fast: one block lost before the
+    // third, fourth or sixth block (43 to 107 ms in), or the third one
+    // stamped 8 ms late or early. Each is held: the loss is told as a step
+    // a few blocks on, the stray comes back, and neither bends the fit, so
+    // the threshold stays at the step and a block lost at 0.4 s or 1 s is
+    // told as a step too.
+    let block = 1_024;
+    let length = block as f64 / f64::from(RATE);
+    for lost_at in [2, 3, 5] {
+        for second in [None, Some(19), Some(47)] {
+            let (mut e, mut twin) = (estimator(), estimator());
+            let what = format!("lost before block {lost_at}, then before {second:?}");
+            let lost = |k: u64| {
+                let n = u64::from(k >= lost_at) + u64::from(second.is_some_and(|s| k >= s));
+                n as f64 * length
+            };
+            let (seen, _) = twins((&mut e, &mut twin), (0, block, 5.0, 37.0), lost);
+            let at = lost_at as usize;
+            let held = CONFIRM_BLOCKS as usize - 1;
+            assert!(
+                seen[at..at + held].iter().all(|&o| o == Observation::Held),
+                "{what}: {seen:?}"
+            );
+            let Observation::Step(by) = seen[at + held] else {
+                panic!("{what}: {:?}", &seen[..at + held + 2]);
+            };
+            assert!((by + length).abs() < 1e-4, "{what}: {by}");
+            let steps = 1 + u64::from(second.is_some());
+            assert_eq!((e.resets(), e.steps()), (0, steps), "{what}");
+            assert!(threshold(&e) <= e.step, "{what}: {}", threshold(&e));
+            // The drift within its uncertainty (the segments before a step
+            // give the slope, not the level).
+            let doubt = e.drift_uncertainty_ppm();
+            assert!((e.drift_ppm() - twin.drift_ppm()).abs() < doubt, "{what}");
+            let made_up = steps as f64 * length;
+            assert!((e.error() - twin.error() + made_up).abs() < 1e-4, "{what}");
+        }
     }
-    let seen = e.observe(pts(9 * BLOCK, 0.0, 0.0), BLOCK);
-    assert_eq!((seen, e.steps()), (Observation::Tracked, 0));
+    for off in [0.008, -0.008] {
+        let (mut e, mut twin) = (estimator(), estimator());
+        let stray = |k: u64| if k == 2 { off } else { 0.0 };
+        let (seen, _) = twins((&mut e, &mut twin), (0, block, 5.0, 37.0), stray);
+        assert_eq!(seen[2], Observation::Held, "{off}");
+        assert!(tracked_after(&seen, 3), "{off}: {:?}", &seen[..6]);
+        assert_eq!((e.resets(), e.steps()), (0, 0), "{off}");
+        assert!(threshold(&e) <= e.step, "{off}: {}", threshold(&e));
+        // The estimates are a twin's that never saw the stray (one block
+        // fewer in the fit).
+        assert!((e.drift_ppm() - twin.drift_ppm()).abs() < 0.02, "{off}");
+        assert!((e.error() - twin.error()).abs() < 1e-6, "{off}");
+    }
+}
+
+#[test]
+fn an_epochs_first_blocks_are_weighed_by_its_level_not_a_slope_from_two() {
+    // A millisecond of jitter either way on 10 ms blocks: a line through
+    // the first two or three blocks can have a slope of a tenth, and would
+    // predict the next ones milliseconds off, to be held and to wander
+    // into a break. Weighed against the epoch's level instead, epoch after
+    // epoch starts with nothing held, told or reset.
+    for seed in 0..500u32 {
+        let mut e = estimator();
+        let mut noise = jitter(0.001);
+        for _ in 0..seed {
+            noise();
+        }
+        for k in 0..40u64 {
+            let seen = e.observe(pts(k * BLOCK, 100.0, noise()), BLOCK);
+            let first = k == 0 && seen == Observation::Start;
+            assert!(
+                first || seen == Observation::Tracked,
+                "seed {seed}, block {k}: {seen:?}"
+            );
+        }
+        assert_eq!((e.resets(), e.steps()), (0, 0), "seed {seed}");
+    }
 }

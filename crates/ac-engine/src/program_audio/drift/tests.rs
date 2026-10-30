@@ -1,11 +1,11 @@
 //! Tests of drift correction in program audio, through the output's pacer:
 //! a board 100 ppm off the engine's clock kept in sync for three hours
 //! without silence or cuts, steps in its PTS taken for breaks or made up
-//! once (in a connection's first second too) and never taken for drift,
-//! timestamps that stray and come back left alone, and audio on the
-//! engine's clock (a file input, a camera's) passed on untouched. A
-//! CoreAudio board's timestamps, from the device input's own stamper, are
-//! taken through the same path in [`device`].
+//! once (in a connection's first second, and its first tenth of a second,
+//! too) and never taken for drift, timestamps that stray and come back
+//! left alone, and audio on the engine's clock (a file input, a camera's)
+//! passed on untouched. A CoreAudio board's timestamps, from the device
+//! input's own stamper, are taken through the same path in [`device`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -494,6 +494,37 @@ fn audio_lost_in_a_connections_first_second_is_made_up_once() {
         assert_eq!((run.pacer.silence, run.pacer.dropped), (0, 0), "{what}");
         let cancels = -ppm / (1.0 + ppm * 1e-6);
         assert!((run.view.correction_ppm - cancels).abs() < 1.0, "{what}");
+    }
+}
+
+#[test]
+fn audio_lost_in_a_connections_first_tenth_of_a_second_is_made_up_too() {
+    // A board, drift-free or 37 ppm fast, loses 20 ms 30 ms after it
+    // connects (its third block is the first after the gap), then 40 ms at
+    // 0.4 s or at a second. The first loss is held out of the fit like any
+    // later one and made up, so it neither bends the fit nor leaves its
+    // scatter wide enough to hide the second: two steps, each made up once,
+    // and the lead within the spec's bound for two minutes.
+    for ppm in [0.0, 37.0] {
+        for second in [400, 1_000] {
+            let mut board = Board::new(ppm);
+            let ms = Duration::from_millis;
+            board.lost = vec![(ms(30), ms(50)), (ms(second), ms(second + 40))];
+            let run = play(&mut board, 120, 2);
+            let what = format!("{ppm} ppm, {second} ms: {:?}, {:?}", run.pacer, run.view);
+            assert_eq!(
+                (run.view.drift_steps, run.view.drift_resets),
+                (2, 0),
+                "{what}"
+            );
+            assert_eq!((run.pacer.silence, run.pacer.dropped), (0, 0), "{what}");
+            assert!(
+                -SYNC_MS <= run.low && run.high <= SYNC_MS,
+                "{what}: lead from {} to {} ms",
+                run.low,
+                run.high
+            );
+        }
     }
 }
 

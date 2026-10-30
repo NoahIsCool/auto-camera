@@ -90,16 +90,33 @@
 //! the hold: the held blocks strayed, nothing is made up, and the
 //! estimates are as if they had never come. Residuals that stay at one
 //! level (each within the threshold of the first of the run) for
-//! [`CONFIRM_BLOCKS`] blocks in a row, the first included, are a step
-//! ([`Observation::Step`]), told at the block that confirms it with that
-//! block's residual: a real loss is made up a few blocks late, at its full
-//! size, once. Residuals that move from level to level (the tail of an
-//! excursion whose PTS were held from going back) start the run again
-//! from each new level; held blocks that have neither settled nor come
-//! back after twice the discontinuity of input time are a break. Steps are
-//! told once an epoch has [`STEPS_AFTER`] of scored predictions (a tenth
-//! of a second, enough blocks for their scatter to be known); before then
-//! a block enters the fit as it is.
+//! [`CONFIRM_BLOCKS`] blocks in a row, the first included, and over at
+//! least [`CONFIRM_THRESHOLDS`] times the threshold of input time, are a
+//! step ([`Observation::Step`]), told at the block that confirms it with
+//! that block's residual: a real loss is made up a few blocks late, at its
+//! full size, once. Residuals that move from level to level start the run
+//! again from each new level: the tail of an excursion whose PTS were held
+//! from going back rises by a block's length a block, so however short the
+//! blocks it leaves the threshold before it has lasted that long, and is
+//! never taken for a level. Held blocks that have neither settled nor come
+//! back after twice the discontinuity of input time are a break.
+//!
+//! Steps are told from an epoch's third block on (a second block that is
+//! off starts the epoch again, above), so that a loss or a stray timestamp
+//! among its first blocks is held out of the fit like any later one,
+//! rather than bending the line and leaving its predictions, and with them
+//! the scatter and the threshold, far off for seconds. A slope fitted to a
+//! few blocks of jittery PTS predicts worse than none, though (jitter
+//! moves a block's PTS by up to milliseconds, drift the timing error by
+//! microseconds in a tenth of a second), so over an epoch's first
+//! [`SLOPE_AFTER`] of input a block's residual is taken against the
+//! epoch's level alone (the weighted mean of its timing error since the
+//! latest step), and the threshold counts the scatter of the blocks taken
+//! in about that level (from the second block on) as well as about the
+//! line, so that jitter as large as the first blocks' own is not held.
+//! Until a residual was scored the threshold is the step alone. The
+//! scatter about the line is always scored against the line, so that
+//! exact PTS keep the exact slope's uncertainty.
 //!
 //! A step is timing error, not drift. The fit is cut there into *segments*
 //! that share one slope and each have their own level: the segments
@@ -135,13 +152,18 @@ use epoch::{Epoch, Held, Verdict};
 /// the fit; see the module docs.
 pub const REFERENCE_AFTER: Duration = Duration::from_secs(1);
 
-/// Input time of an epoch's scored predictions after which steps are told:
-/// enough blocks for their scatter to be known; see the module docs.
-pub const STEPS_AFTER: Duration = Duration::from_millis(100);
+/// Input time of an epoch before which a block is weighed against the
+/// epoch's level alone, not its fitted slope; see the module docs.
+pub const SLOPE_AFTER: Duration = Duration::from_millis(100);
 
 /// Blocks in a row at one level beyond the step threshold, the first
 /// included, that confirm a step; see the module docs.
 pub const CONFIRM_BLOCKS: u64 = 4;
+
+/// Input time a run of blocks at one level must span to confirm a step, in
+/// multiples of the step threshold: residuals that rise as fast as input
+/// time leave the threshold within it; see the module docs.
+pub const CONFIRM_THRESHOLDS: f64 = 3.0;
 
 /// Multiples of the blocks' scatter about their predictions beyond which a
 /// residual is a step, not jitter; see the module docs.
@@ -319,27 +341,33 @@ impl DriftEstimator {
         };
         let measured = epoch.frames as f64 / self.rate - seconds_between(pts, epoch.anchor);
         let dx = epoch.latest as f64 / self.rate;
-        let residual = measured - (epoch.error + epoch.slope * dx);
+        // Where the fitted line puts the block, and where the estimates
+        // do: the line, or early in the epoch its level alone.
+        let line = epoch.error + epoch.slope * dx;
+        let early = (epoch.frames as f64 / self.rate) < SLOPE_AFTER.as_secs_f64();
+        let residual = measured - if early { epoch.level() } else { line };
         if residual.is_nan() || residual.abs() > self.discontinuity {
             self.resets += 1;
             self.epoch = Some(Epoch::new(pts, frames, self.rate));
             return Observation::Discontinuity;
         }
-        let threshold = self.step.max(STEP_SIGMAS * epoch.scatter());
+        let scatter = match early {
+            true => epoch.scatter().max(epoch.level_scatter()),
+            false => epoch.scatter(),
+        };
+        let threshold = self.step.max(STEP_SIGMAS * scatter);
         if epoch.blocks == 1 && residual.abs() > threshold {
             // The first block's PTS was off: start again from this one.
             self.epoch = Some(Epoch::new(pts, frames, self.rate));
             return Observation::Start;
         }
-        let telling = epoch.wr >= STEPS_AFTER.as_secs_f64();
         let limit = 2.0 * self.discontinuity;
         let verdict = match epoch.held.as_mut() {
             Some(held) => held.weigh(residual, dx, threshold, limit),
-            None if telling && residual.abs() > threshold => {
+            None if residual.abs() > threshold => {
                 epoch.held = Some(Held::new(residual));
                 Verdict::Held
             }
-            // Within the threshold, or before steps are told.
             None => Verdict::Back,
         };
         epoch.age(dx, self.smoothing);
@@ -351,7 +379,11 @@ impl DriftEstimator {
             Verdict::Back => {
                 epoch.held = None;
                 let scored = epoch.blocks >= 2;
-                epoch.take(measured, scored.then_some(residual), frames, self.rate);
+                if early {
+                    epoch.score_level(residual, frames, self.rate);
+                }
+                let off_line = measured - line;
+                epoch.take(measured, scored.then_some(off_line), frames, self.rate);
                 Observation::Tracked
             }
             Verdict::Step => {
