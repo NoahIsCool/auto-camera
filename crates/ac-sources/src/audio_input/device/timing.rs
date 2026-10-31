@@ -202,16 +202,20 @@ pub const REWIND_BLOCKS: u64 = 3;
 /// that can still come back as a glitch; see the module docs.
 pub const GLITCH_WINDOW: Duration = Duration::from_millis(500);
 
+/// Nominal-audio span retained from calm callbacks for the phase reference;
+/// an excursion freezes that history until classification finishes.
+pub const PHASE_WINDOW: Duration = Duration::from_secs(2);
+
 /// Something wrong with a device's stream that it keeps delivering
 /// through; see the module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Discontinuity {
-    /// Block `seq` was captured `by` later than the audio before it ended,
-    /// and the stream stayed there: that much audio is missing.
+    /// Block `seq` stayed ahead of the recent phase reference: audio is
+    /// missing. Its estimated size includes jitter and drift of that reference.
     Gap {
         /// The block after the gap.
         seq: u64,
-        /// How late it was.
+        /// Estimated gap relative to the reference, not an exact frame count.
         by: Duration,
     },
     /// Block `seq` was captured `by` before the audio before it ended, and

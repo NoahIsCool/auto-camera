@@ -73,7 +73,8 @@
 //!
 //! This module runs the phases; the run's flags ([`HeadlessOptions`]) are
 //! in `flags`, and the summary's types in [`summary`] and its building
-//! from the run's snapshots in `report`.
+//! from the run's snapshots in `report` (the sidecar's part in `sidecar`,
+//! the audio inputs' and their drift correction in `audio_inputs`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -92,6 +93,7 @@ use ac_engine::{
 };
 use ac_output::AwakeMode;
 
+mod audio_inputs;
 mod flags;
 mod report;
 mod sidecar;

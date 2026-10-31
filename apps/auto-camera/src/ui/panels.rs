@@ -21,9 +21,9 @@ use super::close_guard::{self, CloseGuard};
 use super::keys;
 use super::query_form::{self, QueryForm};
 use super::text::{
-    Tone, destinations, dropped_line, encoder_lines, match_lines, output_state, percent,
-    query_hover, query_line, shot_name, source_hover, source_line, source_tone, stream_status,
-    timing_line,
+    Tone, destinations, drift_line, drift_notice, dropped_line, encoder_lines, match_lines,
+    output_state, percent, query_hover, query_line, shot_name, source_hover, source_line,
+    source_tone, stream_status, timing_line,
 };
 
 /// Amber, for warnings such as a prompt with no matches.
@@ -312,6 +312,17 @@ pub fn output(
             "audio pacing: {} pushed · {} silence · {} dropped",
             a.pushed, a.silence, a.dropped
         ));
+    }
+    if let Some((line, tone)) = drift_line(snap) {
+        let text = RichText::new(line);
+        ui.label(match tone {
+            Tone::Plain => text,
+            Tone::Warning => text.color(AMBER),
+            Tone::Weak => text.weak(),
+        });
+    }
+    if let Some(notice) = drift_notice(snap) {
+        ui.label(RichText::new(notice).weak());
     }
     if let Some(reading) = &out.loudness {
         super::meter::show(ui, reading);

@@ -16,11 +16,11 @@ use crate::output::{AUDIO_MAX_LEAD, AUDIO_SLACK};
 
 /// Blocks waiting to be drained, shared with the test.
 #[derive(Clone, Default)]
-struct Queue(Arc<Mutex<Vec<AudioBlock>>>);
+pub(super) struct Queue(Arc<Mutex<Vec<AudioBlock>>>);
 
 impl Queue {
     /// Queues `blocks`.
-    fn push(&self, blocks: impl IntoIterator<Item = AudioBlock>) {
+    pub(super) fn push(&self, blocks: impl IntoIterator<Item = AudioBlock>) {
         self.0.lock().unwrap().extend(blocks);
     }
 
@@ -122,15 +122,15 @@ impl VideoSource for Camera {
 }
 
 /// Handles on a [`Scripted`] input: its queue and its stop flag.
-struct Handles {
+pub(super) struct Handles {
     /// Its queue.
-    queue: Queue,
+    pub(super) queue: Queue,
     /// Raised when it is stopped.
     stopped: Arc<AtomicBool>,
 }
 
 /// A slot for a scripted input `id` with `format`, giving `pick`.
-fn scripted(
+pub(super) fn scripted(
     id: &str,
     format: Option<(u32, u16)>,
     pick: Option<ChannelPick>,
@@ -152,7 +152,7 @@ fn scripted(
 }
 
 /// A camera `id` whose audio is `audio`, and its queue.
-fn camera(id: &str, audio: Option<(u32, u16)>) -> (Box<dyn VideoSource>, Queue) {
+pub(super) fn camera(id: &str, audio: Option<(u32, u16)>) -> (Box<dyn VideoSource>, Queue) {
     let queue = Queue::default();
     let info = SourceInfo {
         id: SourceId(id.into()),
@@ -317,7 +317,7 @@ fn a_video_sources_audio_is_taken_as_it_is() {
     );
     let format = audio.format(&sources).unwrap();
     let mut pacer = AudioPacer::new(format.sample_rate, 2, 30, AUDIO_SLACK, AUDIO_MAX_LEAD);
-    pacer.plan(1, out);
+    pacer.plan(1, out, Duration::ZERO);
     assert_eq!(
         (pacer.stats().pushed, pacer.stats().mismatched_blocks),
         (480, 1)
@@ -382,7 +382,7 @@ fn pace(plan: FakeAudio, seconds: u64) -> (Vec<i64>, crate::audio::AudioPacerSta
         board
             .queue
             .push(feed.until(Duration::from_secs_f64(tick as f64 / 30.0)));
-        let items = pacer.plan(tick, audio.take(&[]));
+        let items = pacer.plan(tick, audio.take(&[]), Duration::ZERO);
         assert!(items.iter().all(|i| match i {
             PacedAudio::Block(b) => b.channels == 2,
             PacedAudio::Silence(_) => true,

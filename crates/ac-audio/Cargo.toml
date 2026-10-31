@@ -1,6 +1,6 @@
 [package]
 name = "ac-audio"
-description = "Program loudness and peak metering after ITU-R BS.1770-4 and EBU R 128"
+description = "Program loudness and peak metering after ITU-R BS.1770-4 and EBU R 128, and drift-correcting resampling of audio inputs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

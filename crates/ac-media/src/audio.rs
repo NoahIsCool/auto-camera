@@ -35,9 +35,13 @@
 //! and the engine takes whatever is there once per tick
 //! ([`AudioInput::drain`], a swap under a lock held for no I/O). A reader
 //! that falls behind therefore loses the stale audio and keeps the newest,
-//! and a forgotten ring costs a fixed amount of memory. Drift and stalls are
-//! the program pacer's to absorb (`ac-engine`'s `AudioPacer`: silence for a
-//! gap, cutting a late backlog or a lead).
+//! and a forgotten ring costs a fixed amount of memory. Drift is measured
+//! from the PTS and resampled away before the program pacer (`ac-engine`'s
+//! program audio, with `ac-audio`'s `DriftCorrector`), which is why a
+//! device's PTS must be capture times on the engine's clock and not its
+//! sample count; stalls, and drift beyond what that corrects, are the
+//! pacer's to absorb (`AudioPacer`: silence for a gap, cutting a late
+//! backlog or a lead).
 //!
 //! A device's audio callback runs on a real-time thread, which must not
 //! wait on a lock another thread may hold; an adapter hands its buffers to

@@ -213,6 +213,9 @@ fn program_audio_dropped_for_its_format_raises_for_a_stream_too() {
         dropped: 0,
         unusable: 0,
         unheard: true,
+        correction_ppm: 0.0,
+        drift_resets: 0,
+        drift_steps: 0,
     }];
     show.audio_mismatched = true;
     let raised = show.at(1.1);

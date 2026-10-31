@@ -488,16 +488,54 @@ The picked channels are copied as they are; nothing is mixed. Without
 both sides at full level. A pick beyond `channel_count` fails the load; an
 input that opens without the picked channels, or with another count than
 `channel_count`, stays offline with the reason and is retried, like a
-source. The window and the headless summary do not show audio inputs yet,
-but the log does: it says when an input goes offline, comes back or stops,
+source. The log says when an input goes offline, comes back or stops,
 with the reason (`audio input board: running -> offline (...)`), and
-writes a reason that every retry repeats only once.
-The engine does not resample: program audio reaches the encoder at
-the input's own rate (48 kHz while the input has not connected), and the
-encoder converts it to 48 kHz AAC. The engine never waits on an input: a
-stall is filled with silence and the late audio after it cut, and a sample
-clock that drifts from the engine's is kept in step the same way, so the
-program stays in sync.
+writes a reason that every retry repeats only once. Program audio reaches
+the encoder at the input's own rate (48 kHz while the input has not
+connected), and the encoder converts it to 48 kHz AAC. The engine never
+waits on an input: a stall is filled with silence and the late audio after
+it cut, so the program stays in sync.
+
+An input on its own sample clock (a board's USB interface, typically tens
+of ppm off the engine's clock; 100 ppm is a second over three hours) is
+corrected for drift: the engine measures the drift from the blocks'
+timestamps against their sample counts and resamples the input by that
+much, before the pacing above, with a band-limited (windowed-sinc)
+resampler whose ratio changes smoothly, up to 1000 ppm. In simulation a
+board 100 ppm off stays within 20 ms of the video for three hours with no
+silence inserted and nothing cut. A step in the timestamps is never taken
+for drift: up to 100 ms (audio a full ring dropped, a short loss) it is
+made up once the next few blocks confirm it, with that much silence (or,
+for timestamps that step back, that much cut), from a connection's third
+block on as later, and the drift measurement carries on; beyond 100 ms (a
+reconnection, a long loss) it is a break: the pacing above fills the gap
+and the measurement starts again. A loss close to 100 ms can run the
+pacing out of slack before the blocks after it confirm the step; it then
+fills the gap itself and cuts exactly the silence it filled from the late
+audio (splitting a block where the cut ends), so the gap is made up once.
+A timestamp that strays and comes back within three blocks (a glitch in
+the device's clock) is not a step: no block is edited for it. One that
+stays off for four blocks or more (spanning at least 6 ms, should its
+blocks be shorter than 2 ms) is taken for a step and made up, then taken
+back once four blocks confirm the way back: two short edits of its size
+(silence and a cut), audio off by that much for about as long as the stray
+lasted, and no lasting offset. Audio the pacing drops at its 100 ms limit
+while that silence is in is given back as silence once it is out, if that
+is within a second of the drop, while the pacing owes no silence of its
+own, and with audio then no more than 50 ms ahead (where it was before the
+step); otherwise it stays dropped, and the program plays that much early.
+What is not corrected: blocks within a dead band of 2 ppm pass through bit
+for bit, as a file input on the engine's clock always does; a source's
+embedded audio is never resampled, and drift of the video itself (a camera
+against the engine) is not corrected; drift beyond 1000 ppm is left to the
+fills and cuts. The window's output panel shows the program input's
+correction (below zero for a board whose clock runs fast), its resets and
+the steps made up, with the trouble a running input delivered through
+(a device's discontinuities) on a weak line under it. While the input is
+not running, it shows its state and why instead, in amber; while it is not
+heard for its rate, it shows only why. A headless summary reports them for
+every input (`audio_inputs`: `id`, `name`, `program`, `correction_ppm`,
+`drift_resets`, `drift_steps`).
 
 On the Mac the board is an input of `kind = "device"`: its USB audio
 interface is a CoreAudio device, and so is anything else with a CoreAudio
@@ -850,7 +888,7 @@ the program is silent. A headless run reports the session's values in
 |---|---|
 | `ac-core` | Domain model (sources, queries, subjects, presets, shots), the prompt parser and its lexicon (shot and role words), and normalized geometry |
 | `ac-media` | Frames, audio blocks, the source and audio input traits, latest-frame mailboxes and audio rings, and the stereo channel pick |
-| `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak |
+| `ac-audio` | Program loudness and peak meter (BS.1770-4, EBU R 128): K-weighting, momentary, short-term and gated integrated loudness, sample and true peak; drift correction of audio inputs (drift estimator, band-limited resampler) |
 | `ac-sources` | File (ffmpeg), synthetic and capture (avfoundation, by unique ID) sources, file segments, audio-only file inputs (WAV, RF64), CoreAudio device inputs by UID (feature `coreaudio`) and a fake input that drifts and stalls, a frame-by-frame clip reader for offline tools; injectable clocks |
 | `ac-vision` | Detector and tracker traits, template tracker, OWLv2 ONNX detector, replay of recorded detections |
 | `ac-sidecar` | Out-of-process detector host (SAM 3.1 on MLX): protocol v1 over a child's pipes, deadlines, restarts, one process shared by every source |
