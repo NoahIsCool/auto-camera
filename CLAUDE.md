@@ -1,5 +1,7 @@
 # Auto Camera development rules
 
+Work in progress and next steps while the usual agent is paused: HANDOFF.md.
+
 Product: AI camera crew for live streams. Text prompts select subjects on each
 video source; every matched subject gets smoothly framed virtual shots; an
 operator (optionally helped by an auto-director) switches shots in a
