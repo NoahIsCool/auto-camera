@@ -1,9 +1,10 @@
 //! The `[[audio_inputs]]` table: program audio with no picture, such as a
 //! soundboard's feed (spec M12, "one stereo input").
 //!
-//! An entry is an [`AudioInputConfig`] (`kind = "file"` for now, its keys
-//! flattened into the entry) plus an id, an optional operator-facing name
-//! and which of the input's channels are program audio:
+//! An entry is an [`AudioInputConfig`] (`kind = "file"`, or `"device"`
+//! for a CoreAudio device such as the board's USB interface, by `uid`; its
+//! keys flattened into the entry) plus an id, an optional operator-facing
+//! name and which of the input's channels are program audio:
 //!
 //! ```toml
 //! [[audio_inputs]]
@@ -16,6 +17,18 @@
 //!
 //! [output]
 //! audio_source = "board"
+//! ```
+//!
+//! On the Mac the board itself is a device, named by the UID that
+//! `auto-camera --list-audio-devices` prints (a build with the `coreaudio`
+//! feature opens it; the readiness check says so of any other build):
+//!
+//! ```toml
+//! [[audio_inputs]]
+//! id = "board"
+//! kind = "device"
+//! uid = "AppleUSBAudioEngine:Allen&Heath:SQ:1A2B3C:1"
+//! channels = [1, 2]
 //! ```
 //!
 //! # Channels
@@ -75,7 +88,7 @@ pub struct AudioInputEntry {
     /// another count is refused.
     #[serde(default)]
     pub channel_count: Option<u16>,
-    /// How to open it (`kind = "file"`).
+    /// How to open it (`kind = "file"` or `"device"`).
     #[serde(flatten)]
     pub input: AudioInputConfig,
 }
@@ -164,6 +177,9 @@ pub(super) fn problems(config: &StudioConfig, source_ids: &HashSet<&str>) -> Vec
                 "{at}: a source has the same id, so output.audio_source could mean either"
             ));
         }
+        if let Some(problem) = a.input.problem() {
+            out.push(format!("{at}: {problem}"));
+        }
         let pick = match a.pick() {
             Ok(pick) => pick,
             Err(e) => {
@@ -202,6 +218,9 @@ pub(super) fn problems(config: &StudioConfig, source_ids: &HashSet<&str>) -> Vec
     }
     out
 }
+
+#[cfg(test)]
+mod device_tests;
 
 #[cfg(test)]
 mod tests;

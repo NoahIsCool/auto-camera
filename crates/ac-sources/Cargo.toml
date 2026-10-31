@@ -13,6 +13,14 @@ serde.workspace = true
 serde_json = "1.0"
 tracing.workspace = true
 
+# CoreAudio input devices (feature `coreaudio`): cpal's CoreAudio host
+# lists each device with its UID (kAudioDevicePropertyDeviceUID) and stamps
+# every input buffer with its host capture time. It is a macOS dependency
+# only, so off macOS the feature pulls nothing in (no ALSA). cpal 0.18.2
+# needs Rust 1.85.
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = { version = "0.18.2", optional = true }
+
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 
@@ -20,6 +28,12 @@ libc = "0.2"
 # Runs tests/capture_hw.rs against a real camera (macOS, ffmpeg with
 # avfoundation); each test skips with a note when no camera is connected.
 capture-hw = []
+# Audio inputs from CoreAudio devices by UID (`kind = "device"`), on macOS;
+# elsewhere, or without it, opening one is an error saying how to build.
+coreaudio = ["dep:cpal"]
+# Runs tests/coreaudio_hw.rs against a real CoreAudio input device; each
+# test skips with a note when there is none.
+coreaudio-hw = ["coreaudio"]
 
 [lints]
 workspace = true

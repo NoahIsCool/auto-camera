@@ -15,7 +15,9 @@
 //!   the engine's own tables and of each source, the first of each table
 //!   another crate checks);
 //! * **sources**: each file source's video, and each audio input's file,
-//!   is a readable file;
+//!   is a readable file; an audio input that is a device needs a build
+//!   that opens CoreAudio devices (macOS, `--features coreaudio`), and is
+//!   not looked for, since it can be plugged in later (`devices`);
 //! * **ffmpeg**: `output.ffmpeg -version` runs, with file sources (or
 //!   audio inputs) so do the ffmpeg and ffprobe they decode with
 //!   (`AC_FFMPEG`, `AC_FFPROBE`), and with capture sources the ffmpeg that
@@ -68,6 +70,7 @@ use ac_sources::{FfmpegTools, SourceConfig};
 use crate::config::{DetectorSettings, SidecarSettings, StudioConfig};
 
 mod decoders;
+mod devices;
 mod system;
 
 use decoders::DecoderUsers;
@@ -229,6 +232,8 @@ fn check_build(config: &StudioConfig, inspector: &dyn Inspect, onnx: bool) -> Re
             c.file(&format!("audio input {:?}", a.id), path);
         }
     }
+    let supported = ac_sources::audio_input::device::SUPPORTED;
+    c.out.findings.extend(devices::findings(config, supported));
     c.tools(config, users);
     match &config.detector {
         DetectorSettings::Owl {

@@ -34,6 +34,8 @@ audio = true
 # it, channels 1 and 2. `channel_count`, optional, is what the input has:
 # a pick beyond it fails the load, and an input with another count stays
 # offline with the reason. Then set `audio_source = "board"` in [output].
+# On the Mac the board itself is `kind = "device"` with its `uid` instead
+# of a path (config/capture.example.toml shows one).
 # [[audio_inputs]]
 # id = "board"
 # name = "Soundboard"

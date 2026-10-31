@@ -11,6 +11,8 @@ repository.workspace = true
 default = []
 # Enables the OWLv2 ONNX detector (see crates/ac-vision/README.md).
 onnx = ["ac-vision/onnx"]
+# Audio inputs from CoreAudio devices by UID (macOS; see ac-sources).
+coreaudio = ["ac-sources/coreaudio"]
 
 [dependencies]
 ac-core.workspace = true

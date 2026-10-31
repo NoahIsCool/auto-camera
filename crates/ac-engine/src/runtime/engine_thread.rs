@@ -233,7 +233,7 @@ impl Runtime {
         };
         let mut snapshot = self.core.snapshot(self.output.view(), timing, running);
         snapshot.sidecar = self.sidecar.as_ref().map(|s| s.status());
-        snapshot.audio_inputs = self.audio.views();
+        snapshot.audio_inputs = self.audio.views(snapshot.output.audio_format);
         let snapshot = Arc::new(snapshot);
         self.snapshots.publish(snapshot.clone());
         snapshot

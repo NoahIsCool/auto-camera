@@ -30,9 +30,11 @@
 //!   drops out on a schedule, for testing that ([`fault`]).
 //! * [`AudioFileInput`] plays an audio-only WAV/RF64 file as a live feed,
 //!   the rehearsal stand-in for a soundboard's, behind
-//!   [`ac_media::AudioInput`]; [`FakeAudioInput`] drifts, stalls and gets
-//!   unplugged on a plan, and [`SupervisedAudio`] reopens either as a
-//!   supervised source is reopened ([`audio_input`]).
+//!   [`ac_media::AudioInput`]; [`DeviceInput`] reads the board's USB audio
+//!   interface, or any CoreAudio device, by UID (macOS, feature
+//!   `coreaudio`); [`FakeAudioInput`] drifts, stalls and gets unplugged on
+//!   a plan, and [`SupervisedAudio`] reopens any of them as a supervised
+//!   source is reopened ([`audio_input`]).
 //!
 //! # Timing
 //!
@@ -72,6 +74,7 @@ pub mod supervisor;
 pub mod synthetic;
 
 pub use audio::BLOCK_MILLIS;
+pub use audio_input::{AudioDevice, DeviceBackend, DeviceInput, DeviceOptions, SystemDevices};
 pub use audio_input::{
     AudioFileInput, AudioFileOptions, AudioInputConfig, AudioOpener, FakeAudio, FakeAudioInput,
     FakeFeed, FeedState, Gap, SupervisedAudio, WavEncoding, fake_sample, open_audio_input,
