@@ -23,7 +23,9 @@
 //! `<stem>.lock`, held (as an advisory lock of the operating system) for
 //! as long as they are open; another process asking for the same stem is
 //! refused, and picks another (see the parent module). The system drops
-//! the lock when the process ends, crash or not.
+//! the lock when its last descriptor closes. Normal shutdown explicitly
+//! unlocks after closing the buffered writer: a descriptor inherited while
+//! starting a subprocess must not extend a finished session's ownership.
 //!
 //! # Invariants
 //!
@@ -63,8 +65,25 @@ pub struct RotatingFile {
     header: Vec<String>,
     /// Bytes of the kept header, newlines included.
     header_len: u64,
-    /// `<stem>.lock`, locked while the files are open.
-    _lock: File,
+    /// `<stem>.lock`, when locking is supported. Kept after `file` so its
+    /// explicit unlock happens after the writer's flush and close.
+    _lock: Option<LogLock>,
+}
+
+/// An acquired lock released even if another descriptor still refers to
+/// it, as can briefly happen while another thread starts a subprocess.
+#[derive(Debug)]
+struct LogLock {
+    /// The descriptor that acquired the lock.
+    file: File,
+}
+
+impl Drop for LogLock {
+    /// Ends this session's ownership; descriptor close remains the
+    /// fallback if the operating system refuses the explicit unlock.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 impl RotatingFile {
@@ -83,8 +102,8 @@ impl RotatingFile {
             .truncate(false)
             .write(true)
             .open(dir.join(format!("{stem}.lock")))?;
-        match lock.try_lock() {
-            Ok(()) => {}
+        let lock = match lock.try_lock() {
+            Ok(()) => Some(LogLock { file: lock }),
             Err(TryLockError::WouldBlock) => {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
@@ -92,8 +111,8 @@ impl RotatingFile {
                 ));
             }
             // A file system without locks: better unlocked than no log.
-            Err(TryLockError::Error(_)) => {}
-        }
+            Err(TryLockError::Error(_)) => None,
+        };
         let path = dir.join(format!("{stem}.log"));
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let len = file.metadata()?.len();
@@ -260,6 +279,33 @@ mod tests {
         log.flush().unwrap();
         assert_eq!(lines(&log.path()), ["third one"]);
         assert_eq!(lines(&log.numbered(1)), ["first session", "second"]);
+    }
+
+    /// An inherited descriptor must not keep a finished session's lock:
+    /// a clone shares the same Unix lock just as a forked child does.
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_session_unlocks_even_while_a_descriptor_is_inherited() {
+        let dir = TempDir::new("inherited-lock");
+        let mut first = RotatingFile::open(dir.path(), "x", 100, 1).unwrap();
+        first.write_line("first session").unwrap();
+        let inherited = first._lock.as_ref().unwrap().file.try_clone().unwrap();
+        drop(first);
+
+        let mut next = RotatingFile::open(dir.path(), "x", 100, 1)
+            .expect("the finished session released its lock before the child closed it");
+        assert_eq!(lines(&next.path()), ["first session"]);
+        next.write_line("second session").unwrap();
+        next.flush().unwrap();
+        assert_eq!(lines(&next.path()), ["first session", "second session"]);
+        drop(inherited);
+        assert_eq!(
+            RotatingFile::open(dir.path(), "x", 100, 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock,
+            "closing the old descriptor does not release the new owner's lock"
+        );
     }
 
     #[test]
