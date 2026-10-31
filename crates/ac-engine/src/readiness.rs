@@ -17,7 +17,7 @@
 //! * **sources**: each file source's video, and each audio input's file,
 //!   is a readable file; an audio input that is a device needs a build
 //!   that opens CoreAudio devices (macOS, `--features coreaudio`), and is
-//!   not looked for, since it can be plugged in later ([`devices`]);
+//!   not looked for, since it can be plugged in later (`devices`);
 //! * **ffmpeg**: `output.ffmpeg -version` runs, with file sources (or
 //!   audio inputs) so do the ffmpeg and ffprobe they decode with
 //!   (`AC_FFMPEG`, `AC_FFPROBE`), and with capture sources the ffmpeg that
