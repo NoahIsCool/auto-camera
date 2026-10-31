@@ -15,10 +15,10 @@
 //! * The registry lock is held only to move `Child` handles in and out, for
 //!   non-blocking `try_wait` and for the kill signals [`Children::close`]
 //!   sends; spawning, reaping and blocking waits happen outside it.
-//! * A child leaves the registry dead or dying: [`Children::kill`] reaps it,
-//!   and [`Children::close`] signals every child before any leaves. So a
-//!   worker that calls `kill` before it drops the child's stdout never closes
-//!   the pipe of a live decoder, even when `close` took the child first. A
+//! * Claimed children remain tracked until their reaper finishes. A racing
+//!   `kill`, `finish` or `close` waits for that completion, releasing the
+//!   registry mutex while waiting. Thus a worker never closes the pipe of
+//!   a live decoder, even when another caller took its child first. A
 //!   decoder that finds its pipe closed says "Broken pipe" on stderr, which
 //!   the log would show as an error of the file's.
 //! * Every child's stderr goes to the app's log, through a drain thread
@@ -26,7 +26,7 @@
 
 use std::io::{self, Read};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::logs::StderrTail;
@@ -59,6 +59,8 @@ pub(crate) struct Spawned {
 pub(crate) struct Children {
     /// Registered children and whether new ones are still allowed.
     inner: Mutex<Registry>,
+    /// Wakes callers waiting for another thread to finish reaping.
+    reaped: Condvar,
 }
 
 /// Contents of [`Children`].
@@ -70,6 +72,8 @@ struct Registry {
     next_key: u64,
     /// Live children by key.
     live: Vec<(u64, Child)>,
+    /// Children claimed by another thread whose blocking wait has not ended.
+    reaping: Vec<u64>,
 }
 
 impl Children {
@@ -119,7 +123,8 @@ impl Children {
 
     /// Waits for child `key` to exit on its own (it has closed its stdout),
     /// killing it after a grace period, and returns its exit status. `None`
-    /// when the child was already taken by [`Children::close`] or killed.
+    /// when the child was already taken by [`Children::close`] or killed;
+    /// its reaper is waited for before returning.
     pub(crate) fn finish(&self, key: u64) -> Option<ExitStatus> {
         self.finish_within(key, EXIT_GRACE)
     }
@@ -131,7 +136,11 @@ impl Children {
         loop {
             {
                 let mut reg = lock(&self.inner);
-                let i = reg.live.iter().position(|(k, _)| *k == key)?;
+                let Some(i) = reg.live.iter().position(|(k, _)| *k == key) else {
+                    drop(reg);
+                    self.wait_reaped(Some(key));
+                    return None;
+                };
                 if let Ok(Some(status)) = reg.live[i].1.try_wait() {
                     reg.live.swap_remove(i);
                     return Some(status);
@@ -145,22 +154,42 @@ impl Children {
         }
     }
 
-    /// Kills and reaps child `key`, if it is still registered.
+    /// Kills and reaps child `key`, or waits for a competing caller that
+    /// already claimed it. Its stdout can be closed after this returns.
     pub(crate) fn kill(&self, key: u64) {
+        self.kill_with(key, reap);
+    }
+
+    /// Claims one child and passes it to `reap_child`, which must kill and
+    /// wait for it. The callback also lets tests hold the ownership handoff.
+    fn kill_with(&self, key: u64, reap_child: impl FnOnce(Child)) {
         let child = {
             let mut reg = lock(&self.inner);
             let i = reg.live.iter().position(|(k, _)| *k == key);
-            i.map(|i| reg.live.swap_remove(i).1)
+            i.map(|i| {
+                reg.reaping.push(key);
+                reg.live.swap_remove(i).1
+            })
         };
         if let Some(child) = child {
-            reap(child);
+            reap_child(child);
+            self.mark_reaped(key);
+        } else {
+            self.wait_reaped(Some(key));
         }
     }
 
     /// Refuses further spawns, then kills and reaps every registered child.
+    /// Also waits for any children already claimed by competing callers.
     /// Every child is signalled before the lock is released (see the module
     /// docs). Idempotent.
     pub(crate) fn close(&self) {
+        self.close_with(reap);
+    }
+
+    /// Closes registration and passes every claimed child to `reap_child`,
+    /// which must kill and wait for it; tests can pause at that handoff.
+    fn close_with(&self, mut reap_child: impl FnMut(Child)) {
         let live = {
             let mut reg = lock(&self.inner);
             reg.closed = true;
@@ -168,10 +197,30 @@ impl Children {
                 // Sending a signal does not block; the waits come below.
                 let _ = child.kill();
             }
-            std::mem::take(&mut reg.live)
+            let live = std::mem::take(&mut reg.live);
+            reg.reaping.extend(live.iter().map(|(key, _)| *key));
+            live
         };
-        for (_, child) in live {
-            reap(child);
+        for (key, child) in live {
+            reap_child(child);
+            self.mark_reaped(key);
+        }
+        self.wait_reaped(None);
+    }
+
+    /// Records completed reaping and wakes callers holding the child's
+    /// pipe or waiting for the whole source to stop.
+    fn mark_reaped(&self, key: u64) {
+        lock(&self.inner).reaping.retain(|other| *other != key);
+        self.reaped.notify_all();
+    }
+
+    /// Waits for `key`'s in-flight reaper, or for all reapers with `None`.
+    /// The condition variable releases the registry mutex while waiting.
+    fn wait_reaped(&self, key: Option<u64>) {
+        let mut reg = lock(&self.inner);
+        while key.map_or(!reg.reaping.is_empty(), |key| reg.reaping.contains(&key)) {
+            reg = self.reaped.wait(reg).unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -264,6 +313,10 @@ pub(crate) fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Concurrent ownership transfers must finish before stdout closes.
+    #[cfg(unix)]
+    mod reaping;
 
     /// A reader that returns at most `step` bytes per call.
     struct Trickle {
