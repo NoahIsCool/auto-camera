@@ -186,7 +186,7 @@ impl Show {
             let mut output = OutputView::default();
             if let Some((pacer, format)) = &mut self.session {
                 self.frames += 1;
-                pacer.plan(self.frames, blocks);
+                pacer.plan(self.frames, blocks, Duration::ZERO);
                 output = OutputView {
                     state: OutputState::Running,
                     rtmp_url: Some("rtmp://example.com/app/<redacted>".into()),

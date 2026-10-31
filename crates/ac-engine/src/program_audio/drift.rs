@@ -41,15 +41,19 @@
 //! loss and made up, and taken back once the fourth block back confirms the
 //! way back: two short edits the size of the stray (silence and a cut, for
 //! PTS stamped late), a sync error that size for about as long as it
-//! lasted, and no lasting offset ([`ac_audio::drift`] has the rule): should
+//! lasted, and no lasting offset ([`ac_audio::drift`] has the rule). Should
 //! its silence lift the pacer's lead over its limit, the audio dropped for
-//! that is given back once the silence is out again ([`crate::audio`]). A
-//! loss close to the slack can run the pacer out of slack too; then the
-//! pacer's silence comes first, and the corrector's comes after it as late
-//! audio, from which the pacer cuts exactly the silence it owes, splitting
-//! a block ([`crate::audio`]), so the gap is made up once either way and
-//! the audio ends where it was. A stall whose audio arrives late keeps its
-//! PTS and is not a step.
+//! that is given back as silence once the stray's silence is out again, if
+//! that is within a second of the drop ([`crate::audio::RECOVERY_WINDOW`]),
+//! while the pacer owes no silence of its own, and with the lead then
+//! within half the limit (where it was before the step); otherwise it stays
+//! dropped, and the audio plays that much early ([`crate::audio`]). A loss
+//! close to the slack can run the pacer out of slack too; then the pacer's
+//! silence comes first, and the corrector's comes after it as late audio,
+//! from which the pacer cuts exactly the silence it owes, splitting a block
+//! ([`crate::audio`]), so the gap is made up once either way and the audio
+//! ends where it was. A stall whose audio arrives late keeps its PTS and is
+//! not a step.
 //!
 //! A change of format (a reconnection at another rate) starts a new
 //! corrector, counted as a reset too. The few frames the old one held back

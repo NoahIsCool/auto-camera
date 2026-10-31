@@ -16,19 +16,22 @@
 //! Video is always the newest picture (latest-frame mailboxes), so it never
 //! runs late. Audio is a stream: every sample frame pushed moves the audio
 //! timeline on by one, whatever it holds. Write the *lead* as
-//! `L = pushed − target` (silence counts as pushed) and the *backlog* `B`
-//! for audio the source produced but has not delivered yet. Relative to the
-//! start of the session, audio then plays late by
+//! `L = pushed − target` (silence counts as pushed), the *backlog* `B`
+//! for audio the source produced but has not delivered yet, and `D` for
+//! what a source on time produced from the tick's due time to the moment
+//! its audio was taken (zero on a tick on time; see a late tick, below).
+//! Relative to the start of the session, audio then plays late by
 //!
 //! ```text
-//! lag = silence inserted − source audio dropped = L + B
+//! lag = silence inserted − source audio dropped = L + B − D
 //! ```
 //!
 //! because silence pushes everything after it later and dropping source
-//! audio pulls it earlier. Once a burst has been delivered (`B = 0`) the lag
-//! *is* the lead. A pacer that only bounds the lead from above, keeping the
-//! oldest audio of a burst, leaves the program late by up to that bound for
-//! the rest of the show. This pacer drives the lag back to zero instead:
+//! audio pulls it earlier. Once a burst has been delivered (`B = 0`), on a
+//! tick on time, the lag *is* the lead. A pacer that only bounds the lead
+//! from above, keeping the oldest audio of a burst, leaves the program late
+//! by up to that bound for the rest of the show. This pacer drives the lag
+//! back to zero instead:
 //!
 //! * **Gaps.** When the audio at hand (pushed plus drained this tick) is more
 //!   than `slack` short of the target (the source stalled or stopped),
@@ -79,6 +82,20 @@
 //!   kept and no burst can leave audio more than `max_lead` late. Whole
 //!   blocks keep the drops rare for a source that runs fast: one block now
 //!   and then, not a few frames on every tick.
+//! * **A late tick.** The engine runs each tick at its due time on the
+//!   clock or as soon after it as it can, and runs the ticks it fell
+//!   behind by back to back (up to its lag limit, beyond which it skips
+//!   them; [`crate::schedule::TickSchedule`]). The caller says how far
+//!   behind its due time a tick's audio was taken (`behind`; the pacer
+//!   reads no clock), and a source on time has made that much more than
+//!   the tick's share meanwhile: `D` above, a lead that is the engine's,
+//!   not the audio's, and that the ticks it catches up with take back, as
+//!   they find hardly any audio. So the burst limit is raised by `D` for
+//!   that tick: a stall of the engine drops none of the audio that came on
+//!   time (and has nothing to give back), and a burst on a late tick is
+//!   left within `max_lead` once the engine has caught up, as on a tick on
+//!   time. Gaps, recovery and the credit's room (below) are measured
+//!   without `D`.
 //! * **Credit.** Not everything that lifts the lead past `max_lead` is
 //!   late audio. A drift corrector makes up a step in a device's PTS with
 //!   silence, and takes that silence out again a few blocks later when
@@ -94,14 +111,16 @@
 //!   was before the step. A real burst's audio keeps the lead near the
 //!   limit, so its credit is never given back and is forgotten after the
 //!   window; the half of the limit left free keeps the silence given back
-//!   from tripping the limit again. The silence may come in one block
-//!   with the audio after it, which the limit then drops whole, silence
-//!   and all; taking the silence out again can then leave the pacer more
-//!   than the slack short, and the silence that fills that gap gives the
-//!   credit back first, only the rest of it owed by late audio (so a real
-//!   stall within the window after a burst leaves the burst's audio as
-//!   late as the burst left it, within `max_lead`). A lead already beyond
-//!   half the limit before such a step keeps the loss.
+//!   from tripping the limit again. A stall of the engine is no burst: it
+//!   drops nothing (above), so it leaves no credit, and costs no skip and
+//!   no gap. The silence may come in one block with the audio after it,
+//!   which the limit then drops whole, silence and all; taking the silence
+//!   out again can then leave the pacer more than the slack short, and the
+//!   silence that fills that gap gives the credit back first, only the rest
+//!   of it owed by late audio (so a real stall within the window after a
+//!   burst leaves the burst's audio as late as the burst left it, within
+//!   `max_lead`). A lead already beyond half the limit before such a step
+//!   keeps the loss.
 //! * Blocks in another format than the encoder was opened with are dropped.
 //!
 //! The slack keeps ordinary block jitter from inserting silence and
@@ -149,7 +168,8 @@ pub struct AudioPacerStats {
     /// Blocks dropped because their format did not match.
     pub mismatched_blocks: u64,
     /// Audio pushed minus the video's share after the latest tick, in
-    /// milliseconds: positive while audio runs ahead.
+    /// milliseconds: positive while audio runs ahead (and, on a tick the
+    /// engine ran late, by its lateness too).
     pub lead_ms: i64,
 }
 
@@ -192,7 +212,7 @@ pub struct AudioPacer {
 impl AudioPacer {
     /// A pacer for `rate` Hz, `channels`-channel audio under `fps` video.
     pub fn new(rate: u32, channels: u16, fps: u32, slack: Duration, max_lead: Duration) -> Self {
-        let frames = |d: Duration| (d.as_secs_f64() * f64::from(rate)).round() as u64;
+        let frames = |d: Duration| frames_in(rate, d);
         Self {
             rate,
             channels,
@@ -223,8 +243,15 @@ impl AudioPacer {
     }
 
     /// Plans what to push after `video_frames` frames of video (skipped ticks
-    /// included), given the source blocks drained this tick (oldest first).
-    pub fn plan(&mut self, video_frames: u64, blocks: Vec<AudioBlock>) -> Vec<PacedAudio> {
+    /// included), given the source blocks drained this tick (oldest first),
+    /// which were taken `behind` after the tick was due on the engine's
+    /// clock (zero for a tick on time; see the module docs).
+    pub fn plan(
+        &mut self,
+        video_frames: u64,
+        blocks: Vec<AudioBlock>,
+        behind: Duration,
+    ) -> Vec<PacedAudio> {
         let target = self.target(video_frames);
         if target > self.owed_until {
             (self.owed, self.repaying) = (0, 0);
@@ -299,8 +326,14 @@ impl AudioPacer {
             }
             // Oldest first: the whole blocks a burst beyond the lead limit
             // drops, and how many sample frames remain after dropping them.
+            // The limit is raised by what a source on time delivered while
+            // the engine ran late, which the ticks it catches up with take
+            // back.
+            let limit = target
+                .saturating_add(self.max_lead)
+                .saturating_add(frames_in(self.rate, behind));
             let mut cut = 0;
-            while cut < kept.len() && have + incoming > target.saturating_add(self.max_lead) {
+            while cut < kept.len() && have + incoming > limit {
                 let n = kept[cut].frames() as u64;
                 (incoming, cut) = (incoming - n, cut + 1);
                 self.stats.dropped += n;
@@ -317,6 +350,11 @@ impl AudioPacer {
         self.stats.lead_ms = i64::try_from(lead * 1000 / i128::from(self.rate.max(1))).unwrap_or(0);
         out
     }
+}
+
+/// Sample frames in `d` at `rate` Hz, to the nearest frame (saturating).
+fn frames_in(rate: u32, d: Duration) -> u64 {
+    (d.as_secs_f64() * f64::from(rate)).round() as u64
 }
 
 /// Cuts `n` sample frames (at most what `blocks` hold) from the start of

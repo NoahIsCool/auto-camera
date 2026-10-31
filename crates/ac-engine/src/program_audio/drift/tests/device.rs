@@ -432,7 +432,7 @@ fn play_from(mut device: Device, seconds: u64, output_at: u64) -> Run {
             continue;
         }
         let ticks = tick - output_at;
-        for item in pacer.plan(ticks, taken) {
+        for item in pacer.plan(ticks, taken, Duration::ZERO) {
             match item {
                 PacedAudio::Silence(n) => position += n,
                 PacedAudio::Block(block) => {
