@@ -10,22 +10,16 @@
 //! * Offsets are net offsets from the excursion's old timeline, in
 //!   nanoseconds, positive ahead; a [`Rewound`] keeps its own from the
 //!   timeline before the rewind, so the two add up.
-//! * `back` describes only the newest run of blocks back by more than
-//!   [`MIN_TOLERANCE`]: it starts again whenever a block is not back. It
-//!   counts readings of the host time, so a buffer cut into blocks counts
+//! * `back` describes only the newest run beyond the frozen jitter range
+//!   (at least [`super::MIN_TOLERANCE`]); it restarts when a block is not back.
+//!   It counts readings of the host time, so a buffer cut into blocks counts
 //!   once ([`Captured::cut`](super::Captured::cut)).
 //! * Nothing here moves the map or reads a clock: the stamper does, from
 //!   what these report.
 
-use super::{Discontinuity, MIN_TOLERANCE, REWIND_BLOCKS, duration, nanos};
+use super::{Discontinuity, Noise, REWIND_BLOCKS, duration};
 
-/// How far, in nanoseconds, the blocks of a run back may be from its level
-/// and still be at it: a quarter of [`MIN_TOLERANCE`], far above a
-/// device's own jitter (tens of microseconds) and what drift does over a
-/// few blocks; see the module docs.
-const LEVEL: i128 = MIN_TOLERANCE.as_nanos() as i128 / 4;
-
-/// A run of blocks back by more than [`MIN_TOLERANCE`], in a row.
+/// Consecutive blocks back beyond the excursion's frozen jitter range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BackRun {
     /// Readings of the host time in it (blocks not cut from a longer
@@ -34,8 +28,8 @@ struct BackRun {
     /// Net offset of the first block of its newest stretch at one level,
     /// in nanoseconds.
     level: i128,
-    /// Readings in a row, the newest included, within [`LEVEL`] of
-    /// `level`.
+    /// Readings in a row, including the newest, within the learned
+    /// tolerance of `level`.
     steady: u64,
 }
 
@@ -50,15 +44,16 @@ pub(super) struct Excursion {
     /// The newest block's net offset from the old timeline, in
     /// nanoseconds: positive ahead.
     pub(super) offset: i128,
+    /// Calm-stream jitter thresholds, frozen when this excursion opens.
+    pub(super) noise: Noise,
     /// The largest net offset so far, either way, in nanoseconds.
     pub(super) widest: i128,
     /// The tolerance it is reported by, in nanoseconds: half the block
-    /// before the jump, at least [`MIN_TOLERANCE`].
+    /// before the jump, at least [`super::MIN_TOLERANCE`].
     pub(super) tolerance: i128,
     /// The block after the newest one that was beyond the tolerance.
     pub(super) beyond: u64,
-    /// The run of blocks back by more than [`MIN_TOLERANCE`] that the
-    /// newest one is in, if it is back.
+    /// The newest block's run back beyond the frozen jitter range, if any.
     back: Option<BackRun>,
     /// Sample frames from the start of the block that jumped to the start
     /// of the next block expected, dropped ones included.
@@ -80,6 +75,7 @@ impl Excursion {
             origin,
             seq,
             offset: off,
+            noise: Noise::default(),
             widest: off.abs(),
             tolerance,
             beyond: if off.abs() > tolerance { seq + 1 } else { seq },
@@ -108,7 +104,7 @@ impl Excursion {
     /// unless it was cut from a longer buffer: the widest offset, the
     /// tolerance, and the run of blocks back and its level.
     pub(super) fn widen(&mut self, seq: u64, reading: bool) {
-        let jump = nanos(MIN_TOLERANCE);
+        let jump = self.noise.jump;
         self.widest = self.widest.max(self.offset.abs());
         if self.offset.abs() > self.tolerance {
             self.beyond = seq + 1;
@@ -121,7 +117,7 @@ impl Excursion {
             });
             let read = u64::from(reading);
             run.readings += read;
-            if (self.offset - run.level).abs() > LEVEL {
+            if (self.offset - run.level).abs() > self.noise.level {
                 (run.level, run.steady) = (self.offset, read);
             } else {
                 run.steady += read;
@@ -199,6 +195,8 @@ pub(super) struct Rewound {
     beyond: u64,
     /// Sample frames from its first block to the jump ahead.
     frames: u64,
+    /// The rewind's original jitter thresholds.
+    noise: Noise,
 }
 
 impl Rewound {
@@ -213,6 +211,7 @@ impl Rewound {
             tolerance: back.tolerance,
             beyond: back.beyond,
             frames: back.frames,
+            noise: back.noise,
         }
     }
 
@@ -226,6 +225,7 @@ impl Rewound {
             widest: self.widest,
             beyond: self.beyond,
             frames: self.frames.saturating_add(frames),
+            noise: self.noise,
             ..Excursion::new(self.origin, self.seq, offset, self.tolerance)
         };
         back.back = None;

@@ -14,6 +14,7 @@
 use super::*;
 use crate::audio_input::device::timing::{GLITCH_WINDOW, REWIND_BLOCKS};
 
+mod stable;
 mod told_apart;
 
 /// A captured block of `frames` stereo frames at `host`, nothing lost

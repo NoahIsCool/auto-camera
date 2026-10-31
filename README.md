@@ -554,13 +554,18 @@ input's error (`audio discontinuity (3 so far; the device reported 2 overloads):
 and written to the log, at most a line every 10 s. Overloads are counted
 and logged apart from what the input measures, since one that lost audio
 also shows as the gap it left, and the line saying how much it lost must
-not wait behind the overload's. A jump in the timestamps of more than a
-millisecond is reported half a second after it, once it has lasted;
-timestamps that are off for a few blocks and then back, in one step or
+not wait behind the overload's. A timestamp jump outside the recent
+jitter range (at least a millisecond) is reported half a second after it,
+once it has lasted; timestamps that are off for a few blocks and then
+back, in one step or
 several, are one timestamp glitch, with no audio missing and the input's
 timeline as it was, and timestamps that only scatter by more than a
-millisecond move nothing for good. A device that sends nothing for 2 s
-is reopened. Device inputs need macOS and a build with
+millisecond move nothing for good. A recent median timeline prevents
+short noise bursts or late ramps from moving the map, while a lasting
+rewind remains a rewind under the noise already present. The first
+callback stays provisional even when it is split into smaller blocks.
+A device that sends nothing for 2 s is reopened. Device inputs need
+macOS and a build with
 `--features coreaudio`, which is opt-in like `onnx`; any other build
 loads the config, `--check` reports the input as a problem saying how to
 build, and the input stays offline with that message. macOS asks once

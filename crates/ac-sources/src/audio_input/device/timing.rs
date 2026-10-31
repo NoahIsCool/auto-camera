@@ -38,8 +38,8 @@
 //! drift (parts per million of a block: microseconds). So each block is
 //! expected at the end of the one before, plus whatever the hand-off
 //! dropped between them ([`mod@super::handoff`]). A block captured more
-//! than [`MIN_TOLERANCE`] from where it was expected, either way, *jumped*
-//! (a millisecond is well above the jitter of CoreAudio's timestamps):
+//! than [`MIN_TOLERANCE`] from where it was expected, either way, is
+//! compared with the recent phase reference and its learned jitter range:
 //! ahead, audio the device lost (an overload, a restarted stream) or a
 //! host time that is wrong; back, the device's timestamps went back. A jump
 //! is reported by a tolerance of its own, half the block before it (at
@@ -64,35 +64,29 @@
 //! within a short window: a jump opens an *excursion*, which lasts at most
 //! [`GLITCH_WINDOW`] of the stream's audio, from the block that jumped.
 //!
-//! * Every block of the excursion is measured against the old timeline,
-//!   the block before the jump carried on at the nominal rate: its *net
-//!   offset* is where its host time is, less where that timeline has it
-//!   (the sum of the blocks' own jumps and jitter since, so a jump back
-//!   cancels a jump ahead, and the other way round).
+//! * New excursions use a two-second median of host time minus elapsed
+//!   nominal audio as their reference, rather than the previous block's
+//!   jitter. Dropped frames advance that elapsed audio too. The reference
+//!   and its noise thresholds freeze during an excursion; its subsequent
+//!   offsets still sum raw adjacent differences, preserving clock drift.
+//!   A closed glitch rejoins the history so its jitter tails are not
+//!   systematically excluded. A lasting change starts a new reference.
 //! * The map follows the net offset, not each jump. Ahead, the map is the
 //!   old one and the PTS run ahead with the host times: the gap is kept.
 //!   Back, the map is the old one moved forward by the offset, so the
 //!   block lands where the old timeline has it and PTS never go back.
-//! * A block back within [`MIN_TOLERANCE`] of the old timeline closes the
+//! * A block within the frozen jitter range of the old timeline closes the
 //!   excursion as a **glitch**: the old map is put back, so the PTS are on
 //!   the old timeline again (held at the newest PTS until it catches up,
 //!   as PTS never go back), and, when it went beyond its tolerance, one
 //!   glitch is reported: no audio missing.
-//! * Only a *steady* excursion back is a rewind that lasted. A real step
-//!   back leaves the blocks after it at one level, give or take the
-//!   timestamps' jitter (tens of microseconds) and drift (as little over a
-//!   few blocks). Jitter beyond the jump threshold scatters them instead: a
-//!   block a millisecond off its neighbour sets the old timeline that far
-//!   off, and the blocks after it read as back (or ahead) by their own
-//!   jitter less its. Moving the map for such an excursion would move it
-//!   by jitter, and only ever forward (an excursion ahead keeps the map),
-//!   so the PTS would creep ahead of the audio, and drift correction would
-//!   take that for a slow clock. So the newest blocks back must have
-//!   stayed within a quarter of [`MIN_TOLERANCE`] of one level for
-//!   [`REWIND_BLOCKS`] readings of the host time in a row. The blocks a
-//!   long buffer is cut into share its one reading
-//!   ([`Captured::cut`](super::handoff::Captured::cut)), so they count
-//!   once.
+//! * Only a *steady* excursion back is a rewind that lasted. Its newest
+//!   [`REWIND_BLOCKS`] independent readings must agree within the jitter
+//!   observed before the excursion (at least a quarter millisecond).
+//!   The jump threshold grows with that prior jitter too. Noise newly
+//!   appearing during a burst cannot teach the burst to look like a
+//!   lasting rewind, while a true step under existing noise is retained.
+//!   Blocks cut from one callback share a reading and count once.
 //! * A glitch's way back lands on the old timeline; audio lost after the
 //!   timestamps went back for good does not, unless it happens to be as
 //!   long as the rewind. So an excursion that has been back, steady, and
@@ -102,7 +96,7 @@
 //!   would cancel is not missing from the PTS (and so from what program
 //!   audio makes up). It is not reported yet: a glitch back that returns
 //!   in steps, or a glitch ahead during a rewind, jumps ahead the same
-//!   way. A block of the new excursion back within [`MIN_TOLERANCE`] of
+//!   way. A block of the new excursion within the frozen jitter range of
 //!   the timeline from before the excursion back says it was such a glitch
 //!   (the whole is closed as one glitch from the first block back, and the
 //!   map from before it put back); one back on the level of the excursion
@@ -154,6 +148,12 @@
 //! loss on its way back are a first block off and the loss less the
 //! glitch.
 //!
+//! At startup, a first timestamp error and a loss that nearly cancels it
+//! can return inside the one-millisecond band. The same observations fit
+//! a smaller first timestamp error and a temporary timestamp glitch. The
+//! conservative interpretation remains a glitch: no gap is inferred from
+//! that ambiguous return, and the hidden loss is not promised recovered.
+//!
 //! **An overflow** (the hand-off dropped blocks) is reported at once,
 //! since the hand-off counted it: the blocks' sequence numbers are skipped
 //! and their time is a gap in PTS.
@@ -183,13 +183,14 @@ use ac_media::AudioBlock;
 
 use super::handoff::{Captured, frames_duration};
 
+mod anchor;
 mod excursion;
 
+use anchor::{Anchor, Noise};
 use excursion::{Excursion, Rewound};
 
-/// Distance from the expected capture time beyond which a block jumped,
-/// either way, however long the blocks: well above the jitter of
-/// CoreAudio's timestamps. Also the least tolerance a jump is reported by.
+/// Minimum raw timestamp change that needs classification, and the floor
+/// for learned jitter thresholds and discontinuity reporting tolerances.
 pub const MIN_TOLERANCE: Duration = Duration::from_millis(1);
 
 /// Blocks in a row an excursion must have been back for a jump ahead that
@@ -339,6 +340,8 @@ pub struct Stamper {
     excursion: Option<Excursion>,
     /// PTS of the previous block.
     last_pts: Duration,
+    /// Stable phase reference and independent callback jitter.
+    anchor: Anchor,
 }
 
 /// `d` in nanoseconds.
@@ -366,6 +369,7 @@ impl Stamper {
             expected: None,
             excursion: None,
             last_pts: Duration::ZERO,
+            anchor: Anchor::default(),
         }
     }
 
@@ -384,6 +388,7 @@ impl Stamper {
     pub fn stamp(&mut self, captured: &Captured) -> (AudioBlock, Vec<Discontinuity>) {
         let mut found = Vec::new();
         let rate = self.sample_rate;
+        self.anchor.elapsed += nanos(frames_duration(captured.lost_frames, rate));
         self.next_seq = self.next_seq.saturating_add(captured.lost_blocks);
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
@@ -412,13 +417,23 @@ impl Stamper {
             Some(expected) => {
                 let due = nanos(expected.host) + nanos(frames_duration(captured.lost_frames, rate));
                 let (off, tolerance) = (host - due, nanos(expected.tolerance));
-                if std::mem::take(&mut self.second) && off.abs() > nanos(MIN_TOLERANCE) {
+                let second = self.second && !captured.cut;
+                if second {
+                    self.second = false;
+                }
+                if second && off.abs() > nanos(MIN_TOLERANCE) {
                     // Stamped where the first block's timeline has it.
                     self.excursion = Some(Excursion::first(self.origin, seq, off, tolerance));
                     self.origin += off;
                 } else {
                     let reading = !captured.cut;
-                    self.follow(seq, (off, tolerance), reading, &mut found);
+                    let reference = if self.excursion.is_none() && off.abs() > nanos(MIN_TOLERANCE)
+                    {
+                        self.anchor.measure(host, off)
+                    } else {
+                        (off, self.excursion.map_or_else(Noise::default, |e| e.noise))
+                    };
+                    self.follow(seq, (off, tolerance), reference, reading, &mut found);
                 }
             }
         }
@@ -430,6 +445,10 @@ impl Stamper {
         if let Some(e) = &mut self.excursion {
             e.frames = e.frames.saturating_add(frames);
         }
+        if !captured.cut {
+            self.anchor.observe(host, self.excursion.is_some());
+        }
+        self.anchor.elapsed += nanos(length);
         self.expected = Some(Expected {
             host: captured.host_time.saturating_add(length),
             tolerance: (length / 2).max(MIN_TOLERANCE),
@@ -452,13 +471,18 @@ impl Stamper {
     fn settle(&mut self, e: Excursion, found: &mut Vec<Discontinuity>) {
         found.extend(e.rewound.map(|r| r.lasted()));
         if e.first {
+            self.anchor
+                .confirm(frames_duration(e.frames, self.sample_rate));
             return;
         }
         if e.offset < 0 && !e.steady() {
             found.extend(e.closed(e.beyond));
             self.origin = e.origin;
+            self.anchor.discard();
         } else {
             found.extend(e.lasting());
+            self.anchor
+                .confirm(frames_duration(e.frames, self.sample_rate));
         }
     }
 
@@ -477,24 +501,30 @@ impl Stamper {
         &mut self,
         seq: u64,
         (off, tolerance): (i128, i128),
+        (anchored, noise): (i128, Noise),
         reading: bool,
         found: &mut Vec<Discontinuity>,
     ) {
-        let jump = nanos(MIN_TOLERANCE);
         let Some(mut e) = self.excursion.take() else {
-            self.open(seq, off, tolerance);
+            if off.abs() > nanos(MIN_TOLERANCE) {
+                self.open(seq, anchored, tolerance, noise);
+            }
             return;
         };
+        let jump = e.noise.jump;
         let before = e.offset;
         e.offset += off;
         if e.first {
             if e.offset.abs() <= jump {
                 found.extend(e.closed(seq));
                 self.origin = e.origin;
+                self.anchor.close(e.widest, e.noise);
             } else if off.abs() > jump {
                 // The first block was off: the map stays, and this jump is
                 // a new one from there.
-                self.open(seq, off, tolerance);
+                self.anchor
+                    .confirm(frames_duration(e.frames, self.sample_rate));
+                self.open(seq, off, tolerance, noise);
             } else {
                 e.widen(seq, reading);
                 self.origin = e.origin + e.offset;
@@ -508,17 +538,18 @@ impl Stamper {
                 // Back where it was before the excursion back: one glitch.
                 found.extend(r.closed(seq));
                 self.origin = r.origin;
+                self.anchor.discard();
                 return;
             }
             r.widest = r.widest.max(old.abs());
         }
         let steady_back = before < -jump && e.steady();
-        if steady_back && off > jump && e.offset.abs() > jump {
+        if steady_back && off > jump.max(e.noise.level) && e.offset.abs() > jump {
             // It may have lasted back: the map stays moved forward by it,
             // and this block's jump ahead is a new one from there.
             found.extend(e.rewound.map(|r| r.lasted()));
             let rewound = Rewound::of(&e, -before, e.offset);
-            self.open(seq, off, tolerance);
+            self.open(seq, off, tolerance, e.noise);
             if let Some(next) = &mut self.excursion {
                 next.rewound = Some(rewound);
             }
@@ -534,6 +565,7 @@ impl Stamper {
             } else {
                 found.extend(e.closed(seq));
                 self.origin = e.origin;
+                self.anchor.close(e.widest, e.noise);
             }
             return;
         }
@@ -545,9 +577,11 @@ impl Stamper {
     /// Opens an excursion when block `seq`, captured `off` nanoseconds from
     /// where it was expected, jumped: back, the map moves forward so that
     /// the block lands where it was expected.
-    fn open(&mut self, seq: u64, off: i128, tolerance: i128) {
-        if off.abs() > nanos(MIN_TOLERANCE) {
-            self.excursion = Some(Excursion::new(self.origin, seq, off, tolerance));
+    fn open(&mut self, seq: u64, off: i128, tolerance: i128, noise: Noise) {
+        if off.abs() > noise.jump {
+            let mut excursion = Excursion::new(self.origin, seq, off, tolerance);
+            excursion.noise = noise;
+            self.excursion = Some(excursion);
             self.origin += off.min(0);
         }
     }
