@@ -120,6 +120,7 @@ dependencies = [
  "ac-core",
  "ac-media",
  "cpal",
+ "libc",
  "serde",
  "serde_json",
  "tracing",

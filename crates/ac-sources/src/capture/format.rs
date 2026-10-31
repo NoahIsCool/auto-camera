@@ -40,6 +40,26 @@
 //!   filter chain ends in an explicit `scale` and `format=rgba`, and `-r`
 //!   makes the rate constant, so PTS is `seq / fps` and every read of
 //!   `width * height * 4` bytes is one frame.
+//! * ffmpeg passes every frame on as soon as it has it: its encoder takes
+//!   no frame threads (`-thread_type slice`, an output option). ffmpeg's
+//!   rawvideo encoder is frame-threaded by default, and a frame-threaded
+//!   encoder hands a frame out only when a later one comes in, so it would
+//!   hold back one frame, and up to one per core while its threads wait
+//!   for a CPU: latency for a live picture, and a device that falls silent
+//!   would keep its last frames (all of them after a short burst) from the
+//!   source. Slice threads finish a frame inside the call that encodes it;
+//!   rawvideo has none, so it copies each frame out as it comes in. This
+//!   costs speed where ffmpeg encodes on the thread that also drives the
+//!   filter (before ffmpeg 7), since frame threads took the copy off that
+//!   thread: 4K60 from uyvy422 ran at 75 fps with them and 61 without
+//!   (ffmpeg 6.1 on a 4-core 2.1 GHz Xeon, to a null sink). From ffmpeg 7
+//!   on, every encoder has a thread of its own.
+//! * The thread count is left to ffmpeg, so the filter chain keeps its
+//!   threads. A `-threads` given for an output is also the thread count of
+//!   that output's filter chain (unless `-filter_threads` is given), and
+//!   the conversion to RGBA needs more than one core at 4K: with
+//!   `-threads 1`, 4K60 from uyvy422 or nv12 ran at 31-33 fps on the same
+//!   machine.
 //! * Capture devices tag no colour matrix, so the untagged rule applies:
 //!   BT.709 at HD and above, BT.601 below.
 //! * A pixel format is always asked for: the configured one, else
@@ -226,7 +246,8 @@ pub(crate) fn avfoundation_input(device: &ResolvedDevice, format: &CaptureFormat
 
 /// The whole ffmpeg command line of a capture connection: `input` (the
 /// options that open the device, ending in its `-i`), then raw RGBA frames
-/// of the requested size at the requested rate on stdout.
+/// of the requested size at the requested rate on stdout, each as soon as
+/// ffmpeg has it (no frame threads in the encoder; see the module docs).
 pub(crate) fn capture_args(input: Vec<OsString>, format: &CaptureFormat) -> Vec<OsString> {
     let size = format.size();
     let mut args: Vec<OsString> = COMMON.iter().map(OsString::from).collect();
@@ -245,6 +266,8 @@ pub(crate) fn capture_args(input: Vec<OsString>, format: &CaptureFormat) -> Vec<
         "rgba".into(),
         "-r".into(),
         format.rate.to_string(),
+        "-thread_type".into(),
+        "slice".into(),
         "-f".into(),
         "rawvideo".into(),
         "pipe:1".into(),
@@ -367,6 +390,14 @@ mod tests {
             "scale=w=1920:h=1080:in_color_matrix=bt709,format=rgba"
         );
         assert_eq!(after(&args, "-r"), "60000/1001");
+        // No frame threads in the encoder, asked of the output, not the
+        // input; and no output thread count, which ffmpeg would give the
+        // filter chain too.
+        let input = args.iter().position(|a| a == "-i").unwrap();
+        let threads = args.iter().position(|a| a == "-thread_type").unwrap();
+        assert!(threads > input);
+        assert_eq!(args[threads + 1], "slice");
+        assert!(!args[input..].iter().any(|a| a == "-threads"));
         assert_eq!(after(&args, "-f"), "avfoundation", "the input's format");
         assert_eq!(args[args.len() - 3..], ["-f", "rawvideo", "pipe:1"]);
         let sd = CaptureFormat::new(640, 480, 30.0, None).unwrap();
