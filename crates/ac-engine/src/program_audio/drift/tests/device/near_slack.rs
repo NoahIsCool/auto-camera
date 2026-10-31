@@ -36,8 +36,9 @@
 //! started as the device input opened (the board's first frame 3 ms later)
 //! or a second after:
 //!
-//! * one gap reported, of the time lost; one step made up and no break;
-//!   the pacer's silence, where it filled, cut exactly;
+//! * one gap reported, within jitter of the loss plus the frozen reference's
+//!   signed drift; one step made up and no break; the pacer's silence,
+//!   where it filled, cut exactly;
 //! * the *lasting offset*, the run's mean offset over the last second less
 //!   the twin's, within [`LASTING_MS`];
 //! * *sync*: every block within the spec's [`SYNC_MS`] of where the twin
@@ -50,7 +51,7 @@
 //! The pacer fills a gap in some of these runs, so its cut is exercised.
 
 use ac_audio::drift::CONFIRM_BLOCKS;
-use ac_sources::audio_input::device::timing::GLITCH_WINDOW;
+use ac_sources::audio_input::device::timing::{GLITCH_WINDOW, PHASE_WINDOW};
 
 use super::super::SYNC_MS;
 use super::*;
@@ -100,18 +101,41 @@ fn settled(run: &Run) -> f64 {
     sum / f64::from(n.max(1))
 }
 
+/// Expected diagnostic gap for this fixture's mature, uniform history.
+/// The true loss is measured in host time. The frozen median is older than
+/// the loss, so its signed phase drift also enters the eventual report.
+/// This analytic clock model uses no reported PTS or measured correction.
+fn expected_gap(frames: u64, ms: f64, ppm: f64) -> f64 {
+    let nominal_ns = frames * 1_000_000_000 / u64::from(RATE);
+    let period = frames as f64 / f64::from(RATE);
+    assert!(LOSS_AT > PHASE_WINDOW.as_secs_f64() + period);
+    // These fixtures retain 188 or 94 callbacks, below the history cap.
+    assert!(matches!(frames, 512 | 1024));
+    let phase_step = period / (1.0 + ppm * 1e-6) - nominal_ns as f64 * 1e-9;
+    // Calm samples are equally spaced and fill the whole reference span
+    // before LOSS_AT. The upper median's age depends on the slope's sign.
+    let count = PHASE_WINDOW.as_nanos() / u128::from(nominal_ns) + 1;
+    let age = if phase_step < 0.0 {
+        1 + count / 2
+    } else {
+        count - count / 2
+    };
+    // Classification happens before the next block once elapsed audio
+    // exceeds the window; this is the last observation included in it.
+    let last = GLITCH_WINDOW.as_nanos() * u128::from(RATE) / (u128::from(frames) * 1_000_000_000);
+    let lost = frames_in(ms) as f64 / (f64::from(RATE) * (1.0 + ppm * 1e-6));
+    lost + (age + last) as f64 * phase_step
+}
+
 /// What is wrong with `run`, which lost `ms` of audio, `ppm` fast, against
 /// `base`, its twin's settled offset; empty when nothing is.
-fn faults(run: &Run, ms: f64, ppm: f64, base: f64) -> Vec<String> {
+fn faults(run: &Run, frames: u64, ms: f64, ppm: f64, base: f64) -> Vec<String> {
     let mut wrong = Vec::new();
-    // The host time lost, give or take the jitter either side of it and
-    // the drift over the excursion the gap is reported at the end of
-    // (measured against the old timeline at the nominal rate: 50 us over
-    // its window at 100 ppm), a block or two included.
-    let lost = frames_in(ms) as f64 / (f64::from(RATE) * (1.0 + ppm * 1e-6));
-    let drift = (GLITCH_WINDOW.as_secs_f64() + 0.1) * ppm.abs() * 1e-6;
+    let reported = expected_gap(frames, ms, ppm);
+    // Bounded jitter moves any median by at most JITTER. The endpoint
+    // contributes another JITTER; two ns cover host-duration rounding.
     match gaps(run) {
-        Some(by) if run.found.len() == 1 && (by - lost).abs() <= 2.0 * JITTER + drift => {}
+        Some(by) if run.found.len() == 1 && (by - reported).abs() <= 2.0 * JITTER + 2e-9 => {}
         _ => wrong.push(format!("reported {:?}", run.found)),
     }
     let (view, pacer) = (&run.view, &run.pacer);
@@ -163,7 +187,7 @@ fn lose_close_to_the_slack(output_at: u64) -> (Vec<String>, u32) {
                     let at = LOSS_AT + f64::from(cycle) * buffer;
                     let run = play_from(board(frames, ppm, Some((at, ms))), PLAY, output_at);
                     filled += u32::from(run.pacer.silence > 0);
-                    for fault in faults(&run, ms, ppm, base) {
+                    for fault in faults(&run, frames, ms, ppm, base) {
                         wrong.push(format!(
                             "{frames} frames, {ppm} ppm, {ms} ms lost at {at:.4} s: {fault}"
                         ));

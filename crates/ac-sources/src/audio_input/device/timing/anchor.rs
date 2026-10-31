@@ -8,13 +8,11 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use super::{MIN_TOLERANCE, nanos};
+use super::{MIN_TOLERANCE, PHASE_WINDOW, nanos};
 
 #[cfg(test)]
 mod tests;
 
-/// Reference history in nanoseconds of audio.
-const WINDOW: i128 = 2_000_000_000;
 /// Bounds memory even for tiny callback buffers.
 const CAPACITY: usize = 1024;
 
@@ -101,7 +99,11 @@ impl Anchor {
             &mut self.calm
         };
         into.push_back(reading);
-        while into.len() > CAPACITY || into.front().is_some_and(|r| reading.at - r.at > WINDOW) {
+        while into.len() > CAPACITY
+            || into
+                .front()
+                .is_some_and(|r| reading.at - r.at > nanos(PHASE_WINDOW))
+        {
             into.pop_front();
         }
     }
