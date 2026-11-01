@@ -546,9 +546,8 @@ impl Clock for Hitching {
 /// tick's audio with 150 ms more of the board's than the tick's share,
 /// over the pacer's 100 ms lead limit: none of it is dropped, as it is the
 /// engine that is late, not the audio, and so no silence goes in to give
-/// it back. The video source runs at 25 fps, so that the phase lock
-/// (which takes the frames a late tick skips at the tick rate for a
-/// collision, and delays the schedule) stays out of the measurement.
+/// it back. The 25 fps video source keeps this audio-pacing measurement
+/// independent of the 30 Hz engine's phase lock.
 #[test]
 fn an_engine_that_hitches_drops_none_of_the_boards_audio() {
     if !have("ffmpeg") {

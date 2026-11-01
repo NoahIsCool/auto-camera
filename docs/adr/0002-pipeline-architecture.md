@@ -83,8 +83,10 @@ than half a period after it was due and skips ticks rather than bursting
 when the loop falls more than `max_lag` (1 s) behind. A `PhaseLock` keeps
 ticks midway between the frames of a source running at the tick rate:
 when that source (the program audio source, else the first) skips a frame
-at a tick, the schedule is delayed by half a period (at most once a
-second). Without it a 30 fps source and a 30 Hz tick on the same clock
+between consecutive, timely reads, the schedule is delayed by half a period
+(at most once a second). A missed tick, a missing reference frame, or a read
+more than half a period late breaks the comparison. Without the phase lock,
+a 30 fps source and a 30 Hz tick on the same clock
 collide, and scheduler jitter makes the engine repeat and skip about a
 third of the frames. The ticks can sit midway between one source's frames
 only; every other source is aligned by its `PresentationBuffer` instead

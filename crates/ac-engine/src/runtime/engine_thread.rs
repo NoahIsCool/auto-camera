@@ -104,8 +104,7 @@ impl Runtime {
             if self.apply_commands() {
                 break;
             }
-            let reference = self.tick(media_time, due, skipped);
-            if let Some(by) = phase.observe(reference) {
+            if let Some(by) = self.tick(media_time, due, skipped, &mut phase) {
                 schedule.delay(by);
             }
             self.timer.record(started.elapsed());
@@ -164,42 +163,54 @@ impl Runtime {
     /// One tick, due at clock reading `due`: feed the core, dispatch
     /// discovery, push the program (owing the encoder a repeat for each of
     /// the `skipped` ticks before, and telling the pacer how far behind
-    /// `due` the audio was taken). Returns the sequence number and PTS of
-    /// the frame the tick read from the phase reference (the program audio
-    /// source, else the first source), for the [`PhaseLock`].
+    /// `due` the audio was taken). Returns the schedule delay requested
+    /// by the phase lock for this tick's reference frame, if any.
     fn tick(
         &mut self,
         media_time: Duration,
         due: Duration,
         skipped: u64,
-    ) -> Option<(u64, Duration)> {
+        phase: &mut PhaseLock,
+    ) -> Option<Duration> {
         self.output.poll();
         self.collect_frames();
         let results: Vec<DiscoveryResult> = self.results.try_iter().collect();
+        let reference = self.audio.phase_reference();
+        let mut shift = None;
         let feeds: Vec<SourceFeed> = self
             .sources
             .iter()
             .zip(&mut self.workers)
             .zip(&mut self.presenters)
-            .map(|((s, w), p)| SourceFeed {
-                state: s.state(),
-                frame: match p {
+            .enumerate()
+            .map(|(i, ((s, w), p))| {
+                let state = s.state();
+                let frame = match p {
                     Some(buffer) => buffer.present(due).into_frame(),
                     None => s.latest(),
-                },
-                detector_loading: w.as_mut().is_some_and(DiscoveryWorker::is_loading),
-                error: s.error(),
-                // After `frame` (fields are evaluated in order), so it
-                // describes that frame's connection or a newer one.
-                info: Some(s.current_info()),
+                };
+                if i == reference {
+                    // Commands and source reads can stall after an on-time poll.
+                    // Timestamp this read before collecting the remaining feeds.
+                    let late_by = self.clock.now().saturating_sub(due);
+                    shift = phase.observe_tick(
+                        frame.as_ref().map(|f| (f.seq, f.pts)),
+                        skipped,
+                        late_by,
+                    );
+                }
+                SourceFeed {
+                    state,
+                    frame,
+                    detector_loading: w.as_mut().is_some_and(DiscoveryWorker::is_loading),
+                    error: s.error(),
+                    // Describes this frame's connection or a newer one.
+                    info: Some(s.current_info()),
+                }
             })
             .collect();
         self.core
             .note_presentation(stats_by_source(&self.presenters));
-        let reference = feeds
-            .get(self.audio.phase_reference())
-            .and_then(|feed| feed.frame.as_ref())
-            .map(|frame| (frame.seq, frame.pts));
         let out = self.core.tick(media_time, &feeds, results);
         for (i, request) in out.requests {
             if let Some(Some(worker)) = self.workers.get(i) {
@@ -216,7 +227,7 @@ impl Runtime {
         let program_audio = self.audio.take(&self.sources);
         self.output
             .push(&out.program, program_audio, behind, skipped);
-        reference
+        shift
     }
 
     /// Sends the trace record of the tick just run, with the clock's word

@@ -23,9 +23,9 @@
 //! instants as a 30 Hz tick schedule (both run on one clock, so this is the
 //! common case, not bad luck), scheduler jitter decides on every tick whether
 //! the frame arrived first: the engine alternately repeats a frame and skips
-//! one, and the tracker sees a source that stutters. A skipped frame (the
-//! sequence number advanced by two or more) from a source whose frame period
-//! matches the tick period is the signature of that collision; the lock then
+//! one, and the tracker sees a source that stutters. A skipped frame between
+//! consecutive, timely reads of a same-rate source signals that collision.
+//! A late read or missed engine tick breaks the comparison. On a collision the lock
 //! delays the schedule by half a period, which puts every tick midway between
 //! two frames. Media time is unaffected (tick `n` still has media time
 //! `n · period`); only the clock readings at which ticks are due move. A
@@ -165,12 +165,12 @@ impl PhaseLock {
     }
 
     /// Observes the reference source's newest frame (`seq`, `pts`) at one
-    /// tick, or `None` when it has none. Returns how far to
+    /// timely tick. `None` breaks the comparison. Returns how far to
     /// [`TickSchedule::delay`] the schedule, if at all.
     pub fn observe(&mut self, frame: Option<(u64, Duration)>) -> Option<Duration> {
         self.cooldown = self.cooldown.saturating_sub(1);
-        let (seq, pts) = frame?;
-        let (last_seq, last_pts) = self.last.replace((seq, pts))?;
+        let previous = std::mem::replace(&mut self.last, frame);
+        let ((seq, pts), (last_seq, last_pts)) = frame.zip(previous)?;
         // A restarted source (lower sequence) or a looped file (lower PTS)
         // says nothing about the phase.
         let advanced = seq.checked_sub(last_seq)?;
@@ -186,6 +186,17 @@ impl PhaseLock {
         self.cooldown = u64::try_from(cooldown).unwrap_or(u64::MAX);
         self.shifts += 1;
         Some(self.period / 2)
+    }
+
+    /// Observes one rendered tick. A skipped tick or a reference read over
+    /// half a period late breaks the pair of samples used to detect a collision.
+    pub(crate) fn observe_tick(
+        &mut self,
+        frame: Option<(u64, Duration)>,
+        skipped: u64,
+        late_by: Duration,
+    ) -> Option<Duration> {
+        self.observe(frame.filter(|_| skipped == 0 && late_by <= self.period / 2))
     }
 }
 
@@ -312,6 +323,52 @@ mod tests {
         assert_eq!(lock.shifts(), 1);
     }
 
+    /// A same-rate source advances during a stall. Both skipped ticks and
+    /// a catch-up burst must leave future due times on the original grid.
+    #[test]
+    fn an_engine_stall_preserves_the_phase_of_later_ticks() {
+        let period = Duration::from_nanos(33_333_333);
+        let origin = period / 2; // Every tick starts midway between source frames.
+        for (max_lag, expected_skips) in [(2 * period, 3), (Duration::from_secs(1), 0)] {
+            let mut schedule = TickSchedule::new(origin, period, max_lag);
+            let mut phase = PhaseLock::new(period);
+            let mut skips = 0;
+            for seq in 0..=60 {
+                if (1..4).contains(&seq) {
+                    continue; // Engine asleep; the source keeps publishing.
+                }
+                let pts = period * seq;
+                let now = origin + pts;
+                while let TickDecision::Tick { index, skipped, .. } = schedule.poll(now) {
+                    skips += skipped;
+                    let late_by = now - schedule.due(index);
+                    if let Some(by) =
+                        phase.observe_tick(Some((u64::from(seq), pts)), skipped, late_by)
+                    {
+                        schedule.delay(by);
+                    }
+                }
+            }
+            assert_eq!(skips, expected_skips);
+            assert_eq!(schedule.due(60), origin + 60 * period);
+            assert_eq!(phase.shifts(), 0);
+        }
+    }
+
+    /// Work after an on-time poll can delay the actual frame read. The
+    /// next timely frame seeds a new pair, and a genuine skip still shifts.
+    #[test]
+    fn a_late_reference_read_breaks_the_pair_until_two_timely_samples() {
+        let mut lock = PhaseLock::new(P);
+        assert_eq!(lock.observe_tick(f(0), 0, Duration::ZERO), None);
+        assert_eq!(
+            lock.observe_tick(f(2), 0, P / 2 + Duration::from_nanos(1)),
+            None
+        );
+        assert_eq!(lock.observe_tick(f(4), 0, Duration::ZERO), None);
+        assert_eq!(lock.observe_tick(f(6), 0, P / 2), Some(P / 2));
+    }
+
     #[test]
     fn phase_lock_waits_out_its_cooldown() {
         let mut lock = PhaseLock::new(P);
@@ -348,6 +405,7 @@ mod tests {
         assert_eq!(lock.observe(None), None);
         lock.observe(f(10));
         assert_eq!(lock.observe(None), None);
+        assert_eq!(lock.observe(f(12)), None); // returned after a missing reference
         assert_eq!(lock.observe(f(2)), None); // restarted: sequence went back
         assert_eq!(lock.observe(Some((5, ms(0)))), None); // looped: PTS went back
         assert_eq!(lock.shifts(), 0);
