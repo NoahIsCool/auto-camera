@@ -1,6 +1,6 @@
 # Handoff (temporary)
 
-Updated 2026-10-30. Read `CLAUDE.md` first. The previous handoff's camera,
+Updated 2026-11-01. Read `CLAUDE.md` first. The previous handoff's camera,
 CoreAudio timestamp and drift-correction fixes are implemented. Physical-board
 validation remains open. Delete this temporary file when its information has
 been absorbed into the normal project records.
@@ -36,6 +36,9 @@ been absorbed into the normal project records.
   fit settles, including returning excursions and variable blocks crossing
   that interval. It includes the current late-tick pacing fixes and the
   completed end-to-end scenario battery.
+- The engine's phase lock now compares consecutive, timely reference reads.
+  After an engine stall, it resumes on its original tick grid. The 30 fps
+  regression covers both skipped ticks and a burst of catch-up ticks.
 
 The implementation and regression commits include `bbdf1c9` (camera release
 and shutdown ownership), `0564dfa` (Stamper), `4171104` plus `d5c7557` (drift
@@ -95,7 +98,6 @@ assertions to accommodate contention.
 
 ## Known follow-ups
 
-- PhaseLock can retain half a frame period of lag after an engine stall.
 - After a fresh source restart, pacer recovery can cut a late tick's audio,
   leaving it early by up to about 80 ms.
 - Strict rustdoc still fails on pre-existing links to private items in
