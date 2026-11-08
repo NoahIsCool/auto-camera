@@ -7,10 +7,14 @@
 //!    size, headroom, zoom limits and source bounds. An object box is sized
 //!    by how much of the frame it fills ([`compose()`], the fill rule); a
 //!    whole-person box is cut at a body line measured in head heights from
-//!    the crown ([`person`]). A crop the zoom ceiling keeps from its size
+//!    the crown ([`person`]), on an assumed head when the box runs off the
+//!    bottom of the picture. A crop the zoom ceiling keeps from its size
 //!    says so ([`Composition::limited_by_zoom`]).
 //! 2. [`ShotFramer`] remembers the person's head height for its shot
-//!    ([`HeadMemory`]), so a box truncated by a lectern keeps its scale; it
+//!    ([`HeadMemory`]), so a box truncated by a lectern keeps its scale, and,
+//!    apart from it, how many head heights a box cut by the bottom of the
+//!    picture is assumed to show, so a speaker never seen whole gets a
+//!    bounded, steady Close instead of the whole visible body; it
 //!    decides whether the camera should move at all (a dead zone with
 //!    hysteresis, so a subject that sways slightly gets a static shot), then
 //!    follows the ideal crop with critically damped [`Spring`]s on centre

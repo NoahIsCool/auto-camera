@@ -18,12 +18,21 @@
 //! * **Object basis** ([`compose`], the fill rule). For a subject box `b` and
 //!   a preset with fill `f` ([`ShotSize::fill`]): frame height `h = b.h / f`,
 //!   so the box fills `f` of the frame. Used for objects, for parts such as an
-//!   upper body, and for person boxes too truncated to measure.
+//!   upper body, and for person boxes too truncated to measure, remember or
+//!   guess: with nothing remembered, boxes cut by the top or too squat,
+//!   boxes cut by the bottom that touch a side or the top while no assumed
+//!   head count is in force, and the Full of any box cut by the bottom or
+//!   read as cut by it.
 //! * **Person basis** ([`crate::person`]). A whole-person box is cut at a body
 //!   line measured in head heights from the crown, so "Close" on a person
 //!   half the frame high asks for a head-and-shoulders shot, not a
 //!   full-length one (and is drawn at the zoom ceiling, flagged, when it
-//!   needs more zoom than the preset allows).
+//!   needs more zoom than the preset allows). A box that is not measured on
+//!   its own proportions (truncated, or read as cut by the bottom) uses the
+//!   shot's remembered head; a box cut by the bottom of the picture with
+//!   nothing remembered is cut on a bounded assumed head instead, framed
+//!   down from the crown and never below the box
+//!   ([`person::compose_assumed`]).
 //!
 //! Both then place the frame the same way:
 //!
@@ -106,11 +115,22 @@ pub struct SubjectGeometry {
     /// What the box covers.
     pub extent: Extent,
     /// The shot's remembered head height for this person, as a fraction of
-    /// the source height ([`crate::HeadMemory`]). Used only when `bbox`
-    /// looks truncated, and then never below what the box itself shows
-    /// ([`person::visible_head`]); an untruncated box is always measured on
-    /// its own proportions. Ignored for objects.
+    /// the source height ([`crate::HeadMemory`]). Used only when `bbox` is
+    /// not measured on the canon ([`person::measured_head`]: it looks
+    /// truncated, or reads as cut by the bottom), and then never below what
+    /// the box itself shows ([`person::visible_head`]); a measured box is
+    /// framed on its own proportions. Ignored for objects.
     pub remembered_head: Option<f64>,
+    /// The assumed visible head count in force for this person's shot
+    /// ([`crate::HeadMemory::assumed_heads_in_force`]): its smoothed count
+    /// while it reads the person as cut by the bottom, else `None`. When it
+    /// is a positive finite number, every box within
+    /// [`person::RELEASE_MARGIN`] of the source bottom reads as cut by the
+    /// bottom: it is not measured on the canon ([`person::measured_head`])
+    /// and, with nothing remembered, is cut on this count. Without one, only
+    /// a box with its own [`person::assumed_visible_heads`] is guessed.
+    /// Ignored for objects.
+    pub assumed_heads: Option<f64>,
 }
 
 impl SubjectGeometry {
@@ -120,6 +140,7 @@ impl SubjectGeometry {
             bbox,
             extent,
             remembered_head: None,
+            assumed_heads: None,
         }
     }
 }
@@ -234,10 +255,17 @@ pub fn compose(
 /// Computes the ideal crop for `subject` under `preset`, on the basis its
 /// extent calls for; see the module docs and [`crate::person`].
 ///
-/// A person box is measured on its own proportions when it is untruncated
-/// ([`person::looks_truncated`]); a truncated one uses the larger of the
-/// remembered head and [`person::visible_head`], and falls back to the
-/// object basis when nothing is remembered.
+/// A person box is sized by the first of:
+///
+/// 1. its own proportions, when it is measured on the canon
+///    ([`person::measured_head`]: not [`person::looks_truncated`] and,
+///    with an assumed count in force, clear of [`person::RELEASE_MARGIN`]);
+/// 2. the larger of the remembered head and [`person::visible_head`];
+/// 3. an assumed head ([`person::compose_assumed`], every size but Full),
+///    for a box cut by the bottom: the count in force for any box within
+///    [`person::RELEASE_MARGIN`] of the bottom, or, with none in force, the
+///    box's own [`person::assumed_visible_heads`];
+/// 4. the object basis.
 pub fn compose_subject(
     subject: &SubjectGeometry,
     preset: &Preset,
@@ -248,13 +276,20 @@ pub fn compose_subject(
     if subject.extent == Extent::Object || preset.size == ShotSize::Wide || !is_finite(bbox) {
         return compose(bbox, preset, source_aspect, output_aspect);
     }
+    let in_force = subject.assumed_heads.filter(|v| person::usable_heads(*v));
     let remembered = subject
         .remembered_head
         .filter(|h| h.is_finite() && *h > 0.0)
         .map(|h| person::visible_head(bbox).map_or(h, |bound| h.max(bound)));
-    let head = person::head_height(bbox, source_aspect).or(remembered);
-    match head {
-        Some(head) => person::compose_person(bbox, head, preset, source_aspect, output_aspect),
+    if let Some(head) = person::measured_head(bbox, source_aspect, in_force).or(remembered) {
+        return person::compose_person(bbox, head, preset, source_aspect, output_aspect);
+    }
+    let assumed = match in_force {
+        Some(heads) => person::in_release_band(bbox).then_some(heads),
+        None => person::assumed_visible_heads(bbox, source_aspect),
+    };
+    match assumed {
+        Some(heads) => person::compose_assumed(bbox, heads, preset, source_aspect, output_aspect),
         None => compose(bbox, preset, source_aspect, output_aspect),
     }
 }

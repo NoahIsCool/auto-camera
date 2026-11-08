@@ -21,8 +21,22 @@
 //! with the detection), however late the batch, and in any query set and
 //! order. When one of the prompts is already the subject's, nothing is
 //! created at all.
+//!
+//! A third property bounds the shot labels from outside. Under the same
+//! random calls, a model counts, for every subject and query it answers,
+//! the detection batches that observed the subject (those with an
+//! `Updated`, `Recovered` or `Created` event for it) with the label rule
+//! of `ac_subjects::labels`, taking as seen every query the batch carried
+//! a usable detection of. That over-counts sightings and under-counts
+//! misses, so every alias in `shot_queries` must have been seen this way
+//! in at least `alias_confirm_passes` observing batches with fewer than
+//! `alias_stale_passes` misses since; and `shot_queries` is always the
+//! primary query followed by a subsequence of the aliases. Each case draws
+//! both bounds from 1 to 3: under this generator a framing alias seldom
+//! has more than two model misses, so at the default stale bound of 8 that
+//! half of the check could never fail.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
 use ac_core::{Extent, Point, QueryId, Rect, SourceId, SubjectId};
@@ -33,6 +47,11 @@ use proptest::prelude::*;
 
 /// Queries the generator draws from.
 const QUERIES: [&str; 3] = ["person", "guitar", "speaker"];
+
+/// One generated track observation: subject id, grid cell, jitter,
+/// confidence, held back, and the grid cell and jitter of the match held
+/// back.
+type TrackOb = (u32, u8, u8, f32, bool, Option<(u8, u8)>);
 
 /// One call on the store.
 #[derive(Debug, Clone)]
@@ -50,8 +69,8 @@ enum Op {
     Track {
         /// Clock advance before the call.
         advance_ms: u64,
-        /// (subject id, grid cell, jitter, confidence) per observation.
-        obs: Vec<(u32, u8, u8, f32)>,
+        /// The observations.
+        obs: Vec<TrackOb>,
     },
     /// A frame tick.
     Tick {
@@ -80,7 +99,14 @@ fn cell(cell: u8, jitter: u8) -> Rect {
 /// Strategy for one operation.
 fn op() -> impl Strategy<Value = Op> {
     let det = (0..QUERIES.len(), 0u8..12, 0u8..5, 0.2f32..1.0);
-    let ob = (1u32..12, 0u8..12, 0u8..5, 0.2f32..1.0);
+    let ob = (
+        1u32..12,
+        0u8..12,
+        0u8..5,
+        0.2f32..1.0,
+        any::<bool>(),
+        prop::option::of((0u8..12, 0u8..5)),
+    );
     prop_oneof![
         4 => (0u64..800, 0u64..400, prop::collection::vec(det, 0..6))
             .prop_map(|(advance_ms, lag_ms, dets)| Op::Detect { advance_ms, lag_ms, dets }),
@@ -135,10 +161,12 @@ fn apply(store: &mut SubjectStore, model: &mut Model, op: &Op) -> Vec<StoreEvent
             model.now += advance_ms;
             let obs: Vec<TrackObservation> = obs
                 .iter()
-                .map(|&(id, c, j, confidence)| TrackObservation {
+                .map(|&(id, c, j, confidence, held, at)| TrackObservation {
                     id: SubjectId(id),
                     bbox: cell(c, j),
                     confidence,
+                    held,
+                    held_at: at.map(|(c, j)| cell(c, j)),
                 })
                 .collect();
             store.ingest_tracks(ms(model.now), &obs)
@@ -232,6 +260,16 @@ fn fresh() -> SubjectStore {
     SubjectStore::new(SourceId("cam".into()), config).expect("valid config")
 }
 
+/// [`fresh`] with the shot-label bounds `confirm` and `stale`.
+fn labelled(confirm: u8, stale: u8) -> SubjectStore {
+    let config = StoreConfig {
+        alias_confirm_passes: confirm,
+        alias_stale_passes: stale,
+        ..*fresh().config()
+    };
+    SubjectStore::new(SourceId("cam".into()), config).expect("valid config")
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
@@ -320,7 +358,13 @@ proptest! {
         // after the PTS of the next pass, which sees the entity unchanged.
         for frame in 1..=30 + lag_frames {
             let pts = Duration::from_secs_f64(f64::from(frame) / 30.0);
-            let ob = TrackObservation { id, bbox: tracked, confidence: 0.9 };
+            let ob = TrackObservation {
+                id,
+                bbox: tracked,
+                confidence: 0.9,
+                held: false,
+                held_at: None,
+            };
             store.ingest_tracks(pts, &[ob]);
         }
         let ev = store.ingest_detections(Duration::from_secs(1), &boxes_of_the_entity(&pass));
@@ -335,6 +379,116 @@ proptest! {
         if pass.iter().any(|q| seeded.contains(q)) {
             prop_assert_eq!(subject, id);
             prop_assert_eq!(created_count(&ev), 0, "{:?}", ev);
+        }
+    }
+}
+
+/// Upper-bound label evidence the third property keeps per subject and
+/// query: (sightings, misses), counted as `ac_subjects::labels` does.
+type Bounds = BTreeMap<(SubjectId, QueryId), (u8, u8)>;
+
+/// The queries `op` carried at least one detection of that the store keeps
+/// (score at least `min_score`; every generated box is valid).
+fn carried(op: &Op, min_score: f32) -> BTreeSet<QueryId> {
+    match op {
+        Op::Detect { dets, .. } => dets
+            .iter()
+            .filter(|&&(_, _, _, score)| score >= min_score)
+            .map(|&(q, ..)| QueryId(QUERIES[q].into()))
+            .collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
+/// Updates `bounds` for `op`, which turned `before` into `store` with
+/// `events`, then checks every subject's shot queries against them.
+fn check_labels(
+    store: &SubjectStore,
+    before: &SubjectStore,
+    op: &Op,
+    events: &[StoreEvent],
+    bounds: &mut Bounds,
+) -> Result<(), TestCaseError> {
+    let config = store.config();
+    let (confirm, stale) = (config.alias_confirm_passes, config.alias_stale_passes);
+    // Entries live exactly while their subject answers their query.
+    bounds.retain(|(id, q), _| store.record(*id).is_some_and(|r| r.answers(q)));
+    if matches!(op, Op::Detect { .. }) {
+        let seen = carried(op, config.min_score);
+        let observed: BTreeSet<SubjectId> = events
+            .iter()
+            .filter_map(|e| match *e {
+                StoreEvent::Updated { id }
+                | StoreEvent::Recovered { id }
+                | StoreEvent::Created { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        for rec in store.records() {
+            for q in rec.queries() {
+                let key = (rec.id(), q.clone());
+                let new = before.record(rec.id()).is_none_or(|r| !r.answers(q));
+                if new {
+                    bounds.insert(key.clone(), (0, 0));
+                }
+                if !observed.contains(&rec.id()) {
+                    continue;
+                }
+                let (sightings, missed) = bounds.entry(key).or_default();
+                if seen.contains(q) {
+                    *sightings = (*sightings + 1).min(confirm);
+                    *missed = 0;
+                } else {
+                    *missed = missed.saturating_add(1);
+                    if *missed >= stale {
+                        *sightings = 0;
+                    }
+                }
+            }
+        }
+    }
+    for rec in store.records() {
+        let shot: Vec<&QueryId> = rec.shot_queries().collect();
+        prop_assert_eq!(shot[0], &rec.subject.query, "primary first");
+        let mut aliases = rec.aliases.iter();
+        for q in &shot[1..] {
+            prop_assert!(aliases.any(|a| a == *q), "{:?} not an alias in order", q);
+            let (sightings, missed) = bounds
+                .get(&(rec.id(), (*q).clone()))
+                .copied()
+                .unwrap_or_default();
+            prop_assert!(
+                sightings >= confirm && missed < stale,
+                "{:?} frames shots for {:?} on ({}, {})",
+                q,
+                rec.id(),
+                sightings,
+                missed
+            );
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// Every alias that frames shots was seen often and recently enough,
+    /// with small label bounds so that both are reached; see the module
+    /// docs.
+    #[test]
+    fn shot_queries_follow_observing_passes(
+        ops in prop::collection::vec(op(), 1..80),
+        confirm in 1u8..=3,
+        stale in 1u8..=3,
+    ) {
+        let mut store = labelled(confirm, stale);
+        let mut model = Model::default();
+        let mut bounds = Bounds::new();
+        for op in &ops {
+            let before = store.clone();
+            let events = apply(&mut store, &mut model, op);
+            check_labels(&store, &before, op, &events, &mut bounds)?;
         }
     }
 }

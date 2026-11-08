@@ -1,6 +1,7 @@
 //! Association tests: matching, crossing, aliasing, admission and capacity.
 //! Several prompts boxing one entity in one late pass are covered in
-//! [`same_pass`].
+//! [`same_pass`], and detections restarting a coasting tracker in
+//! [`coasting`].
 
 use std::collections::HashSet;
 
@@ -9,6 +10,7 @@ use ac_core::{Extent, Rect, SubjectId, TrackState};
 use crate::testkit::*;
 use crate::{Detection, RetireReason, StoreConfig, StoreEvent, SubjectStore};
 
+mod coasting;
 mod same_pass;
 
 /// A store with room for `max` subjects.

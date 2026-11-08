@@ -27,6 +27,7 @@ mod priority;
 mod protection;
 mod settle;
 mod shared;
+mod shot_labels;
 mod switching;
 mod trace;
 mod vision;

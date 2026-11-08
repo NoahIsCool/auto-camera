@@ -19,6 +19,27 @@
 //! time-based transitions. Nothing reads a wall clock, so a recorded stream of
 //! calls replays to the same events.
 //!
+//! While a subject is tracking, a matched detection may also restart its
+//! tracker (a [`StoreEvent::NeedsTrackerStart`] while it runs). That happens
+//! when the detection disagrees with the box (the tracker drifted), when no
+//! tracker runs (a failed start), and when the tracker reported
+//! observations its contrast check held back (`held`) and no confident one
+//! since the subject's previous applied detection, unless the tracker's
+//! report on the frame the detection was computed on had the match it held
+//! back (`held_at`) overlapping the detection, but no more than the
+//! subject's box predicted at its PTS ([`crate::record`]). A coasting
+//! tracker reports no confident observation, so only detections keep its
+//! subject alive. When they are applied within `lost_after` of the previous
+//! one's PTS (pass interval plus latency), the first one after a whole
+//! window of held-back coasting restarts the tracker, unless that is the
+//! case on its frame; when they are further apart, the subject is lost
+//! first and the detection that recovers it restarts the tracker. A
+//! tracker that coasts for want of score, as when an occluder covers its
+//! subject, is not restarted for it, and neither is one whose held-back
+//! match a brighter occluder over part of the subject that looks partly
+//! like it drew onto itself: its template, taken before the
+//! occluder came, finds the subject again when it leaves.
+//!
 //! # Invariants
 //!
 //! * Ids come from a counter that only moves forward: they are unique for the
@@ -33,8 +54,23 @@
 //!   tracking, except after a start the engine reported as failed
 //!   ([`SubjectStore::tracker_failed`]): the subject then follows its
 //!   detections alone until the next matching detection retries the start.
+//! * A tracker that reported a held-back observation and no confident one
+//!   since the previous applied detection is restarted by the next applied
+//!   one, unless the tracker's report on that detection's frame had the
+//!   match held back overlapping the detection no more than the subject's
+//!   predicted box does. A subject that got no held-back observation in
+//!   that window (none at all, or only low ones the tracker did not hold
+//!   back, as when something covers the subject), or a confident one, is
+//!   not: without that evidence a detection that agrees with the box only
+//!   re-anchors it, as it always has.
 //! * Fast-track observations never create or revive a subject; only
 //!   detections and operator reacquires do.
+//! * Shot labels ([`crate::labels`]) change only in detection passes that
+//!   observe the subject and in [`SubjectStore::remove_query`]. Ticks,
+//!   losses, retention flags and reacquires leave them alone, so a lost
+//!   subject keeps every label through the gap. Protected and pinned
+//!   subjects get no exemption: their labels follow the evidence like any
+//!   other's (the engine keeps the shots an on-air subject already holds).
 //!
 //! Association of detections lives in [`crate::associate`].
 
@@ -46,7 +82,7 @@ use ac_core::{QueryId, Rect, SourceId, Subject, SubjectId, TrackState};
 use crate::config::StoreConfig;
 use crate::event::{RetireReason, StoreError, StoreEvent};
 use crate::observation::{TrackObservation, sanitize};
-use crate::record::SubjectRecord;
+use crate::record::{FrameReport, SubjectRecord, TrackerReport};
 
 /// Stable identities for the subjects of one source.
 #[derive(Debug, Clone)]
@@ -121,24 +157,51 @@ impl SubjectStore {
 
     /// Applies fast-tracker observations made on the frame at `pts`.
     ///
-    /// An observation moves its subject's box when the subject is tracking,
-    /// its tracker is running, the box is valid, the confidence reaches
-    /// `track_min_confidence` and `pts` is not older than the subject's
-    /// current box. Anything else is ignored: tracks never create or revive a
-    /// subject. Emits one [`StoreEvent::Updated`] per moved subject.
+    /// An observation is *usable* when the subject is tracking, its tracker
+    /// is running, the box is valid, the confidence is a number and `pts` is
+    /// not older than the subject's current box. A usable observation whose
+    /// confidence reaches `track_min_confidence` moves the box. One below it
+    /// leaves the box alone; when the tracker held it back
+    /// ([`TrackObservation::held`]) it counts as coasting evidence
+    /// ([`crate::record`]), so that the next detection restarts a tracker
+    /// that was held back all along, and otherwise (a match its own low
+    /// score held back, as when something covers the subject) it is no
+    /// evidence. Each usable observation is also kept as the tracker's
+    /// report on its frame, with where the match held back lay
+    /// ([`TrackObservation::held_at`], when it is a valid box), for the
+    /// detections that will be computed on that frame. Anything else is
+    /// ignored: tracks never create or revive a subject. Emits one
+    /// [`StoreEvent::Updated`] per moved subject.
     pub fn ingest_tracks(&mut self, pts: Duration, obs: &[TrackObservation]) -> Vec<StoreEvent> {
         let mut events = Vec::new();
         let min = self.config.track_min_confidence;
         for ob in obs {
-            // `>=` is false for NaN, so a NaN confidence is rejected too.
+            // Both comparisons are false for NaN, which is neither confident
+            // nor coasting evidence.
             let confident = ob.confidence >= min;
-            let (Some(bbox), true) = (sanitize(&ob.bbox), confident) else {
+            let low = ob.confidence < min;
+            let (Some(bbox), true) = (sanitize(&ob.bbox), confident || low) else {
                 continue;
             };
             let Some(rec) = self.subjects.get_mut(&ob.id) else {
                 continue;
             };
             if !rec.is_tracking() || !rec.tracker_running || pts < rec.motion.box_pts {
+                continue;
+            }
+            // A low observation is coasting evidence only when the tracker
+            // held it back for a reason that lasts; one its own score held
+            // back (an occluder over the subject) is not, but it still says
+            // what the tracker made of its frame; see `crate::record`.
+            let report = if confident {
+                FrameReport::Trusted
+            } else if ob.held {
+                FrameReport::Held(ob.held_at.as_ref().and_then(sanitize))
+            } else {
+                FrameReport::Sunk
+            };
+            rec.note_track(pts, report);
+            if !confident {
                 continue;
             }
             rec.move_to(bbox, pts);
@@ -255,10 +318,14 @@ impl SubjectStore {
 
     /// The operator removed `query`.
     ///
-    /// The query is dropped from every alias list. A subject whose primary
-    /// query it was is promoted to its first alias when it has one, kept as an
-    /// orphan while it is protected, and retired otherwise (pinned and hidden
-    /// subjects included: this is an operator action, not automatic).
+    /// The query is dropped from every alias list, with its label evidence. A
+    /// subject whose primary query it was is promoted to an alias when it has
+    /// one, kept as an orphan while it is protected, and retired otherwise
+    /// (pinned and hidden subjects included: this is an operator action, not
+    /// automatic). The alias promoted is the first whose label frames shots
+    /// ([`crate::labels`]), or the first alias when none does: the primary
+    /// frames shots whatever its evidence, so promoting an alias from one
+    /// stray box while a confirmed one waits would frame the stray at once.
     pub fn remove_query(&mut self, query: &QueryId) -> Vec<StoreEvent> {
         let mut events = Vec::new();
         let ids: Vec<SubjectId> = self.subjects.keys().copied().collect();
@@ -267,9 +334,19 @@ impl SubjectStore {
                 continue;
             };
             let mut changed = rec.aliases.remove(query);
+            rec.labels.remove(query);
             if rec.subject.query == *query && !rec.orphaned {
-                if let Some(first) = rec.aliases.pop_first() {
-                    rec.subject.query = first;
+                let framing = rec
+                    .aliases
+                    .iter()
+                    .find(|a| rec.labels.get(*a).is_some_and(|e| e.frames))
+                    .cloned();
+                let next = match framing {
+                    Some(a) => rec.aliases.take(&a),
+                    None => rec.aliases.pop_first(),
+                };
+                if let Some(next) = next {
+                    rec.subject.query = next;
                     changed = true;
                 } else if rec.protected {
                     rec.orphaned = true;
@@ -300,6 +377,8 @@ impl SubjectStore {
     pub fn tracker_failed(&mut self, id: SubjectId) {
         if let Some(rec) = self.subjects.get_mut(&id) {
             rec.tracker_running = false;
+            rec.tracker_report = TrackerReport::Silent;
+            rec.frame_reports.clear();
         }
     }
 
@@ -322,6 +401,8 @@ impl SubjectStore {
         rec.lost_since = Some(at);
         rec.shadowed_since = None;
         rec.motion.velocity = Default::default();
+        rec.tracker_report = TrackerReport::Silent;
+        rec.frame_reports.clear();
         events.push(StoreEvent::Lost { id });
         if rec.tracker_running {
             rec.tracker_running = false;

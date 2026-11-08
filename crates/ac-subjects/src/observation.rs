@@ -9,7 +9,9 @@
 //!
 //! The store does not depend on the vision crate. The engine converts the
 //! detector's output into [`Detection`]s and the tracker's into
-//! [`TrackObservation`]s.
+//! [`TrackObservation`]s, which keep whether the tracker held its match
+//! back and where that match lay. A tuple `(id, bbox, confidence)` converts
+//! to an observation that was not held back.
 //!
 //! A detection says what its box covers ([`Extent`]); a track observation
 //! does not, because the tracker follows the box it was started on at that
@@ -42,6 +44,29 @@ pub struct TrackObservation {
     pub bbox: Rect,
     /// Tracker confidence in `0.0..=1.0`.
     pub confidence: f32,
+    /// The tracker held the box back from a match its score alone would
+    /// have moved it to, for a reason that lasts as long as its cause (the
+    /// template tracker's contrast check, under a followspot its template
+    /// never learned, say). Besides confident observations, only these
+    /// count as coasting evidence ([`crate::record`]); a low observation
+    /// that is not held, such as an occluded subject's, is none. Absent in
+    /// older data, where it reads as false.
+    #[serde(default)]
+    pub held: bool,
+    /// Where the match held back lay, in normalized source coordinates,
+    /// when the tracker says so; read only when [`Self::held`] is set. A
+    /// coasting tracker is not restarted from a detection computed on this
+    /// observation's frame that overlaps this box, but no more than the
+    /// subject's box does ([`crate::record`]; a detection clear of it still
+    /// restarts the tracker): a performer who sidestepped is
+    /// where the match was, while a brighter occluder that looks partly
+    /// like the subject draws the match onto itself, off the subject's
+    /// detection. A held observation without it (older data, a tracker
+    /// that does not say) leaves such a detection to restart the tracker,
+    /// as before positions were reported. Absent in older data, where it
+    /// reads as `None`.
+    #[serde(default)]
+    pub held_at: Option<Rect>,
 }
 
 impl From<(SubjectId, Rect, f32)> for TrackObservation {
@@ -50,6 +75,8 @@ impl From<(SubjectId, Rect, f32)> for TrackObservation {
             id,
             bbox,
             confidence,
+            held: false,
+            held_at: None,
         }
     }
 }
@@ -106,5 +133,7 @@ mod tests {
         let ob: TrackObservation = (SubjectId(2), Rect::FULL, 0.7).into();
         assert_eq!(ob.id, SubjectId(2));
         assert_eq!(ob.confidence, 0.7);
+        assert!(!ob.held);
+        assert_eq!(ob.held_at, None);
     }
 }

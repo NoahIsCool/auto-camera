@@ -103,7 +103,9 @@ fn shot_ids(snap: &EngineSnapshot) -> Vec<String> {
 #[test]
 fn an_on_air_shot_survives_its_query_being_replaced_by_an_alias() {
     let mut rig = Rig::new(two_queries());
-    rig.run(31);
+    // Two passes (applied on ticks 1 and 31): an alias frames shots once
+    // two observing passes have seen it.
+    rig.run(32);
     let snap = rig.snapshot();
     // Admission is fair across prompts: "body" sorts first, so it is the
     // primary query and "person" an alias. Both queries' presets make
@@ -155,9 +157,13 @@ fn an_on_air_shot_survives_its_query_being_replaced_by_an_alias() {
     assert_eq!(shot_ids(&snap), ["cam/wide", "cam/1/medium", "cam/1/close"]);
 }
 
-#[test]
-fn a_kept_shot_frames_with_the_new_query_s_preset() {
-    // Both queries define a "close" preset, with different headroom.
+/// [`config`] whose "person" query frames one close-up with 0.03 headroom
+/// and a 6x ceiling, plus a query `id`, named `name`, with the default
+/// close-up (4x) on the same boxes. Its id sorts before "person", so it is
+/// the primary query and its close-up is the one made. That close-up is cut
+/// to program and the query is removed; returns the on-air close-up's
+/// (headroom, max zoom) and name afterwards.
+fn close_after_removing_the_primary(id: &str, name: &str) -> ((f64, f64), String) {
     let mut c = config(1);
     c.queries[0].presets = Some(vec![PresetSpec::Full(Preset {
         id: "close".into(),
@@ -167,8 +173,8 @@ fn a_kept_shot_frames_with_the_new_query_s_preset() {
         max_zoom: 6.0,
     })]);
     c.queries.push(QuerySettings {
-        id: None,
-        name: "Body".into(),
+        id: Some(id.into()),
+        name: name.into(),
         prompt: "body".into(),
         presets: Some(vec![PresetSpec::Size(ShotSize::Close)]),
         literal: false,
@@ -176,17 +182,41 @@ fn a_kept_shot_frames_with_the_new_query_s_preset() {
     });
     let mut rig = Rig::new(c);
     rig.run(31);
-    let before = rig.snapshot();
-    assert_eq!(before.subjects[0].query, QueryId("body".into()));
+    assert_eq!(rig.snapshot().subjects[0].query, QueryId(id.into()));
+    let e = rig.core.catalog().get(&shot("cam/1/close")).unwrap();
+    assert_eq!(e.preset.as_ref().unwrap().max_zoom, 4.0, "the primary's");
     preview_and_cut(&mut rig, "cam/1/close");
     rig.run(2);
     rig.apply(EngineCommand::RemoveQuery {
-        query: QueryId("body".into()),
+        query: QueryId(id.into()),
     })
     .unwrap();
     rig.run(2);
+    let snap = rig.snapshot();
+    assert_eq!(snap.subjects[0].query, QueryId("person".into()));
+    assert_eq!(snap.switcher.program, Some(shot("cam/1/close")));
     let e = rig.core.catalog().get(&shot("cam/1/close")).unwrap();
     let preset = e.preset.as_ref().unwrap();
-    assert_eq!((preset.headroom, preset.max_zoom), (0.03, 6.0));
-    assert!(e.shot.name.starts_with("Person"), "{}", e.shot.name);
+    ((preset.headroom, preset.max_zoom), e.shot.name.clone())
+}
+
+#[test]
+fn a_kept_shot_frames_with_the_new_query_s_preset() {
+    let (preset, name) = close_after_removing_the_primary("body", "Body");
+    assert_eq!(preset, (0.03, 6.0));
+    assert_eq!(name, "Person 1 Close");
+}
+
+/// The removed query shares its display name with the one promoted: the
+/// shot is still named "Person", but takes the promoted query's preset,
+/// since a held shot finds the query it is named after by id.
+#[test]
+fn a_kept_shot_takes_the_new_preset_when_both_queries_share_a_name() {
+    let (preset, name) = close_after_removing_the_primary("body", "Person");
+    assert_eq!(
+        preset,
+        (0.03, 6.0),
+        "the removed query's preset stayed on air"
+    );
+    assert_eq!(name, "Person 1 Close");
 }

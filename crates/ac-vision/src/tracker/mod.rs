@@ -21,8 +21,8 @@
 //!    to the box size there and scored with normalized cross-correlation at
 //!    every integer offset in a window around the prediction. The window radius is `search_fraction` of the box's longer
 //!    side (clamped), widened when frames were skipped.
-//! 4. The peak is refined to sub-pixel precision. If it is strong and
-//!    unambiguous, the image is resampled around it at scales `1 - step`, `1`
+//! 4. The peak is refined to sub-pixel precision. If it is trusted (see
+//!    below), the image is resampled around it at scales `1 - step`, `1`
 //!    and `1 + step` on a 3x3 grid of centres and compared with the template;
 //!    a scale change must beat the unscaled score by `scale_penalty`, so size
 //!    does not drift on noise. Near the frame border, where the enlarged box
@@ -32,13 +32,55 @@
 //!
 //! The confidence is the peak NCC, in `0..=1`. The box moves to the peak only
 //! when the peak is at least `accept_score` *and* no separate local maximum
-//! comes within `ambiguity_margin` of it. Otherwise the subject is considered
-//! occluded or ambiguous: the box coasts on its decaying velocity instead of
-//! jumping to a distractor, and an ambiguous match reports at most
-//! `ambiguous_confidence`. The appearance template learns the new look with
-//! `learning_rate` only when the confidence reaches `update_score` and the box
-//! is fully inside the frame, so occluders and the frame border are not
-//! learned. The tracker never drops a subject by itself.
+//! comes within `ambiguity_margin` of it *and* the contrast check below does
+//! not hold it back. Otherwise the subject is considered occluded or
+//! ambiguous: the box coasts on its decaying velocity instead of jumping to a
+//! distractor. An ambiguous match, or a match of at least `accept_score` held
+//! back by its contrast, reports at most `ambiguous_confidence`; a match below
+//! `accept_score` reports its own score. The appearance template learns the
+//! new look with `learning_rate` only when the confidence reaches
+//! `update_score` and the box is fully inside the frame, so occluders and the
+//! frame border are not learned. The tracker never drops a subject by itself,
+//! and never restarts one: a coasting subject keeps its old template and
+//! reports a low confidence for as long as the cause lasts. Restarts come from
+//! the subject store (`ac-subjects`), which re-seeds the tracker from a
+//! detection that disagrees with the box, from the first detection after the
+//! contrast check below held the tracker back, with no trusted match, since
+//! the previous one, and from the detection that recovers a subject lost for
+//! want of confident observations. Each observation says whether the contrast
+//! check held its match back ([`TrackObservation::held`]), and where that
+//! match lay ([`TrackObservation::held_at`]): that cause does not end by
+//! itself (a followspot the template never learns), and a restart under it
+//! does end it. The store seeds the restart on the detection's frame, and does
+//! not restart from a frame on which the match held back overlapped the
+//! detection, but no more than the subject's box did: a brighter occluder that
+//! looks partly like the subject can draw the match onto itself, and a
+//! template taken there would hold the occluder. A coast for want of score,
+//! such as an occluder over the subject, is not flagged, and neither is a
+//! match held back by its ambiguity alone, which a narrow occluder in front of
+//! the subject also produces: the template that was never taught the occluder
+//! is what finds the subject again when it leaves, and a restart would take a
+//! new one from the occluded frame. An ambiguous match the contrast check also
+//! refuses is flagged, as a lockout under a spot gives those too.
+//!
+//! NCC is blind to contrast, so a faint template, such as a shadow on a wall,
+//! matches a nearby high-contrast performer of the same shape at 0.70 to
+//! 0.76. Each match therefore also carries its contrast gain, the window's
+//! standard deviation over the template's on the same pixels. The check
+//! holds back a match below `update_score` whose gain is outside
+//! `1 / max_contrast_gain ..= max_contrast_gain` only when it also lands
+//! farther than `surprise_fraction` of the box's shorter side from the
+//! prediction (more after skipped frames or a late start), as such a jump
+//! does. A match near the prediction is judged as
+//! before: a performer whose contrast a light cue changes, a followspot that
+//! weakens their match to about 0.7 included, is followed where they were
+//! heading. The `search` submodule's docs give the theory and the limits.
+//!
+//! The check does not help when the start box already holds someone else's
+//! pixels (a neighbour's head in a corner of a shadow's box): the template
+//! then follows that head at its own contrast. That case waits on
+//! measurements from the band clip. A false subject such as a shadow is for
+//! the operator to hide (and, later, for exclusion zones).
 //!
 //! # Cost model
 //!
@@ -87,24 +129,20 @@ use crate::api::{TrackObservation, Tracker};
 use crate::boxes::clamp_box;
 use crate::error::VisionError;
 use crate::image::GrayImage;
-use crate::ncc::{Level, Pyramid, ScoreMap, Template};
+use crate::ncc::{Level, Pyramid, Template};
 
 mod config;
+mod search;
 #[cfg(test)]
 mod tests;
 
 pub use config::TemplateTrackerConfig;
+use search::match_on_level;
 
 /// Shorter side, in pixels, below which no further pyramid level is built.
 const MIN_LEVEL_SIDE: usize = 8;
 /// Most pyramid levels built (level 0 included).
 const MAX_LEVELS: usize = 6;
-/// Smallest template side, in pixels, used for matching.
-const MIN_TEMPLATE_SIDE: usize = 3;
-/// Largest widening of the search window after skipped frames.
-const MAX_WINDOW_GROWTH: f64 = 3.0;
-/// Radius, in pixels, of the grid of centres probed at each scale.
-const SCALE_PROBE_RADIUS: usize = 1;
 
 /// Per-subject tracking state.
 #[derive(Debug, Clone)]
@@ -119,6 +157,10 @@ struct Track {
     appearance: GrayImage,
     /// Confidence of the latest estimate.
     confidence: f32,
+    /// Where the latest match lay when the contrast check held it back, as
+    /// the observations report it ([`TrackObservation::held_at`]); `None`
+    /// when it did not, which is what [`TrackObservation::held`] reports.
+    held_at: Option<Rect>,
     /// Sequence number of the last frame applied.
     seq: u64,
     /// Presentation time of the last frame applied.
@@ -128,29 +170,22 @@ struct Track {
 impl Track {
     /// The visible part of the box, inside the frame.
     fn visible_box(&self) -> Rect {
-        let full = Rect::from_center(self.center, self.size.0, self.size.1);
-        clamp_box(full).unwrap_or(Rect::new(
-            self.center.x.min(1.0 - 1e-6),
-            self.center.y.min(1.0 - 1e-6),
-            1e-6,
-            1e-6,
-        ))
+        visible_part(self.center, self.size)
     }
 }
 
-/// Result of matching one subject on one frame.
-#[derive(Debug, Clone, Copy)]
-struct Match {
-    /// Matched centre in pixels of the matching level.
-    cx: f64,
-    /// Matched centre in pixels of the matching level.
-    cy: f64,
-    /// Scale relative to the previous box size.
-    scale: f64,
-    /// Peak NCC.
-    score: f32,
-    /// A separate peak came within the ambiguity margin.
-    ambiguous: bool,
+/// The visible part, inside the frame, of a box of normalized `size`
+/// centred at `center` (a point of the frame, border included): never
+/// empty, so a box that only touches the frame becomes a sliver at the
+/// border.
+fn visible_part(center: Point, size: (f64, f64)) -> Rect {
+    let full = Rect::from_center(center, size.0, size.1);
+    clamp_box(full).unwrap_or(Rect::new(
+        center.x.min(1.0 - 1e-6),
+        center.y.min(1.0 - 1e-6),
+        1e-6,
+        1e-6,
+    ))
 }
 
 /// The pyramid of one frame, kept for reuse on that frame.
@@ -205,6 +240,8 @@ impl TemplateTracker {
                 id,
                 bbox: t.visible_box(),
                 confidence: t.confidence,
+                held: t.held_at.is_some(),
+                held_at: t.held_at,
             })
             .collect()
     }
@@ -280,93 +317,6 @@ fn interval(config: &TemplateTrackerConfig, from: Duration, to: Duration) -> f64
     }
 }
 
-/// Matches `appearance` for a box of `bw x bh` level pixels predicted at
-/// `(pcx, pcy)` on `level`.
-///
-/// Two stages: an integer-offset search with the template at the current box
-/// size finds the peak and checks ambiguity; then, if the peak is trusted and
-/// the enlarged box fits inside the image, the image itself is resampled at
-/// scales `1 - step`, `1` and `1 + step` on a 3x3 grid of centres around the
-/// peak. Resampling the image (rather than resizing the template to whole
-/// pixels) makes the scale steps exact even for small boxes.
-fn match_on_level(
-    config: &TemplateTrackerConfig,
-    level: &Level,
-    appearance: &GrayImage,
-    (pcx, pcy): (f64, f64),
-    (bw, bh): (f64, f64),
-    dt: f64,
-) -> Option<Match> {
-    let (cw, ch) = (appearance.width as f64, appearance.height as f64);
-    let tw = (bw.round() as usize).max(MIN_TEMPLATE_SIDE);
-    let th = (bh.round() as usize).max(MIN_TEMPLATE_SIDE);
-    let template = Template::new(
-        tw,
-        th,
-        &appearance.sample_patch(cw / 2.0, ch / 2.0, cw, ch, tw, th),
-    )?;
-    let ox = (pcx - tw as f64 / 2.0).round() as isize;
-    let oy = (pcy - th as f64 / 2.0).round() as isize;
-    let growth = (dt / config.nominal_dt).clamp(1.0, MAX_WINDOW_GROWTH);
-    let radius =
-        (config.search_fraction * bw.max(bh)).max(config.min_search_radius as f64) * growth;
-    let radius = radius.min(config.max_search_radius as f64).ceil() as usize;
-    let map = ScoreMap::compute(level, &template, ox, oy, radius, config.min_visible);
-    let peak = map.best()?;
-    let exclusion = (tw.min(th) / 2).max(2);
-    let ambiguous = map.second_peak(peak, exclusion) > peak.score - config.ambiguity_margin;
-    let (sx, sy) = map.subpixel(peak);
-    let coarse = Match {
-        cx: (ox + peak.dx) as f64 + sx + tw as f64 / 2.0,
-        cy: (oy + peak.dy) as f64 + sy + th as f64 / 2.0,
-        scale: 1.0,
-        score: peak.score,
-        ambiguous,
-    };
-    let grown = (1.0 + config.scale_step) * bw.max(bh) / 2.0 + SCALE_PROBE_RADIUS as f64 + 1.0;
-    let (lw, lh) = (level.img.width as f64, level.img.height as f64);
-    let inside = coarse.cx - grown >= 0.0
-        && coarse.cy - grown >= 0.0
-        && coarse.cx + grown <= lw
-        && coarse.cy + grown <= lh;
-    if ambiguous || peak.score < config.accept_score || !inside {
-        return Some(coarse);
-    }
-    let mut best = coarse;
-    let mut best_adjusted = f32::NEG_INFINITY;
-    let scales = [1.0, 1.0 - config.scale_step, 1.0 + config.scale_step];
-    let count = if config.scale_step > 0.0 { 3 } else { 1 };
-    for &s in &scales[..count] {
-        let r = SCALE_PROBE_RADIUS as isize;
-        let scores: Vec<f32> = (-r..=r)
-            .flat_map(|dy| (-r..=r).map(move |dx| (dx, dy)))
-            .map(|(dx, dy)| {
-                let (x, y) = (coarse.cx + dx as f64, coarse.cy + dy as f64);
-                template.ncc_patch(&level.img.sample_patch(x, y, s * bw, s * bh, tw, th))
-            })
-            .collect();
-        let probe = ScoreMap::from_scores(SCALE_PROBE_RADIUS, scores);
-        let Some(p) = probe.best() else { continue };
-        let adjusted = if s == 1.0 {
-            p.score
-        } else {
-            p.score - config.scale_penalty
-        };
-        if adjusted > best_adjusted {
-            let (px, py) = probe.subpixel(p);
-            best_adjusted = adjusted;
-            best = Match {
-                cx: coarse.cx + p.dx as f64 + px,
-                cy: coarse.cy + p.dy as f64 + py,
-                scale: s,
-                score: p.score,
-                ambiguous: false,
-            };
-        }
-    }
-    Some(best)
-}
-
 /// Advances `track` to the frame described by `pyramid`, `seq` and `pts`.
 fn step(
     config: &TemplateTrackerConfig,
@@ -394,7 +344,7 @@ fn step(
         dt,
     );
     match found {
-        Some(m) if m.score >= config.accept_score && !m.ambiguous => {
+        Some(m) if m.trusted(config) => {
             let center = Point {
                 x: (m.cx / lw).clamp(0.0, 1.0),
                 y: (m.cy / lh).clamp(0.0, 1.0),
@@ -415,6 +365,7 @@ fn step(
                 (track.size.1 * m.scale).clamp(min_h.min(1.0), 1.0),
             );
             track.confidence = m.score.clamp(0.0, 1.0);
+            track.held_at = None;
             let full = Rect::from_center(center, track.size.0, track.size.1);
             if m.score >= config.update_score && Rect::FULL.contains_rect(&full) {
                 learn(config, track, level);
@@ -426,8 +377,23 @@ fn step(
                 track.velocity.0 * config.velocity_decay,
                 track.velocity.1 * config.velocity_decay,
             );
+            // Only the contrast check holds a match back for a reason that
+            // outlasts the frame, ambiguous or not; one held back by its
+            // ambiguity alone is not flagged; see `TrackObservation::held`.
+            // The match's own centre says where it lay, at the box's size,
+            // since a match that is not trusted is not measured for scale.
+            track.held_at = other.filter(|m| m.contrast_refused(config)).map(|m| {
+                let at = Point {
+                    x: (m.cx / lw).clamp(0.0, 1.0),
+                    y: (m.cy / lh).clamp(0.0, 1.0),
+                };
+                visible_part(at, track.size)
+            });
             track.confidence = match other {
-                Some(m) if m.ambiguous => m.score.min(config.ambiguous_confidence),
+                // Held back by its ambiguity or its contrast, not its score.
+                Some(m) if m.ambiguous || m.contrast_refused(config) => {
+                    m.score.min(config.ambiguous_confidence)
+                }
                 Some(m) => m.score,
                 None => 0.0,
             }
@@ -502,6 +468,7 @@ impl Tracker for TemplateTracker {
                 velocity: (0.0, 0.0),
                 appearance: GrayImage::new(cw, ch, data),
                 confidence: 1.0,
+                held_at: None,
                 seq: frame.seq,
                 pts: frame.pts,
             },

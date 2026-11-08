@@ -20,6 +20,14 @@
 //! images), provided at least a minimum fraction of the template is visible.
 //! This keeps subjects trackable as they leave the frame.
 //!
+//! Because NCC divides out both standard deviations, it cannot tell a faint
+//! patch from a contrasty one of the same shape: a shadow on a wall and a
+//! person in front of it correlate as well as the shadow with itself. The
+//! [`Contrast`] of a placement keeps the two variances it divided out, on the
+//! same visible pixels the score used, so a caller can ask how much stronger
+//! the window is than the template (`sqrt(var_I / var_T)`, the gain) at O(1)
+//! per placement from the same integral images.
+//!
 //! A [`ScoreMap`] evaluates every integer offset in a square window around a
 //! predicted placement. Its peak is refined to sub-pixel precision with a
 //! parabola through the peak and its neighbours on each axis, and its
@@ -162,11 +170,10 @@ impl Template {
         })
     }
 
-    /// NCC with the template's top-left corner at `(x, y)` in `level`.
-    ///
-    /// Returns `None` when less than `min_visible` of the template's area lies
-    /// inside the image.
-    pub fn ncc_at(&self, level: &Level, x: isize, y: isize, min_visible: f64) -> Option<f32> {
+    /// The part of the template placed with its top-left corner at `(x, y)`
+    /// that lies inside `level`, or `None` when less than `min_visible` of
+    /// the template's area does.
+    fn overlap(&self, level: &Level, x: isize, y: isize, min_visible: f64) -> Option<Overlap> {
         let (iw, ih) = (level.img.width as isize, level.img.height as isize);
         let (tw, th) = (self.w as isize, self.h as isize);
         let (tx0, ty0) = ((-x).max(0), (-y).max(0));
@@ -178,29 +185,49 @@ impl Template {
         if (n as f64) < min_visible * (self.w * self.h) as f64 {
             return None;
         }
-        let (tx0, ty0, tx1, ty1) = (tx0 as usize, ty0 as usize, tx1 as usize, ty1 as usize);
-        let (ix0, iy0) = ((x + tx0 as isize) as usize, (y + ty0 as isize) as usize);
-        let cols = tx1 - tx0;
-        let mut cross = 0.0f64;
-        for ty in ty0..ty1 {
-            let t = &self.data[ty * self.w + tx0..ty * self.w + tx1];
-            let row = iy0 + ty - ty0;
-            let i =
-                &level.img.data[row * level.img.width + ix0..row * level.img.width + ix0 + cols];
-            cross += dot(t, i) as f64;
-        }
-        let (st, st2) = if n == self.w * self.h {
+        Some(Overlap {
+            tx0: tx0 as usize,
+            ty0: ty0 as usize,
+            tx1: tx1 as usize,
+            ty1: ty1 as usize,
+            ix0: (x + tx0) as usize,
+            iy0: (y + ty0) as usize,
+            n,
+        })
+    }
+
+    /// `(Σ T, Σ T², Σ I, Σ I²)` over the overlap `o`, from integral images.
+    fn sums(&self, level: &Level, o: &Overlap) -> (f64, f64, f64, f64) {
+        let (st, st2) = if o.n == self.w * self.h {
             (0.0, self.energy)
         } else {
             (
-                self.sum.sum(tx0, ty0, tx1, ty1),
-                self.sq.sum(tx0, ty0, tx1, ty1),
+                self.sum.sum(o.tx0, o.ty0, o.tx1, o.ty1),
+                self.sq.sum(o.tx0, o.ty0, o.tx1, o.ty1),
             )
         };
-        let (ix1, iy1) = (ix0 + cols, iy0 + (ty1 - ty0));
-        let si = level.sum.sum(ix0, iy0, ix1, iy1);
-        let si2 = level.sq.sum(ix0, iy0, ix1, iy1);
-        let nf = n as f64;
+        let (ix1, iy1) = (o.ix0 + o.tx1 - o.tx0, o.iy0 + o.ty1 - o.ty0);
+        let si = level.sum.sum(o.ix0, o.iy0, ix1, iy1);
+        let si2 = level.sq.sum(o.ix0, o.iy0, ix1, iy1);
+        (st, st2, si, si2)
+    }
+
+    /// NCC with the template's top-left corner at `(x, y)` in `level`.
+    ///
+    /// Returns `None` when less than `min_visible` of the template's area lies
+    /// inside the image.
+    pub fn ncc_at(&self, level: &Level, x: isize, y: isize, min_visible: f64) -> Option<f32> {
+        let o = self.overlap(level, x, y, min_visible)?;
+        let cols = o.tx1 - o.tx0;
+        let mut cross = 0.0f64;
+        for ty in o.ty0..o.ty1 {
+            let t = &self.data[ty * self.w + o.tx0..ty * self.w + o.tx1];
+            let row = o.iy0 + ty - o.ty0;
+            let start = row * level.img.width + o.ix0;
+            cross += dot(t, &level.img.data[start..start + cols]) as f64;
+        }
+        let (st, st2, si, si2) = self.sums(level, &o);
+        let nf = o.n as f64;
         let var_t = st2 - st * st / nf;
         let var_i = si2 - si * si / nf;
         if var_t <= MIN_VARIANCE * nf || var_i <= MIN_VARIANCE * nf {
@@ -210,18 +237,91 @@ impl Template {
         Some(ncc.clamp(-1.0, 1.0) as f32)
     }
 
-    /// NCC with an equally sized `patch` (row-major, `w * h` samples).
-    pub fn ncc_patch(&self, patch: &[f32]) -> f32 {
+    /// Contrast of the template and the image window at the placement
+    /// `(x, y)`, both measured on the visible overlap, in O(1) from the
+    /// integral images. `None` exactly where [`Template::ncc_at`] is.
+    pub fn contrast_at(
+        &self,
+        level: &Level,
+        x: isize,
+        y: isize,
+        min_visible: f64,
+    ) -> Option<Contrast> {
+        let o = self.overlap(level, x, y, min_visible)?;
+        let (st, st2, si, si2) = self.sums(level, &o);
+        let nf = o.n as f64;
+        Some(Contrast {
+            template: (st2 - st * st / nf) / nf,
+            window: (si2 - si * si / nf) / nf,
+        })
+    }
+
+    /// NCC with an equally sized `patch` (row-major, `w * h` samples), and
+    /// the contrast of both sides, which the normalisation computes anyway.
+    pub fn ncc_patch(&self, patch: &[f32]) -> (f32, Contrast) {
         assert_eq!(patch.len(), self.data.len(), "patch size");
         let n = patch.len() as f64;
         let mean = patch.iter().map(|&v| v as f64).sum::<f64>() / n;
         let var: f64 = patch.iter().map(|&v| (v as f64 - mean).powi(2)).sum();
+        let contrast = Contrast {
+            template: self.energy / n,
+            window: var / n,
+        };
         if var <= MIN_VARIANCE * n {
-            return 0.0;
+            return (0.0, contrast);
         }
         // The template is zero-mean, so the patch mean cancels from Σ T·I.
         let cross = dot(&self.data, patch) as f64;
-        (cross / (self.energy * var).sqrt()).clamp(-1.0, 1.0) as f32
+        let ncc = (cross / (self.energy * var).sqrt()).clamp(-1.0, 1.0) as f32;
+        (ncc, contrast)
+    }
+}
+
+/// The part of a template placement that lies inside the image.
+#[derive(Debug, Clone, Copy)]
+struct Overlap {
+    /// First template column inside the image.
+    tx0: usize,
+    /// First template row inside the image.
+    ty0: usize,
+    /// End (exclusive) of the template columns inside the image.
+    tx1: usize,
+    /// End (exclusive) of the template rows inside the image.
+    ty1: usize,
+    /// Image column of template column `tx0`.
+    ix0: usize,
+    /// Image row of template row `ty0`.
+    iy0: usize,
+    /// Pixels in the overlap.
+    n: usize,
+}
+
+/// Contrast of the two sides of one placement: variances per pixel of the
+/// template and of the image window, over the same pixels.
+///
+/// NCC divides both out, so it scores a faint template against a contrasty
+/// window (or the reverse) as if they had the same contrast. The gain puts
+/// that factor back for the tracker's trust rules.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Contrast {
+    /// Variance per pixel of the template.
+    pub template: f64,
+    /// Variance per pixel of the image window.
+    pub window: f64,
+}
+
+impl Contrast {
+    /// Contrast gain `sqrt(window / template)`: how many times stronger the
+    /// window's deviations from its mean are than the template's. `0` for a
+    /// flat window and infinite for a flat template; NCC scores either `0`.
+    pub fn gain(&self) -> f64 {
+        if self.window <= MIN_VARIANCE {
+            0.0
+        } else if self.template <= MIN_VARIANCE {
+            f64::INFINITY
+        } else {
+            (self.window / self.template).sqrt()
+        }
     }
 }
 
@@ -367,170 +467,4 @@ impl ScoreMap {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Deterministic pseudo-random texture in `0..1`.
-    fn noise(w: usize, h: usize, seed: u64) -> GrayImage {
-        let mut s = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let data = (0..w * h)
-            .map(|_| {
-                s ^= s << 13;
-                s ^= s >> 7;
-                s ^= s << 17;
-                (s % 1000) as f32 / 1000.0
-            })
-            .collect();
-        GrayImage::new(w, h, data)
-    }
-
-    fn crop(img: &GrayImage, x: usize, y: usize, w: usize, h: usize) -> Vec<f32> {
-        (y..y + h)
-            .flat_map(|r| img.row(r)[x..x + w].to_vec())
-            .collect()
-    }
-
-    #[test]
-    fn integral_sums_rectangles() {
-        let data: Vec<f32> = (1..=6).map(|v| v as f32).collect();
-        let (sum, sq) = Integral::pair(3, 2, &data);
-        assert_eq!(sum.sum(0, 0, 3, 2), 21.0);
-        assert_eq!(sum.sum(1, 0, 3, 2), 2.0 + 3.0 + 5.0 + 6.0);
-        assert_eq!(sum.sum(1, 1, 1, 2), 0.0);
-        assert_eq!(sq.sum(0, 1, 1, 2), 16.0);
-    }
-
-    #[test]
-    fn pyramid_halves_until_min_side() {
-        let p = Pyramid::new(noise(64, 40, 1), 8, 10);
-        let sizes: Vec<(usize, usize)> = p
-            .levels
-            .iter()
-            .map(|l| (l.img.width, l.img.height))
-            .collect();
-        assert_eq!(sizes, vec![(64, 40), (32, 20), (16, 10)]);
-        assert_eq!(Pyramid::new(noise(4, 4, 1), 8, 10).levels.len(), 1);
-        assert_eq!(Pyramid::new(noise(64, 64, 1), 1, 2).levels.len(), 2);
-    }
-
-    #[test]
-    fn flat_template_is_rejected() {
-        assert!(Template::new(4, 4, &[0.5; 16]).is_none());
-        assert!(Template::new(2, 1, &[0.0, 1.0]).is_some());
-    }
-
-    #[test]
-    fn exact_match_scores_one_and_is_found() {
-        let img = noise(60, 40, 7);
-        let level = Level::new(img.clone());
-        let t = Template::new(12, 10, &crop(&img, 30, 15, 12, 10)).unwrap();
-        assert!((t.ncc_at(&level, 30, 15, 1.0).unwrap() - 1.0).abs() < 1e-5);
-        let map = ScoreMap::compute(&level, &t, 27, 17, 5, 1.0);
-        let peak = map.best().unwrap();
-        assert_eq!((peak.dx, peak.dy), (3, -2));
-        assert!(peak.score > 0.999);
-        // Unrelated noise correlates weakly.
-        assert!(map.get(-3, 0) < 0.5);
-    }
-
-    #[test]
-    fn ncc_ignores_brightness_and_contrast() {
-        let img = noise(30, 30, 3);
-        let t = Template::new(8, 8, &crop(&img, 10, 10, 8, 8)).unwrap();
-        let shifted = GrayImage::new(30, 30, img.data.iter().map(|v| 0.2 + 0.5 * v).collect());
-        let s = t.ncc_at(&Level::new(shifted), 10, 10, 1.0).unwrap();
-        assert!((s - 1.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn flat_window_scores_zero() {
-        let t = Template::new(4, 4, &crop(&noise(8, 8, 2), 0, 0, 4, 4)).unwrap();
-        let flat = Level::new(GrayImage::new(10, 10, vec![0.3; 100]));
-        assert_eq!(t.ncc_at(&flat, 2, 2, 1.0), Some(0.0));
-    }
-
-    #[test]
-    fn partial_overlap_matches_visible_part() {
-        let img = noise(40, 30, 11);
-        let level = Level::new(img.clone());
-        // Template of the 10x10 block at (0, 5); place it 4 px further left so
-        // only 6 of its 10 columns are inside the image.
-        let block = crop(&img, 0, 5, 10, 10);
-        let shifted: Vec<f32> = (0..10)
-            .flat_map(|r| {
-                let row = &block[r * 10..r * 10 + 10];
-                let mut v = vec![0.9; 4];
-                v.extend_from_slice(&row[..6]);
-                v
-            })
-            .collect();
-        let t = Template::new(10, 10, &shifted).unwrap();
-        let s = t.ncc_at(&level, -4, 5, 0.5).unwrap();
-        assert!((s - 1.0).abs() < 1e-4, "{s}");
-        assert_eq!(t.ncc_at(&level, -4, 5, 0.7), None);
-        assert_eq!(t.ncc_at(&level, -10, 5, 0.0), None);
-        assert_eq!(t.ncc_at(&level, 40, 5, 0.0), None);
-    }
-
-    #[test]
-    fn second_peak_finds_a_distractor_but_not_the_main_slope() {
-        let mut img = noise(80, 30, 5);
-        let patch = crop(&img, 10, 10, 10, 10);
-        // Paste an identical copy 30 px to the right.
-        for r in 0..10 {
-            for c in 0..10 {
-                img.data[(10 + r) * 80 + 40 + c] = patch[r * 10 + c];
-            }
-        }
-        let level = Level::new(img);
-        let t = Template::new(10, 10, &patch).unwrap();
-        let map = ScoreMap::compute(&level, &t, 25, 10, 18, 1.0);
-        let peak = map.best().unwrap();
-        assert!(peak.score > 0.999);
-        assert!(map.second_peak(peak, 5) > 0.999);
-        let near = ScoreMap::compute(&level, &t, 10, 10, 6, 1.0);
-        let p = near.best().unwrap();
-        assert_eq!((p.dx, p.dy), (0, 0));
-        assert!(near.second_peak(p, 5) < 0.6);
-    }
-
-    #[test]
-    fn subpixel_refines_towards_the_higher_neighbour() {
-        let map = ScoreMap::from_scores(1, vec![0.0, 0.5, 0.0, 0.6, 1.0, 0.8, 0.0, 0.5, 0.0]);
-        let peak = map.best().unwrap();
-        let (sx, sy) = map.subpixel(peak);
-        assert!(sx > 0.0 && sx < 0.5, "{sx}");
-        assert!(sy.abs() < 1e-9);
-        // A peak on the window edge has no right neighbour.
-        let edge = Peak {
-            dx: 1,
-            dy: 0,
-            score: 0.8,
-        };
-        assert_eq!(map.subpixel(edge).0, 0.0);
-    }
-
-    #[test]
-    fn patch_ncc_matches_placement_ncc() {
-        let img = noise(30, 30, 9);
-        let block = crop(&img, 5, 6, 9, 7);
-        let t = Template::new(9, 7, &block).unwrap();
-        assert!((t.ncc_patch(&block) - 1.0).abs() < 1e-5);
-        let other = crop(&img, 15, 16, 9, 7);
-        let level = Level::new(img);
-        let placed = t.ncc_at(&level, 15, 16, 1.0).unwrap();
-        assert!((t.ncc_patch(&other) - placed).abs() < 1e-4);
-        assert_eq!(t.ncc_patch(&[0.2; 63]), 0.0);
-    }
-
-    #[test]
-    fn empty_map_has_no_peak() {
-        let t = Template::new(4, 4, &crop(&noise(8, 8, 2), 0, 0, 4, 4)).unwrap();
-        let level = Level::new(noise(10, 10, 4));
-        let map = ScoreMap::compute(&level, &t, 100, 100, 2, 1.0);
-        assert!(map.best().is_none());
-        assert_eq!(map.get(5, 0), f32::NEG_INFINITY);
-    }
-}
+mod tests;

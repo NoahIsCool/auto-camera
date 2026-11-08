@@ -30,8 +30,32 @@ pub struct TemplateTrackerConfig {
     pub accept_score: f32,
     /// Smallest gap between the peak and the strongest separate peak.
     pub ambiguity_margin: f32,
-    /// Highest confidence reported for an ambiguous match.
+    /// Highest confidence reported for an ambiguous match, or for a match of
+    /// at least `accept_score` that the contrast check holds back.
     pub ambiguous_confidence: f32,
+    /// Largest contrast gain, either way, of a surprising match that scores
+    /// below `update_score` and still moves the box.
+    ///
+    /// The gain is the standard deviation of the image window at the match
+    /// over the template's, on the same pixels. NCC ignores it, so a faint
+    /// template (a shadow on a wall) also scores 0.6 to 0.76 on a nearby
+    /// person of the same shape (gain about 5.5) or on a gentle wall relief
+    /// (gain 0.2 to 0.3), a box width or more from where it was heading. A
+    /// match of at least `accept_score` and below `update_score` that lands
+    /// farther than `surprise_fraction` from the prediction with a gain
+    /// outside `1 / max_contrast_gain ..= max_contrast_gain` coasts like an
+    /// ambiguous one and reports at most `ambiguous_confidence`. A match near
+    /// the prediction is judged on its score alone, so a performer whose
+    /// contrast a light cue changes is still followed where they were
+    /// heading. Finite and at least `1`.
+    pub max_contrast_gain: f64,
+    /// Distance from the predicted centre, as a fraction of the box's shorter
+    /// side at the matching level, beyond which a match is surprising and
+    /// the contrast check (`max_contrast_gain`) applies to it. It widens with
+    /// the search window after skipped frames or a late start, up to three
+    /// times. `0` applies the check to almost every match. Finite and at
+    /// least `0`.
+    pub surprise_fraction: f64,
     /// Smallest confidence at which the template learns the new appearance.
     pub update_score: f32,
     /// Weight of the new appearance in a template update.
@@ -63,6 +87,8 @@ impl Default for TemplateTrackerConfig {
             accept_score: 0.5,
             ambiguity_margin: 0.05,
             ambiguous_confidence: 0.3,
+            max_contrast_gain: 2.5,
+            surprise_fraction: 0.25,
             update_score: 0.8,
             learning_rate: 0.1,
             velocity_smoothing: 0.5,
@@ -80,7 +106,7 @@ impl TemplateTrackerConfig {
     pub fn validate(&self) -> Result<(), VisionError> {
         let unit = |v: f32| (0.0..=1.0).contains(&v);
         let unit64 = |v: f64| (0.0..=1.0).contains(&v);
-        let checks: [(bool, &str); 14] = [
+        let checks: [(bool, &str); 16] = [
             (self.work_width >= 16, "work_width must be at least 16"),
             (
                 (4..=128).contains(&self.template_size),
@@ -109,6 +135,14 @@ impl TemplateTrackerConfig {
             (
                 unit(self.ambiguity_margin) && unit(self.ambiguous_confidence),
                 "ambiguity settings must be in 0..=1",
+            ),
+            (
+                self.max_contrast_gain.is_finite() && self.max_contrast_gain >= 1.0,
+                "max_contrast_gain must be finite and >= 1",
+            ),
+            (
+                self.surprise_fraction.is_finite() && self.surprise_fraction >= 0.0,
+                "surprise_fraction must be finite and >= 0",
             ),
             (
                 unit(self.update_score) && unit(self.learning_rate),

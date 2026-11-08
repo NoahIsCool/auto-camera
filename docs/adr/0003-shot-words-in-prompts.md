@@ -131,7 +131,19 @@ speaking"), two queries often find the same person, and the subject store
 makes them one subject answering both (an alias). That subject gets the
 shots of every query it answers, the primary query's first, de-duplicated by
 preset id (design §4.4, rule 7), each named after its own query ("Speaker
-tight 1 Close"), so typing one query per shot works.
+tight 1 Close"), so typing one query per shot works. An alias's shots
+appear once the store has seen it in `alias_confirm_passes` (2) detection
+passes that observed the subject, and stop after `alias_stale_passes` (8)
+such passes without it; passes, not seconds, so the rule is the same on a
+1 Hz OWLv2 and on a shared sidecar that visits each camera every few
+seconds. Identity is unchanged: the alias continues the subject from its
+first sighting, so one stray box (a guitar handed to whoever stands in
+front of it) makes no shot and no twin. The primary query, chosen at
+admission, is outside this rule and always frames. When the operator
+removes it, the store promotes the first alias that frames; only when none
+does is an unconfirmed alias promoted, and that one frames at once. A
+subject on program or preview keeps the shots it holds, with their names,
+until it leaves the air.
 
 ### Framing
 
@@ -146,17 +158,42 @@ crown = box top        cut = crown + heads(size) * head        heads: Close 1.6,
 h = (cut - crown) / (1 - headroom)                             top = crown - headroom * h
 ```
 
-An untruncated box is always measured on its own proportions, so Full is
-the whole box. A box that touches the top or bottom edge of the source, or
-is too squat in pixels for a standing body, falls back to the fill rule
-unless the shot remembers a head height from an earlier untruncated box;
-then its head is the larger of the remembered one and the box height over
-7.5, because the visible part of a body bounds the whole from below. Each
-shot's framer owns that memory and is its only writer: smoothed with a 5 s
-half-life over untruncated boxes, raised (never lowered) toward the visible
-bound by truncated ones. A lectern hiding the legs therefore keeps the zoom,
-and a person who walks toward the camera until their feet leave the picture
-is not sized by the smaller head they had further away. Every other subject
+A box is measured on its own proportions, so that its Full is the whole
+box, when it is untruncated and, while its shot reads the person as cut by
+the bottom on a stored count (below), ends clear of the release band. Any
+other box (one that touches the top or bottom edge of the source, is too
+squat in pixels for a standing body, or is read as cut by the bottom) uses
+a head height the shot remembers from an earlier measured box: the larger
+of the remembered one and the box height over 7.5, because the visible part
+of a body bounds the whole from below. Each shot's framer owns that memory
+and is its only writer: smoothed with a 5 s half-life over measured boxes,
+raised (never lowered) toward the visible bound by the others. A lectern
+hiding the legs therefore keeps the zoom, and a person who walks toward the
+camera until their feet leave the picture is not sized by the smaller head
+they had further away.
+
+With nothing remembered, a box cut by the bottom edge with its crown in the
+picture (a speaker framed from the knees up) is cut from the crown on a
+bounded assumed head instead of the fill rule. It is read as showing
+`V = clamp(1.875 * pixel aspect, 1.6, 3.0)` head heights, so the head is the
+box height over `V`, and no frame reaches below the box, so the crown keeps
+the preset's headroom. For every box tall enough to be a standing body `V`
+is 3, crown to waist, the loosest head the assumption allows: when more of
+the body shows, shots come out looser than their size; only a box showing
+less (a chest-up in profile) comes out tighter. The width term only keeps
+`V` continuous across the squat threshold. The framer smooths `V` with the
+same 5 s half-life in a slot of its own that never becomes a remembered
+head; it seeds it only from boxes clear of the side edges, then frames every
+box cut by the bottom on it (also at a side edge or with the crown at the
+frame top) and reads the bottom edge with hysteresis: after a box at the
+edge, a box ending within 3% of the bottom is still read as cut off, until
+a box measured on the canon (untruncated) ends above that band. A box that
+measures nothing (too squat, as behind a lectern, or cut by the top) keeps
+that reading wherever it ends, so a speaker never seen whole who steps out
+from behind a lectern with one box just above the edge is not measured as
+a whole body. Full, boxes clear of the bottom (cut by the top or too
+squat), and, until the shot holds a `V`, boxes cut by the bottom that
+touch a side edge or the frame top keep the fill rule. Every other subject
 keeps the fill rule, unchanged.
 
 A shot the preset's zoom ceiling keeps from its size is drawn at the
@@ -203,6 +240,15 @@ query, notices included.
   headstock above the head move the crown; a seated drummer or a lectern
   makes boxes look truncated. A head source (an OWLv2 head query, SAM masks
   or pose; design §4.5) replaces it later without changing this decision.
+- The no-head fallback for a person cut off by the bottom of the picture is
+  now bounded. On a speaker framed from the knees up (a box 0.35 of the
+  frame high) Close is drawn at the 4x ceiling and marked limited, and
+  Medium close and Medium are 0.285 and 0.38 high with the crown 6% and 8%
+  down, where the fill rule framed the whole visible body at every size
+  (0.38, 0.45 and 0.58 high, crown 8%, 22% and 40% down). Band members whose
+  boxes run off the bottom get tighter shots, more of them limited, which
+  the band clip has yet to confirm; this supersedes design §4.5 item 3 for
+  such boxes.
 - The parser is a heuristic. Known misreadings follow the table as written,
   each now with a notice that points at `literal = true`, the escape hatch:
   a leading "ms" ("Ms Smith close-up" asks for Medium and Close of "Smith"),
@@ -253,3 +299,37 @@ query, notices included.
    as the thing to look for.
 8. A subject found by several queries getting the shots of all of them,
    each named after its query.
+9. The assumed head for a person cut off by the bottom of the picture, and
+   its inferred constants: a shoulder width of 1.875 head heights (which
+   ties the 1.6 squat threshold to crown to waist), a floor of 1.6 and a cap
+   of 3.0 visible head heights (the Close and Medium cut lines), and the
+   3% release band at the bottom edge. Also open: whether such shots get
+   an approximate mark (none today; a Close drawn at the ceiling is already
+   marked limited) and its wording; what Full of such a person should be
+   (the fill rule today, a 1.14x crop with the crown 60% down, or the
+   visible box with Full headroom); and the residual risks. A chest-up box
+   seen in profile gets its Close cut near the neck; a whole body whose
+   feet touch the bottom edge gets its Close cut near the hip; a
+   mid-distance person cut by the bottom (a box about 0.25 high) has Close
+   and Medium close both drawn at the ceiling and marked as the same
+   picture; a shot whose very first box ends just above the edge (bottom
+   0.97 to 0.99) still measures a whole body, and so can an alias shot
+   made again after its label went stale (shot labels drop an alias's
+   shots after missed passes, and the new shot starts with an empty head
+   memory and no stored `V`); after a box at the edge, a whole body whose
+   feet stay within the 3% band is still read as crown to waist and its
+   Full falls to the fill rule; and a head raised while the person was cut
+   stays raised until a box measured on the canon ends above 0.97.
+10. The shot-label rule for aliases and its inferred constants: an alias
+    frames shots once 2 detection passes that observed the subject have
+    seen it (`alias_confirm_passes`), and stops after 8 such passes in a
+    row without it (`alias_stale_passes`). Also open: that pinned and
+    on-air subjects follow the evidence like any other rather than being
+    exempt (the engine only keeps the shots an on-air subject already
+    holds); that confirmation counts sightings within the stale window
+    rather than in consecutive passes, so two sightings 7 missed passes
+    apart confirm; that the primary query chosen at admission is outside
+    the rule and always frames, and whether a stale primary should yield
+    to a confirmed alias; and that a protected subject keeps every shot it
+    holds, not only the shots on program and preview, until it leaves the
+    air.

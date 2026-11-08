@@ -199,6 +199,26 @@ fn typos_are_errors_not_silently_ignored() {
     }
 }
 
+#[test]
+fn the_tracker_contrast_limit_is_set_and_checked_from_the_table() {
+    let with = |g: &str| {
+        StudioConfig::parse(
+            &format!("{MINIMAL}\n[tracker]\nmax_contrast_gain = {g}\n"),
+            false,
+        )
+        .unwrap()
+    };
+    let c = with("3.0");
+    assert_eq!(c.tracker.max_contrast_gain, 3.0);
+    assert_eq!(
+        c.tracker.update_score,
+        TemplateTrackerConfig::default().update_score
+    );
+    c.validate().unwrap();
+    let err = with("0.5").validate().unwrap_err().to_string();
+    assert!(err.contains("max_contrast_gain"), "{err}");
+}
+
 /// A named way to break a valid config.
 type Breakage = (&'static str, Box<dyn Fn(&mut StudioConfig)>);
 

@@ -2,12 +2,17 @@
 //!
 //! Scenes are 640x360 RGBA frames with smooth value-noise textured squares on
 //! a flat or noisy background; the texture is attached to the square, so it
-//! moves and scales with it.
+//! moves and scales with it. The contrast check has its own tests in
+//! `contrast`, on 1280x720 frames of a lit wall with a faint shadow and
+//! textured performers built by `stage`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
+
+mod contrast;
+mod stage;
 
 const W: u32 = 640;
 const H: u32 = 360;
@@ -217,6 +222,10 @@ fn reports_low_confidence_when_the_target_disappears_and_recovers() {
                 dist(o.bbox.center(), s.center()) < 0.01,
                 "box must not jump"
             );
+            assert!(
+                !o.held && o.held_at.is_none(),
+                "occluded frame {seq}: held back by its score"
+            );
         }
         let back = tracker.update(&render(10, background, &[s]))[0];
         assert!(
@@ -278,6 +287,11 @@ fn ambiguous_peaks_give_low_confidence_instead_of_a_jump() {
         dist(o.bbox.center(), s.center()) < 0.01,
         "box must not jump"
     );
+    // Not flagged as held back: the contrast check does not refuse these
+    // twins, and a narrow occluder in front of a subject makes ambiguous
+    // matches too, which the store must not restart on.
+    assert!(!o.held);
+    assert_eq!(o.held_at, None);
 
     // Control: a single displaced copy is unambiguous and is followed.
     let mut tracker = TemplateTracker::new(config).unwrap();

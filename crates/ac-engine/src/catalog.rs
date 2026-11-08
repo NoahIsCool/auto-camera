@@ -7,8 +7,9 @@
 //! * one wide shot per source, then
 //! * for every subject of that source (ascending id) that is visible or on
 //!   air, one shot per [`ShotPlan`] the engine core gives it: the presets of
-//!   every query the subject answers (its primary query first, then its
-//!   aliases, de-duplicated by preset id), and for an on-air subject also
+//!   every query whose shots the subject should have (its primary query
+//!   first, then the aliases whose labels frame shots, de-duplicated by
+//!   preset id; see `ac_subjects::labels`), and for an on-air subject also
 //!   those of the shots it already has (kept until it leaves the air).
 //!
 //! Shot ids are derived from what they frame, `"<source>/wide"` and
@@ -16,7 +17,9 @@
 //! subject, and an entry that survives a sync keeps its framing state. A
 //! subject id is never reused within a source, so an id never silently
 //! changes meaning. A subject shot is named after the query whose preset
-//! made it: "Speaker 1 Close".
+//! made it, "Speaker 1 Close", and remembers that query's id
+//! ([`ShotEntry::query`]) so that the engine core can keep the name of a
+//! shot on air (by id: two queries may share a display name).
 //!
 //! Each subject shot owns a [`ShotFramer`] and has a [`Basis`], that of the
 //! query its plan came from (the engine core keeps the basis of an on-air
@@ -24,11 +27,15 @@
 //! shot is measured). Per tick, [`Catalog::step`] asks the framer to aim at
 //! the subject's box ([`ShotFramer::aim`]) while the subject is tracking,
 //! and feeds it nothing while it is lost (the framer then holds). The box
-//! is framed as a whole person, cut at body lines with the shot's
-//! remembered head height, only when the shot's basis is a person and the
-//! detector marked the box a whole person ([`Basis::framing_extent`]);
-//! otherwise it keeps the fill rule. A new shot starts framed on its subject
-//! the same way ([`compose_subject`]). Each entry reports whether its shot
+//! is framed as a whole person, cut at body lines, only when the shot's
+//! basis is a person and the detector marked the box a whole person
+//! ([`Basis::framing_extent`]); otherwise it keeps the fill rule. An
+//! untruncated whole person's box is measured on its own proportions unless
+//! the shot reads the person as cut by the bottom of the picture; a
+//! truncated one, or one read as cut, is sized by the shot's remembered
+//! head, or, when it is cut by the bottom or read as cut by it, by an
+//! assumed head ([`ac_framing::person`]), before the fill rule. A new shot starts framed on its subject the same way
+//! ([`compose_subject`]). Each entry reports whether its shot
 //! is held back by its preset's zoom ceiling ([`ShotEntry::limited_by_zoom`]),
 //! so the operator sees a close-up that cannot be one labelled as such, and
 //! whether that leaves it looking like another of its subject's shots
@@ -52,7 +59,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use ac_core::{Basis, Extent, Point, Preset, Rect, Shot, ShotId, ShotTarget, SourceId, SubjectId};
+use ac_core::{
+    Basis, Extent, Point, Preset, QueryId, Rect, Shot, ShotId, ShotTarget, SourceId, SubjectId,
+};
 use ac_framing::{Composition, FramerConfig, ShotFramer, SubjectGeometry, compose_subject};
 use serde::{Deserialize, Serialize};
 
@@ -104,6 +113,9 @@ pub struct ShotSpec {
     pub initial: Rect,
     /// What the detector says `initial` covers.
     pub extent: Extent,
+    /// The query whose plan made a subject shot ([`ShotPlan::query`]);
+    /// `None` for wides.
+    pub query: Option<QueryId>,
 }
 
 /// One shot a subject should have: a preset and the query that asks for it.
@@ -115,8 +127,11 @@ pub struct ShotPlan {
     /// detector marked a whole person is cut at body lines, on
     /// [`Basis::Object`] every box keeps the fill rule.
     pub basis: Basis,
-    /// The query's operator-facing name (the query id for the kept shot of
-    /// an on-air orphan).
+    /// The query that asks for the shot, or the subject's primary query for
+    /// a kept shot whose own query is gone.
+    pub query: QueryId,
+    /// The operator-facing name the shot is named after: `query`'s name (the
+    /// query id for the kept shot of an on-air orphan).
     pub query_name: String,
 }
 
@@ -168,6 +183,7 @@ pub fn desired_shots(sources: &[SourceShots<'_>]) -> Vec<ShotSpec> {
             basis: Basis::Object,
             initial: Rect::FULL,
             extent: Extent::Object,
+            query: None,
         });
         for subject in &s.subjects {
             for plan in &subject.plans {
@@ -193,6 +209,7 @@ pub fn desired_shots(sources: &[SourceShots<'_>]) -> Vec<ShotSpec> {
                     basis: plan.basis,
                     initial: subject.bbox,
                     extent: subject.extent,
+                    query: Some(plan.query.clone()),
                 });
             }
         }
@@ -237,6 +254,8 @@ pub struct ShotEntry {
     /// How the shot measures sizes, from the query that asked for it;
     /// [`Basis::Object`] for wides. See the module docs.
     pub basis: Basis,
+    /// The query the shot is named after; `None` for wides.
+    pub query: Option<QueryId>,
     /// Smooth framing state, for subject shots.
     framer: Option<ShotFramer>,
     /// Current crop in normalized source coordinates.
@@ -375,6 +394,7 @@ impl Catalog {
                     e.shot = spec.shot;
                     e.preset = spec.preset;
                     e.basis = spec.basis;
+                    e.query = spec.query;
                     e
                 }
                 None => {
@@ -498,6 +518,7 @@ fn new_entry(
         subject,
         preset: spec.preset,
         basis: spec.basis,
+        query: spec.query,
         framer,
         crop,
         ideal: Some(crop),

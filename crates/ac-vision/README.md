@@ -7,7 +7,7 @@ depend on a model runtime.
 |---|---|
 | `Detector` | Slow, open-vocabulary detection: `detect(&mut self, &VideoFrame, &[PromptQuery]) -> Result<Vec<Detection>, VisionError>` |
 | `Tracker` | Fast per-frame tracking of known subjects: `start`, `update`, `stop`, `tracked` |
-| `TemplateTracker` | Pure-Rust NCC template tracker (grayscale pyramid, constant-velocity prediction, local search, 0.95/1.0/1.05 scale search, ambiguity check) |
+| `TemplateTracker` | Pure-Rust NCC template tracker (grayscale pyramid, constant-velocity prediction, local search, 0.95/1.0/1.05 scale search, ambiguity and contrast checks) |
 | `ScriptedDetector` | Detections from a closure or keyframe table, for tests and demos |
 | `OnnxOwlDetector` | OWLv2 / OWL-ViT on ONNX Runtime, feature `onnx` (off by default) |
 | `owl::*` | Pure OWL pre/post-processing: letterbox, CLIP normalization, sigmoid, box decoding, token packing |
@@ -25,7 +25,47 @@ In short: frames are reduced to a 384 px wide luma pyramid; each subject is
 matched on the level where its box is at most 32 px, over a window of half its
 size around the constant-velocity prediction. It moves only on a strong,
 unambiguous peak; otherwise it coasts and reports low confidence. The
-detector re-anchors subjects; the tracker never retires one by itself.
+detector re-anchors subjects; the tracker never retires or restarts one by
+itself. The subject store restarts a tracker from a detection that disagrees
+with its box, and from the first detection after the contrast check below
+held it back, with no trusted match, since the previous one; each
+observation says in `held` whether the check held its match back (ambiguous
+or not) and in `held_at` where that match lay. The restart is seeded on the
+detection's frame, and the store does not restart from a frame on which the
+match held back overlapped the detection, but no more than the subject's
+box did: something else drew it, partly inside the box the new template
+would be taken from. When detections (with their latency) are further apart than the
+store's `lost_after`, the subject is lost first, and the detection that
+recovers it restarts the tracker. A tracker that coasts for want of score
+(as when something covers its subject), on matches held back by their
+ambiguity alone, or because a brighter occluder that looks partly like the
+subject drew the held-back match onto itself is not restarted for that: its
+template, which never learns a weak match, finds the subject again when the
+occluder leaves, while one taken from the occluded frame would follow the
+occluder off.
+
+NCC ignores contrast, so a faint template (a shadow on a wall) would also
+match a nearby high-contrast performer of the same shape, or a gentle wall
+relief, at 0.6 to 0.76, a box width or more from where it was heading. Each
+match therefore carries its contrast gain, the window's standard deviation
+over the template's on the same pixels. A match that lands farther than
+`surprise_fraction` (default 0.25) of the box's shorter side from the
+prediction, with a gain outside `1 / max_contrast_gain ..= max_contrast_gain`
+(default 2.5), moves the box only if it scores at least `update_score` (0.8);
+a match of at least `accept_score` held back this way coasts and reports at
+most the ambiguous confidence (0.3), while a match below `accept_score`, held
+back by its score, reports that score. A match near the prediction is judged
+on its score alone, so a performer whose contrast a light cue changes is
+followed where they were heading, even under a followspot that lights them and
+not the backdrop and weakens their match to about 0.7. The distance widens
+with the search window after skipped frames or a late start, when the
+prediction is less certain. Under a sustained spot the template keeps its old
+contrast, so a performer who steps farther than that distance sideways in one
+frame is held back from then on, until the store restarts the tracker as
+above. The check does not help when the start box already holds a neighbour's
+pixels (a head in the corner of a shadow's box): the template then follows
+that head. That case waits on measurements from the band clip; a false subject
+such as a shadow is for the operator to hide.
 
 Measured with `cargo run --release -p ac-vision --example track_bench` on a
 4-core 2.1 GHz Xeon VM: 16 subjects on 1080p in 7.4 ms per frame (most of it

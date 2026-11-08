@@ -26,6 +26,7 @@ fn plans(presets: &[Preset], basis: Basis) -> Vec<ShotPlan> {
         .map(|p| ShotPlan {
             preset: p.clone(),
             basis,
+            query: QueryId("person".into()),
             query_name: "Person".into(),
         })
         .collect()
@@ -86,6 +87,7 @@ fn each_shot_is_named_after_and_measured_by_its_own_query() {
     both.push(ShotPlan {
         preset: Preset::new("full", "Full", ShotSize::Full),
         basis: Basis::Object,
+        query: QueryId("guitar".into()),
         query_name: "Guitar".into(),
     });
     let s = desired_shots(&[SourceShots {
@@ -109,6 +111,12 @@ fn each_shot_is_named_after_and_measured_by_its_own_query() {
             ("Guitar 1 Full", Basis::Object)
         ]
     );
+    // Each shot remembers its query by id; the wide has none.
+    let queries: Vec<Option<&str>> = s
+        .iter()
+        .map(|s| s.query.as_ref().map(|q| q.0.as_str()))
+        .collect();
+    assert_eq!(queries, [None, Some("person"), Some("guitar")]);
 }
 
 #[test]

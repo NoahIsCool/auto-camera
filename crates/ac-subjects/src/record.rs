@@ -3,7 +3,16 @@
 //! [`ac_core::Subject`] is the part every other crate needs (id, query, box,
 //! extent, state, pin). [`SubjectRecord`] wraps it with what only identity
 //! management needs: the alias queries, operator flags, observation times and
-//! a small motion model.
+//! a small motion model, plus the label evidence ([`crate::labels`]) that
+//! says which of its queries frame shots and the coasting evidence (below)
+//! that says whether its tracker needs a restart.
+//!
+//! Every query in [`SubjectRecord::queries`] continues the subject; only
+//! those in [`SubjectRecord::shot_queries`] make its shots. The second list
+//! is the first one filtered, in the same order (primary first, then the
+//! aliases sorted), and always holds the primary query: an alias joins it
+//! once it has been seen in enough observing passes and leaves it after
+//! enough passes without it, while it goes on continuing the subject.
 //!
 //! The subject's [`Extent`] is that of the newest detection applied to it
 //! (the one that created it, matched it, aliased onto it or recovered it).
@@ -32,11 +41,110 @@
 //! while the person stood still. Predictions are limited to one second
 //! (`MAX_PREDICTION`) either side of the box's PTS, and lost subjects do not
 //! move at all.
+//!
+//! # Coasting evidence
+//!
+//! A tracker that cannot trust its match coasts: it keeps reporting a box
+//! at a confidence below `track_min_confidence`, which the store ignores
+//! for the box. Usually that passes in a few frames, and an occlusion ends
+//! by itself too: the match sinks with the subject's visible part while
+//! something covers it, and the template, which never learns from a weak
+//! match, finds the subject again once the occluder leaves. One cause does
+//! not end by itself: under a sustained followspot the template keeps its
+//! old contrast, so after one sudden sidestep the tracker's contrast check
+//! holds back every later match. A detection that agrees with the box
+//! (above `reseed_iou`) only re-anchors the box, so it would not end that,
+//! and while detections keep coming within `lost_after` the subject is
+//! never lost either: its tracker coasts for good.
+//!
+//! The tracker therefore flags each observation its contrast check held
+//! back ([`TrackObservation::held`](crate::TrackObservation::held)), with
+//! where the match it held back lay
+//! ([`TrackObservation::held_at`](crate::TrackObservation::held_at)), and
+//! each record keeps a tracker report: what its tracker reported in the
+//! current *window*, from the subject's latest applied detection or tracker
+//! (re)start to now. Only observations the store would act on count (the
+//! subject is tracking, its tracker runs, the box is valid, the confidence
+//! is a number and `pts` is not older than the box), and of those only
+//! confident and held ones. A low observation that is not held is no
+//! evidence: restarted on it, the tracker would take its template from a
+//! frame with the occluder in the box, and when the occluder left the box
+//! would follow it off the subject. A match held back by its ambiguity
+//! alone is not held either, since a narrow occluder in front of the
+//! subject makes those too; one the contrast check also refuses is. The
+//! report is
+//!
+//! * `Silent` until the first counted observation, and again after every
+//!   applied detection, every tracker (re)start (admission, re-seed,
+//!   recovery, reacquire), a failed start and a loss;
+//! * `Coasting` from the first held observation, for as long as no
+//!   confident one follows;
+//! * `Following` from the first confident observation, whatever follows,
+//!   until the window ends.
+//!
+//! A detection applied to a subject whose report is `Coasting` restarts its
+//! tracker from the detection, as a re-seed does, even when it agrees with
+//! the box ([`crate::associate`]), unless the tracker's report on the frame
+//! the detection was computed on says that something other than the subject
+//! drew the match it held back, partly inside the detection. The engine
+//! seeds the restart on that frame, so that frame is what the new template
+//! is taken from. The record keeps the tracker's report on each frame a
+//! later detection can still have been computed on (the `coasting`
+//! submodule), and the latest frame at or before the detection's PTS
+//! decides.
+//!
+//! * The frame is *held*, and its match held back overlaps the detection,
+//!   but no more than the subject's box predicted at its PTS does: what drew
+//!   the match is not the subject, and part of it is in the box the
+//!   template would be taken from. A brighter occluder over part of the
+//!   subject that looks partly like it does that (the contrast check holds
+//!   the match back there as it holds back a performer's under a spot)
+//!   while the subject, and so its detection, stays where its box was.
+//!   Restarted on that frame, the tracker would take its template with the
+//!   occluder in it and follow the occluder off when it left, so the
+//!   detection only re-anchors.
+//! * The frame is *held* and its match lies on the detection, overlapping it
+//!   more than the subject's box does: the performer who sidestepped under
+//!   the spot is where the match is. Restart.
+//! * The frame is *held* and its match does not overlap the detection at
+//!   all: whatever drew it lies outside the box the template would be taken
+//!   from, and the restart is as clean as any. Restart. A 16 px performer
+//!   walking under a spot has its match held back that far off; with the
+//!   restart called off there too, they were off their box about three
+//!   times as long in scans.
+//! * The frame is *trusted* (a confident observation): it shows the subject
+//!   as the template knows it. Restart. A late pass computed just before a
+//!   sidestep under the spot and applied after a window of coasting is such
+//!   a detection. Judged by the newest match held back instead, it left
+//!   the tracker coasting a whole pass longer, and a 30 px performer who
+//!   stepped 16 to 20 px came back as a second subject.
+//! * The frame is *sunk* (low and not held back), *held* without a position
+//!   (older data, a tracker that does not say where; the template tracker
+//!   always does), or no report is kept for it (the tracker restarted after
+//!   it, or it is older than the log keeps): nothing says where the match
+//!   lay, and the held window restarts the tracker as it did before
+//!   positions were reported, since the lockout the held flag stands for
+//!   does not end by itself. Calling the restart off on sunk frames too
+//!   left 16 px performers walking under a spot coasting longer in scans.
+//!
+//! The detection ends the window whether it restarts the tracker or not.
+//! The other two reports never restart: a subject that got no counted
+//! observation in the window (detection-only operation, a failed start,
+//! callers that never feed tracks, a tracker that coasted only for want of
+//! score) or a confident one is handled as if the rule did not exist. A
+//! detection older than the anchor is not applied (it only confirms the
+//! subject), so it neither restarts the tracker nor ends the window.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use ac_core::{Extent, Point, QueryId, Rect, SourceId, Subject, SubjectId, TrackState};
+
+use crate::labels::LabelEvidence;
+
+mod coasting;
+
+pub(crate) use coasting::{FrameLog, FrameReport, TrackerReport};
 
 /// Time constant of the velocity filter, in seconds.
 const VELOCITY_TIME_CONSTANT: f64 = 0.3;
@@ -97,6 +205,21 @@ pub struct SubjectRecord {
     /// First detection batch at which the subject was unmatched while sitting
     /// on top of a matched subject (a likely duplicate), until that ends.
     pub(crate) shadowed_since: Option<Duration>,
+    /// Evidence for each query the subject answers, counted in the detection
+    /// passes that observed it ([`crate::labels`]); it decides
+    /// [`Self::shot_queries`] and nothing else. One entry per answered query
+    /// after any such pass.
+    pub labels: BTreeMap<QueryId, LabelEvidence>,
+    /// What the tracker reported since the latest applied detection or
+    /// tracker (re)start: the coasting evidence. `Silent` whenever the
+    /// tracker is not running, and right after every applied detection and
+    /// every (re)start; `Coasting` from a held observation for as long as no
+    /// confident one follows; `Following` from a confident one until the
+    /// window ends. Low observations that are not held leave it alone.
+    pub(crate) tracker_report: TrackerReport,
+    /// What the tracker made of each frame an applied detection can still
+    /// be on: whether a restart from such a detection's frame is fit.
+    pub(crate) frame_reports: FrameLog,
 }
 
 /// Seconds of `pts` as a float, for signed time arithmetic.
@@ -143,6 +266,9 @@ impl SubjectRecord {
                 velocity: Point::default(),
             },
             shadowed_since: None,
+            labels: BTreeMap::new(),
+            tracker_report: TrackerReport::Silent,
+            frame_reports: FrameLog::default(),
         }
     }
 
@@ -171,6 +297,15 @@ impl SubjectRecord {
     /// in sorted order.
     pub fn queries(&self) -> impl Iterator<Item = &QueryId> {
         std::iter::once(&self.subject.query).chain(&self.aliases)
+    }
+
+    /// The queries whose shots the subject should have, in the order of
+    /// [`Self::queries`]: the primary query always, then each alias whose
+    /// label frames shots ([`crate::labels`]). An alias seen in a single
+    /// stray pass continues the subject but frames nothing.
+    pub fn shot_queries(&self) -> impl Iterator<Item = &QueryId> {
+        let frames = |q: &&QueryId| self.labels.get(*q).is_some_and(|e| e.frames);
+        std::iter::once(&self.subject.query).chain(self.aliases.iter().filter(frames))
     }
 
     /// Smoothed centre velocity, in normalized units per second.
@@ -228,8 +363,9 @@ impl SubjectRecord {
         self.motion.anchor_pts = pts;
     }
 
-    /// Jumps to `bbox` at `pts`: a fresh start for the box, the anchor and
-    /// the motion estimate (tracker restart, recovery or operator fix).
+    /// Jumps to `bbox` at `pts`: a fresh start for the box, the anchor, the
+    /// motion estimate and the coasting evidence (tracker restart, recovery
+    /// or operator fix; every caller restarts the tracker there).
     pub(crate) fn reseed(&mut self, bbox: Rect, pts: Duration) {
         self.subject.bbox = bbox;
         self.motion = Motion {
@@ -238,6 +374,8 @@ impl SubjectRecord {
             anchor_pts: pts,
             velocity: Point::default(),
         };
+        self.tracker_report = TrackerReport::Silent;
+        self.frame_reports.clear();
     }
 }
 

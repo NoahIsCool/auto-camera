@@ -6,16 +6,29 @@
 //!   on-air subject is never retired, evicted or demoted.
 //! * **Catalog sync.** The shot list is re-derived from the stores and the
 //!   queries ([`crate::catalog`]). A subject's shots follow the presets of
-//!   every query it answers: its primary query first, then its aliases,
-//!   de-duplicated by preset id (the first query to name an id frames it).
-//!   Prompts that the parser reads to one detector phrase ("speaker upper
-//!   body" and "speaker close-up" both ask for "a person speaking") find the
-//!   same boxes and become aliases of one subject, so each query's shot
-//!   words still make their shots. A protected subject also keeps every
+//!   every query in its [`SubjectRecord::shot_queries`]: its primary query
+//!   first, then the aliases whose labels frame shots, de-duplicated by
+//!   preset id (the first query to name an id frames it). Prompts that the
+//!   parser reads to one detector phrase ("speaker upper body" and "speaker
+//!   close-up" both ask for "a person speaking") find the same boxes and
+//!   become aliases of one subject, so each query's shot words still make
+//!   their shots, once the store has seen the alias in enough passes
+//!   (`ac_subjects::labels`): an alias from one stray box continues the
+//!   subject but frames nothing. A protected subject also keeps every
 //!   shot it already has, whatever happened to its queries: removed (the
-//!   subject is an orphan) or replaced by an alias (the store promoted it).
-//!   The operator must never see the shot on air vanish and the program go
-//!   black; the extra shots go once the subject leaves program and preview.
+//!   subject is an orphan), replaced by an alias (the store promoted it) or
+//!   no longer framing (its label went stale). The operator must never see
+//!   the shot on air vanish and the program go black; the extra shots go
+//!   once the subject leaves program and preview.
+//! * **Names.** While the subject still answers the query a kept shot is
+//!   named after, the shot keeps that name and its preset, so nothing is
+//!   renamed on air when the label evidence changes (a stale label, or a
+//!   newly framing alias that sorts first). Only when the operator removed
+//!   that query does the shot take the name and preset of the query that
+//!   now asks for its preset id, or the primary query's name. The query is
+//!   found by id ([`ShotEntry::query`]), never by display name, so another
+//!   query that happens to share the removed one's name never keeps the
+//!   removed query's preset on air.
 //! * **Basis.** Each shot is measured on the basis of the query that asked
 //!   for it ([`ac_core::Basis::framing_extent`]): cut at body lines only
 //!   when that query's basis is a person and the detector marked the box a
@@ -61,7 +74,7 @@ impl EngineCore {
     fn plans(&self, r: &SubjectRecord, held: Option<&Vec<&ShotEntry>>) -> Vec<ShotPlan> {
         let mut plans: Vec<ShotPlan> = Vec::new();
         for q in r
-            .queries()
+            .shot_queries()
             .filter_map(|id| self.queries.iter().find(|q| q.id == *id))
         {
             for p in &q.presets {
@@ -69,6 +82,7 @@ impl EngineCore {
                     plans.push(ShotPlan {
                         preset: p.clone(),
                         basis: q.basis(),
+                        query: q.id.clone(),
                         query_name: q.name.clone(),
                     });
                 }
@@ -84,14 +98,24 @@ impl EngineCore {
             .map_or(r.subject.query.0.as_str(), |q| &q.name);
         for e in held {
             let Some(preset) = &e.preset else { continue };
+            // The query the shot is named after, while the subject answers it.
+            let namer = e.query.as_ref().and_then(|id| {
+                self.queries
+                    .iter()
+                    .find(|q| q.id == *id && r.answers(&q.id))
+            });
+            let kept = ShotPlan {
+                preset: preset.clone(),
+                basis: e.basis,
+                query: namer.map_or(&r.subject.query, |q| &q.id).clone(),
+                query_name: namer.map_or(primary, |q| q.name.as_str()).to_string(),
+            };
             match plans.iter_mut().find(|x| x.preset.id == preset.id) {
-                // On air: the shot keeps how it is measured.
+                // On air: the shot keeps its name, preset and basis.
+                Some(plan) if namer.is_some() => *plan = kept,
+                // Its query was removed: it keeps how it is measured.
                 Some(plan) => plan.basis = e.basis,
-                None => plans.push(ShotPlan {
-                    preset: preset.clone(),
-                    basis: e.basis,
-                    query_name: primary.to_string(),
-                }),
+                None => plans.push(kept),
             }
         }
         plans

@@ -2,8 +2,9 @@
 //! people are cut at body lines when the query asks for a person, shots the
 //! zoom ceiling holds back are flagged in the snapshot, a prompt's shot
 //! words reach the catalog while only its parsed phrase reaches the
-//! detector, every query a subject answers makes its shots, and an on-air
-//! shot keeps its basis whatever happens to its query.
+//! detector, every query a subject answers makes its shots, an on-air
+//! shot keeps its basis whatever happens to its query, and a person cut
+//! off by the bottom of the picture is framed down from the crown.
 
 use ac_core::Extent;
 
@@ -154,12 +155,17 @@ fn shot_words_make_the_shots_and_the_detector_sees_the_parsed_phrase() {
 /// person, as people-first OWL does for prompts that share an object or a
 /// described person.
 fn everyone_sees_one_person(c: StudioConfig) -> Rig {
-    let detector = ScriptedDetector::from_fn("one-person", |_, queries| {
+    everyone_sees(standing(), c)
+}
+
+/// A rig whose detector answers every query with `bbox`, a whole person.
+fn everyone_sees(bbox: Rect, c: StudioConfig) -> Rig {
+    let detector = ScriptedDetector::from_fn("one-person", move |_, queries| {
         Ok(queries
             .iter()
             .map(|q| Detection {
                 query: q.id.clone(),
-                bbox: standing(),
+                bbox,
                 score: 0.9,
                 extent: Extent::Person,
             })
@@ -294,4 +300,82 @@ fn a_promoted_alias_reframes_a_shot_only_once_it_is_off_air() {
         "{:?}",
         s.crop
     );
+}
+
+/// The sermon speaker of the Mac run: a whole-person box cut off by the
+/// bottom of the picture at about the knees, crown in the picture.
+fn cut_off_by_the_bottom() -> Rect {
+    Rect::new(0.45, 0.65, 0.10, 0.35)
+}
+
+/// The sermon's queries: one person found by all three.
+fn sermon_queries() -> StudioConfig {
+    let mut c = config(0);
+    c.queries = vec![
+        QuerySettings::new("Speaker", "speaker upper body"),
+        QuerySettings::new("Guitarist", "guitarist close-up"),
+        QuerySettings::new("Drummer", "drummer wide"),
+    ];
+    c
+}
+
+/// The crown's place in `crop`, as a fraction of its height from the top.
+fn crown_headroom(bbox: &Rect, crop: &Rect) -> f64 {
+    (bbox.y - crop.y) / crop.h
+}
+
+#[test]
+fn a_speaker_cut_off_by_the_bottom_gets_a_limited_close_and_distinct_tighter_shots() {
+    // Nothing untruncated is ever seen, so nothing is remembered: the
+    // tight sizes are cut on an assumed head of a third of the box. The
+    // fill rule framed the whole visible body (0.38 / 0.45 / 0.58, crown
+    // 8% / 22% / 40% down).
+    let mut rig = everyone_sees(cut_off_by_the_bottom(), sermon_queries());
+    rig.run_secs(30.0);
+    let snap = rig.snapshot();
+    assert_eq!(snap.subjects.len(), 1, "{:?}", snap.subjects);
+    let bbox = snap.subjects[0].bbox;
+    assert!((bbox.bottom() - 1.0).abs() < 0.01, "{bbox:?}");
+    let close = snap.shot(&shot("cam/1/close")).unwrap();
+    assert_eq!(close.name, "Guitarist 1 Close", "the alias's Close");
+    // (shot, limited, crop height, headroom)
+    for (id, limited, h, headroom) in [
+        ("cam/1/close", true, 0.25, 0.03),
+        ("cam/1/medium_close", false, 0.285, 0.06),
+        ("cam/1/medium", false, 0.38, 0.08),
+    ] {
+        let s = snap.shot(&shot(id)).unwrap();
+        assert_eq!(s.limited_by_zoom, limited, "{id}");
+        assert!((s.crop.h - h).abs() < 0.01, "{id}: {:?}", s.crop);
+        let crown = crown_headroom(&bbox, &s.crop);
+        assert!((crown - headroom).abs() < 0.01, "{id}: crown at {crown}");
+        assert_eq!(s.same_picture_as, None, "{id}");
+    }
+    // Full keeps the fill rule.
+    let full = snap.shot(&shot("cam/1/full")).unwrap();
+    assert!((full.crop.h - 0.35 / 0.4).abs() < 0.01, "{:?}", full.crop);
+    assert!(!full.limited_by_zoom);
+}
+
+#[test]
+fn a_mid_distance_speaker_cut_off_by_the_bottom_has_one_tight_picture() {
+    // A box 0.25 high: Close and Medium close both need more than the 4x
+    // ceiling, so both are drawn at it, and the Medium close says it is
+    // the Close's picture. The fill rule gave two reachable, looser shots.
+    let mut c = sermon_queries();
+    c.queries.truncate(2);
+    let mut rig = everyone_sees(Rect::new(0.45, 0.75, 0.07, 0.25), c);
+    rig.run_secs(30.0);
+    let snap = rig.snapshot();
+    assert_eq!(snap.subjects.len(), 1, "{:?}", snap.subjects);
+    let close = snap.shot(&shot("cam/1/close")).unwrap();
+    let chest = snap.shot(&shot("cam/1/medium_close")).unwrap();
+    let medium = snap.shot(&shot("cam/1/medium")).unwrap();
+    assert!(close.limited_by_zoom && chest.limited_by_zoom);
+    assert!((close.crop.w - 0.25).abs() < 0.01, "{:?}", close.crop);
+    assert!((chest.crop.w - 0.25).abs() < 0.01, "{:?}", chest.crop);
+    assert_eq!(close.same_picture_as, None);
+    assert_eq!(chest.same_picture_as, Some(shot("cam/1/close")));
+    assert!(!medium.limited_by_zoom, "{:?}", medium.crop);
+    assert_eq!(medium.same_picture_as, None);
 }
