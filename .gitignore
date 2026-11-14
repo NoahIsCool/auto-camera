@@ -3,3 +3,5 @@
 /data
 *.mp4
 *.mkv
+# The operator's own studio (cameras, paths): made per machine from an example.
+/config/show.toml

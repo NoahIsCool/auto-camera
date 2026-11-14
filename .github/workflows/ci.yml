@@ -220,7 +220,7 @@ jobs:
         timeout-minutes: 5
         run: |
           status=0
-          target/release/auto-camera --headless --seconds 3 --record "$RUNNER_TEMP/demo.mp4" > "$RUNNER_TEMP/summary.json" || status=$?
+          target/release/auto-camera --demo --headless --seconds 3 --record "$RUNNER_TEMP/demo.mp4" > "$RUNNER_TEMP/summary.json" || status=$?
           python3 -B -c '
           import json, sys
           summary = json.load(open(sys.argv[1]))

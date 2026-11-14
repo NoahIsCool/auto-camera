@@ -29,9 +29,8 @@ const SAVE_HOVER: &str = "Write the queries, director and transition to the show
 /// Why a window opened without a target cannot save.
 const NO_TARGET: &str = "this window has no show file to save to";
 
-/// The Show section: the Save show button, and the command it sends.
+/// The header's Save show button, and the command it sends.
 pub fn button(ui: &mut Ui) -> Option<EngineCommand> {
-    ui.heading("Show");
     let pressed = ui.button(SAVE_SHOW).on_hover_text(SAVE_HOVER).clicked();
     pressed.then_some(EngineCommand::ExportShow)
 }

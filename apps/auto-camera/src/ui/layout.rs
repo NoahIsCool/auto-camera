@@ -13,9 +13,9 @@
 use eframe::egui::{Pos2, Rect, Vec2, vec2};
 
 /// Gap between tiles, in points.
-pub const GAP: f32 = 6.0;
+pub const GAP: f32 = 8.0;
 /// Height of a tile's caption strip.
-pub const CAPTION: f32 = 36.0;
+pub const CAPTION: f32 = 28.0;
 /// Narrowest tile before the multiview scrolls instead.
 pub const MIN_TILE_WIDTH: f32 = 120.0;
 /// Aspect ratio used when the given one is unusable.
@@ -178,7 +178,8 @@ mod tests {
         let area = vec2(500.0, 200.0);
         let g = grid(40, area, WIDE);
         assert!(g.picture.x >= MIN_TILE_WIDTH);
-        assert_eq!((g.columns, g.rows), (4, 10));
+        let fit = ((500.0 + GAP) / (MIN_TILE_WIDTH + GAP)).floor() as usize;
+        assert_eq!((g.columns, g.rows), (fit, 40usize.div_ceil(fit)));
         assert!(g.size().x <= area.x + 1e-3);
         assert!(g.size().y > area.y, "scrolls vertically");
     }

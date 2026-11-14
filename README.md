@@ -13,6 +13,30 @@ Design decisions live in [`docs/adr/`](docs/adr/); the runtime architecture
 (threads, mailboxes, clocks, ownership) is
 [ADR 0002](docs/adr/0002-pipeline-architecture.md).
 
+## Quick start
+
+On a Mac set up with `scripts/install-mac.sh`, from the repository root:
+
+```sh
+# 1. Make your studio once: a video file, or your cameras.
+cp config/file-source.example.toml config/show.toml   # then set `path` to your video
+# cp config/capture.example.toml config/show.toml     # cameras: see "Cameras and capture devices"
+
+# 2. Check it, then run it.
+cargo run --release -p auto-camera --features onnx,coreaudio -- --check
+cargo run --release -p auto-camera --features onnx,coreaudio
+```
+
+With no `--config`, the app opens `config/show.toml` (not in git: each
+machine has its own). If it is missing, the app says how to make one and
+stops; it never falls back to the demo. The first run after a build spends
+2 to 3 minutes on the detector's CoreML compile ("preparing detector").
+
+In the window: type prompts such as `a person speaking` or `speaker upper
+body` in the Queries panel; click a tile or press `1` to `9` for preview;
+`Space` cuts and `Enter` (AUTO) transitions it to program, or drag the
+T-bar; Output starts the recording and, with an RTMP URL, the stream.
+
 ## Demo
 
 To install on a show Mac (tools, models, release build and the first CoreML
@@ -22,17 +46,27 @@ Requires Rust 1.92 or newer, and `ffmpeg` for file sources and output:
 `AC_FFMPEG` / `AC_FFPROBE` name the executables, else they are looked up on
 `PATH`, and on macOS also in `/opt/homebrew/bin` and `/usr/local/bin` (an
 app started from Finder or the Dock gets a `PATH` without Homebrew). The
-demo studio ([`config/demo.toml`](config/demo.toml)) is one synthetic 720p
+demo studio (`--demo`, [`config/demo.toml`](config/demo.toml)) is one synthetic 720p
 camera with three moving subjects and a ground-truth detector, so it needs
 no camera, model or video file. Its director starts in Suggest mode: it
 proposes shots and the operator takes them.
 
 ```sh
-cargo run -p auto-camera                     # operator window on the demo studio
+cargo run -p auto-camera -- --demo           # operator window on the demo studio
 ```
 
-The window has the preview (green) and program (red) monitors with Cut,
-Auto, the transition selector and a T-bar between them; under them the
+The window is always dark and set in Inter, laid out after broadcast
+switchers (vMix, ATEM Software Control, OBS) and sized for an operator
+sitting back from the screen. A header bar carries Save show and the tally
+lamps: the director's mode, ON AIR
+(red while the stream is connected, amber while it connects, reconnects,
+stalls or is down) and REC, each with the time the output has run, and
+the studio clock; if the engine stops, a red banner says nothing is going
+out. Below it are the preview (green) and program (red) monitors, each
+framed in its tally colour with the shot name laid over the picture, with
+the transition (Cut, Mix,
+Dip and its rate), CUT and AUTO (lit red while a transition runs) and a
+T-bar between them; under them the
 multiview of every shot with tally borders, tracking status and quality.
 On the right: the director (mode Off/Suggest/Auto, profile Talk/Music, the
 current suggestion and why, Accept and Skip, and Release while a shot you
@@ -145,8 +179,8 @@ preview shot's subject is lost; it only warns, and the take goes ahead.
 ## Headless mode
 
 ```sh
-cargo run -p auto-camera -- --headless --seconds 5 --record /tmp/demo.mp4
-auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
+cargo run -p auto-camera -- --demo --headless --seconds 5 --record /tmp/demo.mp4
+auto-camera [--config PATH | --demo] --headless [--seconds N] [--record PATH] [--trace PATH]
 ```
 
 A headless run starts the engine without a window, waits for the first
@@ -201,7 +235,7 @@ framing offline with `ac-eval` (spec V9: containment, framing error, jerk,
 latency):
 
 ```sh
-cargo run -p auto-camera -- --headless --seconds 2 --trace /tmp/demo.jsonl
+cargo run -p auto-camera -- --demo --headless --seconds 2 --trace /tmp/demo.jsonl
 ```
 
 Each line has the tick number and its PTS (`tick`, `pts_ns`), whether it
@@ -295,7 +329,7 @@ minimized window: that takes `LSAppNapIsDisabled` in an app bundle's
 
 ```sh
 cargo run -p auto-camera -- --check --config config/sam3-sidecar.example.toml
-auto-camera [--config PATH] --check
+auto-camera [--config PATH | --demo] --check
 ```
 
 `--check` finds what would stop a studio before a show, without starting

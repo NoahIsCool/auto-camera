@@ -2,9 +2,9 @@
 # ground-truth "synthetic" detector, so it runs anywhere without a camera,
 # a model or a video file.
 #
-#   cargo run -p auto-camera                         # operator window
-#   cargo run -p auto-camera -- --headless --seconds 5 --record /tmp/demo.mp4
-#   cargo run -p auto-camera -- --check                # is it ready? (no start)
+#   cargo run -p auto-camera -- --demo               # operator window
+#   cargo run -p auto-camera -- --demo --headless --seconds 5 --record /tmp/demo.mp4
+#   cargo run -p auto-camera -- --demo --check         # is it ready? (no start)
 #
 # Relative paths in this file are resolved against this file's directory.
 

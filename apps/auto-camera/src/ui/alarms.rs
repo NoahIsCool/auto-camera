@@ -13,8 +13,8 @@
 //!
 //! Each alarm is a row above the status line, oldest first: the time it
 //! was raised (master-clock media time, as `m:ss`) and what is wrong, in
-//! red with an Acknowledge button while nobody has acknowledged it, dimmed
-//! once someone has. Acknowledging marks it as seen without hiding it: it
+//! red on a dark red band with an Acknowledge button while nobody has
+//! acknowledged it, dimmed on a neutral band once someone has. Acknowledging marks it as seen without hiding it: it
 //! stays listed until its cause clears, and a cause that comes back raises
 //! a new alarm. The alarms are the window's own: acknowledging tells the
 //! engine nothing.
@@ -29,7 +29,11 @@ use eframe::egui::{self, Color32, RichText, Ui};
 use super::text::clock;
 
 /// Red, for an alarm nobody has acknowledged yet.
-const ALARM_RED: Color32 = Color32::from_rgb(235, 60, 50);
+const ALARM_RED: Color32 = super::theme::RED_TEXT;
+
+/// The background of an alarm not yet acknowledged: a dark red band, so
+/// an alarm stands out from the status line under it.
+const ALARM_FILL: Color32 = Color32::from_rgb(64, 20, 22);
 
 /// Hover text of the Acknowledge button.
 const ACKNOWLEDGE_HOVER: &str = "Mark as seen: it stays listed, dimmed, until its cause clears";
@@ -54,22 +58,38 @@ pub fn acknowledge_label(alarm: &Alarm) -> String {
 pub fn show(ui: &mut Ui, alarms: &Alarms) -> Vec<AlarmCause> {
     let mut acknowledged = Vec::new();
     for alarm in alarms.active() {
-        ui.horizontal_wrapped(|ui| {
-            let line = alarm_line(alarm);
-            if alarm.acknowledged {
-                ui.label(RichText::new(line).weak());
-                return;
-            }
-            ui.label(RichText::new(line).strong().color(ALARM_RED));
-            let button = ui
-                .small_button("Acknowledge")
-                .on_hover_text(ACKNOWLEDGE_HOVER);
-            button.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, acknowledge_label(alarm))
+        let fill = if alarm.acknowledged {
+            super::theme::SURFACE
+        } else {
+            ALARM_FILL
+        };
+        let frame = egui::Frame::new()
+            .fill(fill)
+            .corner_radius(egui::CornerRadius::same(super::theme::RADIUS))
+            .inner_margin(egui::Margin::symmetric(8, 3));
+        frame.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                let line = alarm_line(alarm);
+                if alarm.acknowledged {
+                    ui.label(RichText::new(line).weak());
+                    return;
+                }
+                ui.label(RichText::new(line).strong().color(ALARM_RED));
+                let button = ui
+                    .small_button("Acknowledge")
+                    .on_hover_text(ACKNOWLEDGE_HOVER);
+                button.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        acknowledge_label(alarm),
+                    )
+                });
+                if button.clicked() {
+                    acknowledged.push(alarm.cause.clone());
+                }
             });
-            if button.clicked() {
-                acknowledged.push(alarm.cause.clone());
-            }
         });
     }
     acknowledged

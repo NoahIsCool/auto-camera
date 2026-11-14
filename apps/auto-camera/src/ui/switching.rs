@@ -2,7 +2,15 @@
 //!
 //! The layout follows a hardware switcher: preview on the left with a green
 //! frame, program on the right with a red one, and between them Cut, Auto,
-//! the transition selector and a vertical T-bar.
+//! the transition selector and a vertical T-bar ([`super::controls`]). As
+//! on a broadcast multiviewer the picture comes first: each monitor's
+//! caption is laid over the top of its picture on a dark band, marked with
+//! a bar of its tally colour (amber on preview while it warns of a lost
+//! subject), and program draws a running transition's progress along its
+//! bottom edge. A monitor with no shot on its bus says
+//! so over the picture ([`empty_text`]), so black on air never looks like a
+//! frozen window. The block is centred when the monitors are limited by
+//! height.
 //!
 //! The T-bar behaves like a physical lever: it stays where the operator
 //! leaves it. Moving it away from its rest end starts a manual transition;
@@ -39,33 +47,41 @@ use ac_director::{DirectorMode, Takeover};
 use ac_engine::{EngineCommand, EngineSnapshot};
 use ac_switcher::{Transition, TransitionKind};
 use eframe::egui::{
-    self, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, pos2,
-    vec2,
+    self, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
 use super::caption::{caption_color, preview_notes};
+use super::controls;
 use super::layout::{centred, fit};
-use super::multiview::{PREVIEW_GREEN, PROGRAM_RED};
 use super::text::{percent, shot_name};
 use super::textures::Textures;
+use super::theme::{self, PREVIEW_GREEN, PROGRAM_RED};
 
-/// Width of the control column between the monitors.
-const CONTROLS_WIDTH: f32 = 130.0;
 /// Shortest and longest selectable transition, in seconds.
-const DURATION_RANGE: std::ops::RangeInclusive<f64> = 0.1..=5.0;
+pub const DURATION_RANGE: std::ops::RangeInclusive<f64> = 0.1..=5.0;
 /// T-bar moves smaller than this are not sent.
 const TBAR_STEP: f64 = 1e-3;
+/// Height of the caption band laid over a monitor's picture, in points.
+const BAND_HEIGHT: f32 = 28.0;
+/// Gap between a monitor and the control column.
+const MONITOR_GAP: f32 = 14.0;
+/// Width of a monitor's tally border.
+const BORDER: f32 = 2.0;
 /// Font size of the AUTO badge, in points.
 const BADGE_FONT: f32 = 13.0;
 /// Padding around the AUTO badge's text, and its gap to the picture's
 /// edges, in points.
 const BADGE_PAD: f32 = 5.0;
 
-/// Transition kinds with their button labels.
-pub const KINDS: [(TransitionKind, &str); 3] = [
-    (TransitionKind::Cut, "Cut"),
-    (TransitionKind::Mix, "Mix"),
-    (TransitionKind::Dip, "Dip to black"),
+/// Transition kinds with their button labels and hover texts.
+pub const KINDS: [(TransitionKind, &str, &str); 3] = [
+    (TransitionKind::Cut, "Cut", "Cut: no transition"),
+    (TransitionKind::Mix, "Mix", "Mix: dissolve to the next shot"),
+    (
+        TransitionKind::Dip,
+        "Dip",
+        "Dip to black, then up on the next shot",
+    ),
 ];
 
 /// Operator-side switcher state; see the module docs.
@@ -134,13 +150,19 @@ pub fn show(
     max_height: f32,
 ) -> Vec<EngineCommand> {
     let mut commands = Vec::new();
-    let width = ((ui.available_width() - CONTROLS_WIDTH - 24.0) / 2.0).max(80.0);
-    let size = fit(aspect, vec2(width, max_height - 24.0));
+    let gaps = 2.0 * MONITOR_GAP;
+    let width = ((ui.available_width() - controls::WIDTH - gaps) / 2.0).max(80.0);
+    let size = fit(aspect, vec2(width, max_height));
+    // Centre the block when the monitors are limited by height.
+    let block = 2.0 * size.x + controls::WIDTH + gaps;
+    let spare = (ui.available_width() - block).max(0.0);
     ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = MONITOR_GAP;
+        ui.add_space(spare / 2.0);
         monitor(ui, snap, textures, Monitor::Preview, size);
         ui.vertical(|ui| {
-            ui.set_width(CONTROLS_WIDTH);
-            controls(ui, snap, seen, state, size.y, &mut commands);
+            ui.set_width(controls::WIDTH);
+            controls::show(ui, snap, seen, state, size.y, &mut commands);
         });
         monitor(ui, snap, textures, Monitor::Program, size);
     });
@@ -156,7 +178,45 @@ enum Monitor {
     Program,
 }
 
-/// Draws one monitor with its caption.
+/// The monitor's caption: its bus, the shot and what is about to happen to
+/// it (a transition's progress on program; the shot waiting, a take
+/// waiting for preview to settle and a lost subject on preview).
+fn caption(snap: &EngineSnapshot, which: Monitor) -> String {
+    let (label, shot) = match which {
+        Monitor::Preview => ("PREVIEW", snap.switcher.preview.as_ref()),
+        Monitor::Program => ("PROGRAM", snap.switcher.program.as_ref()),
+    };
+    // An empty bus says so over the picture instead (`empty_text`).
+    let mut caption = match shot {
+        Some(_) => format!("{label}  {}", shot_name(snap, shot)),
+        None => label.to_owned(),
+    };
+    if which == Monitor::Program
+        && let Some((_, opacity)) = &snap.switcher.overlay
+    {
+        caption.push_str(&format!("  ·  transition {}", percent(*opacity)));
+    }
+    if which == Monitor::Preview {
+        if let Some(queued) = queue_caption(snap) {
+            caption.push_str(&format!("  ·  {queued}"));
+        }
+        for note in preview_notes(snap) {
+            caption.push_str(&format!("  ·  {note}"));
+        }
+    }
+    caption
+}
+
+/// What an empty monitor says: no shot on that bus.
+pub fn empty_text(program: bool) -> &'static str {
+    if program { "BLACK" } else { "NOTHING STAGED" }
+}
+
+/// Draws one monitor, picture first as on a broadcast multiviewer: the
+/// picture in a thin tally border, and its caption laid over the top of the
+/// picture on a dark band with a bar of the tally colour (amber on preview
+/// while it warns of a lost subject). Program shows a running transition's
+/// progress as a red line along its bottom edge.
 fn monitor(
     ui: &mut Ui,
     snap: &EngineSnapshot,
@@ -164,72 +224,82 @@ fn monitor(
     which: Monitor,
     size: Vec2,
 ) {
-    let (label, color, frame, shot) = match which {
+    let (color, frame, shot, name) = match which {
         Monitor::Preview => (
-            "PREVIEW",
             PREVIEW_GREEN,
             snap.preview_monitor.as_ref(),
             snap.switcher.preview.as_ref(),
+            "monitor/preview",
         ),
         Monitor::Program => (
-            "PROGRAM",
             PROGRAM_RED,
             snap.program_monitor.as_ref(),
             snap.switcher.program.as_ref(),
+            "monitor/program",
         ),
     };
-    ui.vertical(|ui| {
-        let mut caption = format!("{label}  {}", shot_name(snap, shot));
-        if which == Monitor::Program
-            && let Some((_, opacity)) = &snap.switcher.overlay
-        {
-            caption.push_str(&format!("  ·  transition {}", percent(*opacity)));
-        }
-        if which == Monitor::Preview
-            && let Some(queued) = queue_caption(snap)
-        {
-            caption.push_str(&format!("  ·  {queued}"));
-        }
-        let mut tone = color;
-        if which == Monitor::Preview {
-            for note in preview_notes(snap) {
-                caption.push_str(&format!("  ·  {note}"));
-            }
-            tone = caption_color(snap, color);
-        }
-        ui.label(RichText::new(caption).strong().color(tone));
-        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-        let painter = ui.painter_at(rect.expand(3.0));
-        painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
-        let name = match which {
-            Monitor::Preview => "monitor/preview",
-            Monitor::Program => "monitor/program",
-        };
-        if let Some((id, px)) = textures.show(ui.ctx(), name, frame) {
-            let inner = centred(rect, fit(px.x / px.y, rect.size()));
-            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            painter.image(id, inner, uv, Color32::WHITE);
-        } else if shot.is_none() {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "black",
-                FontId::proportional(14.0),
-                Color32::GRAY,
-            );
-        }
-        painter.rect_stroke(
-            rect,
-            CornerRadius::ZERO,
-            Stroke::new(3.0, color),
-            StrokeKind::Outside,
+    let warn = match which {
+        Monitor::Preview => caption_color(snap, color) != color,
+        Monitor::Program => false,
+    };
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter_at(rect.expand(BORDER));
+    painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
+    if let Some((id, px)) = textures.show(ui.ctx(), name, frame) {
+        let inner = centred(rect, fit(px.x / px.y, rect.size()));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        painter.image(id, inner, uv, Color32::WHITE);
+    }
+    if shot.is_none() {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            empty_text(which == Monitor::Program),
+            theme::semibold_font(ui, theme::BODY),
+            theme::TEXT_WEAK,
         );
-        if which == Monitor::Program
-            && let Some(text) = auto_badge(snap)
-        {
-            draw_auto_badge(ui, rect, &text, snap);
-        }
+    }
+    // The caption band over the top of the picture.
+    let band = Rect::from_min_size(rect.min, vec2(rect.width(), BAND_HEIGHT));
+    painter.rect_filled(band, CornerRadius::ZERO, theme::SCRIM);
+    let bar = if warn { theme::AMBER } else { color };
+    painter.rect_filled(
+        Rect::from_min_size(band.min, vec2(4.0, band.height())),
+        CornerRadius::ZERO,
+        bar,
+    );
+    let text = theme::semibold(ui, caption(snap, which), theme::BODY).color(if warn {
+        theme::AMBER
+    } else {
+        theme::TEXT_STRONG
     });
+    let label = Rect::from_min_max(pos2(band.left() + 12.0, band.top()), band.right_bottom());
+    // A child that the row's layout does not see, laid over the picture.
+    let mut over = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(label)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    over.add(egui::Label::new(text).truncate());
+    if which == Monitor::Program
+        && let Some((_, opacity)) = &snap.switcher.overlay
+    {
+        let done = rect.width() * (*opacity as f32).clamp(0.0, 1.0);
+        let line = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 4.0), vec2(done, 4.0));
+        painter.rect_filled(line, CornerRadius::ZERO, PROGRAM_RED);
+    }
+    painter.rect_stroke(
+        rect,
+        CornerRadius::ZERO,
+        Stroke::new(BORDER, color),
+        StrokeKind::Outside,
+    );
+    if which == Monitor::Program
+        && let Some(text) = auto_badge(snap)
+    {
+        let below = Rect::from_min_max(pos2(rect.left(), band.bottom()), rect.max);
+        draw_auto_badge(ui, below, &text, snap);
+    }
 }
 
 /// The AUTO badge's text while the director runs in Auto mode: `AUTO`, or
@@ -277,7 +347,7 @@ pub fn auto_badge_hover(snap: &EngineSnapshot) -> String {
 fn draw_auto_badge(ui: &Ui, picture: Rect, text: &str, snap: &EngineSnapshot) {
     let galley = ui.painter().layout_no_wrap(
         text.to_owned(),
-        FontId::proportional(BADGE_FONT),
+        theme::semibold_font(ui, BADGE_FONT),
         Color32::WHITE,
     );
     let badge = Rect::from_min_size(
@@ -307,98 +377,12 @@ pub fn queue_caption(snap: &EngineSnapshot) -> Option<String> {
 
 /// Hover text of a CUT button disabled because the T-bar holds the
 /// transition.
-const TBAR_HOLDS: &str = "The T-bar holds the transition: finish it or pull it back";
+pub const TBAR_HOLDS: &str = "The T-bar holds the transition: finish it or pull it back";
 
 /// Whether CUT can be pressed: something is on preview and the T-bar does
 /// not hold the running transition (see the module docs).
 pub fn cut_enabled(snap: &EngineSnapshot) -> bool {
     snap.switcher.preview.is_some() && !snap.switcher.tbar_held
-}
-
-/// Cut, Auto (both carrying `seen`), the transition selector and the
-/// T-bar.
-fn controls(
-    ui: &mut Ui,
-    snap: &EngineSnapshot,
-    seen: &Option<ShotId>,
-    state: &mut SwitchState,
-    height: f32,
-    commands: &mut Vec<EngineCommand>,
-) {
-    ui.add_space(20.0);
-    // During a transition the preview holds its incoming shot, so both stay
-    // enabled: the switcher queues or cuts short (see the module docs).
-    let ready = snap.switcher.preview.is_some();
-    let big = vec2(CONTROLS_WIDTH, 30.0);
-    let mut cut = ui
-        .add_enabled(
-            cut_enabled(snap),
-            egui::Button::new(RichText::new("CUT").strong()).min_size(big),
-        )
-        .on_hover_text("Space · during a transition, cuts it short");
-    if snap.switcher.tbar_held {
-        cut = cut.on_disabled_hover_text(TBAR_HOLDS);
-    }
-    if cut.clicked() {
-        commands.push(EngineCommand::Cut {
-            preview: seen.clone(),
-        });
-    }
-    if ui
-        .add_enabled(
-            ready,
-            egui::Button::new(RichText::new("AUTO").strong()).min_size(big),
-        )
-        .on_hover_text("Enter · during a transition, queues a take of the next shot")
-        .clicked()
-    {
-        commands.push(EngineCommand::Auto {
-            preview: seen.clone(),
-        });
-    }
-    ui.add_space(6.0);
-    let mut kind = state.transition.kind;
-    egui::ComboBox::from_id_salt("transition-kind")
-        .width(CONTROLS_WIDTH - 8.0)
-        .selected_text(label_of(kind))
-        .show_ui(ui, |ui| {
-            for (k, label) in KINDS {
-                ui.selectable_value(&mut kind, k, label);
-            }
-        });
-    commands.extend(state.set_kind(kind));
-    let mut duration = state.transition.duration;
-    ui.add_enabled(
-        kind != TransitionKind::Cut,
-        egui::DragValue::new(&mut duration)
-            .range(DURATION_RANGE)
-            .speed(0.02)
-            .suffix(" s")
-            .fixed_decimals(1),
-    );
-    commands.extend(state.set_duration(duration));
-    ui.add_space(6.0);
-    ui.label("T-bar");
-    let mut tbar = state.tbar;
-    let previous = ui.spacing().slider_width;
-    ui.spacing_mut().slider_width = (height - 150.0).max(60.0);
-    let response = ui.add(
-        egui::Slider::new(&mut tbar, 0.0..=1.0)
-            .vertical()
-            .show_value(false),
-    );
-    ui.spacing_mut().slider_width = previous;
-    if response.changed() {
-        commands.extend(state.move_tbar(tbar));
-    }
-}
-
-/// The label of a transition kind.
-fn label_of(kind: TransitionKind) -> &'static str {
-    KINDS
-        .iter()
-        .find(|(k, _)| *k == kind)
-        .map_or("?", |(_, l)| l)
 }
 
 #[cfg(test)]
@@ -458,10 +442,13 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_has_a_label() {
-        for (k, l) in KINDS {
-            assert_eq!(label_of(k), l);
+    fn every_kind_has_a_label_and_a_hover() {
+        for (i, (k, l, hover)) in KINDS.iter().enumerate() {
+            assert!(!l.is_empty() && !hover.is_empty());
+            assert!(KINDS[..i].iter().all(|(other, ..)| other != k), "unique");
         }
+        assert_eq!(empty_text(true), "BLACK");
+        assert_eq!(empty_text(false), "NOTHING STAGED");
     }
 
     #[test]
