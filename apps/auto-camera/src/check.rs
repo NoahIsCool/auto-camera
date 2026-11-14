@@ -23,10 +23,16 @@ use ac_engine::{Readiness, SystemInspector};
 /// Exit status when the check found a problem.
 pub const NOT_READY: u8 = 2;
 
-/// Printed about the default config path, which is relative to the
-/// working directory: by `--check` when nothing is there, by a run when it
-/// does not load.
-pub const DEFAULT_CONFIG_HINT: &str = "(run from the repository root, or pass --config PATH)";
+/// Printed about the default config path (`config/show.toml`, relative to
+/// the working directory), by `--check` and by a run when nothing is
+/// there or it does not load: how to make the operator's studio from an
+/// example, since a bare launch no longer falls back to the demo.
+pub const DEFAULT_CONFIG_HINT: &str = concat!(
+    "  Make your studio from an example, edit it, then start again:\n",
+    "    cp config/file-source.example.toml config/show.toml   # a video file\n",
+    "    cp config/capture.example.toml config/show.toml       # cameras\n",
+    "  Run from the repository root, or pass --config PATH; --demo opens the demo.",
+);
 
 /// Width of a finding's mark column, `ok`, `warning` or `problem`.
 const MARK: usize = 8;
@@ -65,7 +71,7 @@ fn report(config: &Path, found: &Readiness, hint: bool) -> String {
         }
     }
     if hint {
-        let _ = writeln!(out, "  {DEFAULT_CONFIG_HINT}");
+        let _ = writeln!(out, "{DEFAULT_CONFIG_HINT}");
     }
     let problems = found.problems().count();
     match problems {

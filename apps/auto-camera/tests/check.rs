@@ -291,15 +291,20 @@ fn a_config_with_three_problems_lists_all_three() {
 #[test]
 fn the_default_path_gets_a_hint_only_when_nothing_is_there() {
     let studio = Studio::new("hint");
-    let hint = "(run from the repository root, or pass --config PATH)";
+    let hint = "cp config/file-source.example.toml config/show.toml";
     let (code, report) = stdout_of(studio.run(&["--check"]));
     assert_eq!(code, Some(2), "{report}");
     assert!(
-        problems(&report)[0].starts_with("cannot read config/demo.toml"),
+        problems(&report)[0].starts_with("cannot read config/show.toml"),
         "{report}"
     );
     assert!(report.contains(hint), "{report}");
-    studio.example("demo.toml");
+    // The operator's studio, made from an example as the hint says.
+    fs::copy(
+        Path::new(EXAMPLES).join("demo.toml"),
+        studio.path("config/show.toml"),
+    )
+    .unwrap();
     let missing = studio.path("bin/no-such-ffmpeg");
     let (code, report) = stdout_of(studio.run_with(&["--check"], &missing));
     assert_eq!(code, Some(2), "{report}");
@@ -310,6 +315,31 @@ fn the_default_path_gets_a_hint_only_when_nothing_is_there() {
     assert!(
         !report.contains(hint),
         "the default config loaded, so the path is not the problem: {report}"
+    );
+}
+
+#[test]
+fn a_bare_launch_without_a_studio_says_how_to_make_one() {
+    let studio = Studio::new("bare");
+    let out = studio.run(&[]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("no studio config at config/show.toml"),
+        "{err}"
+    );
+    assert!(err.contains("--demo opens the demo"), "{err}");
+}
+
+#[test]
+fn demo_checks_the_demo_studio() {
+    let studio = Studio::new("demo-flag");
+    studio.example("demo.toml");
+    let (code, report) = stdout_of(studio.run(&["--check", "--demo"]));
+    assert_eq!(code, Some(0), "{report}");
+    assert!(
+        report.starts_with("Checking config/demo.toml\n"),
+        "{report}"
     );
 }
 

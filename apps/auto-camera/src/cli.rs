@@ -1,7 +1,7 @@
 //! Command-line interface.
 //!
 //! ```text
-//! auto-camera [--config PATH] [--trace PATH] [--save-show PATH]  # operator window
+//! auto-camera [--config PATH | --demo] [--trace PATH] [--save-show PATH]  # operator window
 //! auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
 //! auto-camera [--config PATH] --check                           # readiness check
 //! auto-camera --list-audio-devices                              # audio devices' UIDs
@@ -21,16 +21,24 @@
 //! ([`crate::detections`]). `--save-show` is the window's alone: the show
 //! file its Save show writes ([`crate::show`]); a headless run changes
 //! nothing a show holds, so it has nothing to save and refuses the flag.
-//! `--config` opens a studio file or a saved show. The config path
-//! defaults to the demo studio relative to the working directory, which is
-//! the repository root under `cargo run`.
+//! `--config` opens a studio file or a saved show. Without it the app opens
+//! the operator's own studio, [`DEFAULT_CONFIG`], relative to the working
+//! directory (the repository root under `cargo run`): a bare launch runs
+//! the real show, never a test pattern. That file is made from an example
+//! and is not in git (each machine has its own cameras and paths). The
+//! synthetic demo studio needs `--demo`, which stands for
+//! `--config` [`DEMO_CONFIG`].
 
 use std::path::PathBuf;
 
 use clap::Parser;
 
-/// Default studio configuration.
-pub const DEFAULT_CONFIG: &str = "config/demo.toml";
+/// The studio opened when neither `--config` nor `--demo` is given: the
+/// operator's own, made from an example config.
+pub const DEFAULT_CONFIG: &str = "config/show.toml";
+
+/// The synthetic demo studio that `--demo` opens.
+pub const DEMO_CONFIG: &str = "config/demo.toml";
 
 /// Longest headless run accepted: one day.
 const MAX_SECONDS: f64 = 86_400.0;
@@ -45,8 +53,13 @@ const MAX_SECONDS: f64 = 86_400.0;
 pub struct Cli {
     /// Studio configuration, or a saved show: TOML, or JSON when the file
     /// ends in `.json`.
-    #[arg(long, value_name = "PATH", default_value = DEFAULT_CONFIG)]
-    pub config: PathBuf,
+    /// [default: config/show.toml]
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+    /// Open the synthetic demo studio (config/demo.toml): one test-pattern
+    /// camera with three moving subjects, no camera, model or video needed.
+    #[arg(long, conflicts_with = "config")]
+    pub demo: bool,
     /// Run without a window for `--seconds` and print a JSON summary.
     #[arg(long)]
     pub headless: bool,
@@ -99,6 +112,7 @@ pub struct Cli {
         long,
         conflicts_with_all = [
             "config",
+            "demo",
             "headless",
             "seconds",
             "record",
@@ -115,6 +129,23 @@ pub struct Cli {
     /// ~/.local/state/auto-camera on Linux].
     #[arg(long, value_name = "PATH")]
     pub log_dir: Option<PathBuf>,
+}
+
+impl Cli {
+    /// The studio file to open: `--config`, the demo for `--demo`, else
+    /// [`DEFAULT_CONFIG`].
+    pub fn config_path(&self) -> PathBuf {
+        match (&self.config, self.demo) {
+            (Some(path), _) => path.clone(),
+            (None, true) => PathBuf::from(DEMO_CONFIG),
+            (None, false) => PathBuf::from(DEFAULT_CONFIG),
+        }
+    }
+
+    /// Whether the path was not given: neither `--config` nor `--demo`.
+    pub fn default_config(&self) -> bool {
+        self.config.is_none() && !self.demo
+    }
 }
 
 /// Parses a positive, finite number of seconds up to one day.
@@ -140,9 +171,15 @@ mod tests {
     }
 
     #[test]
-    fn defaults_open_the_demo_in_a_window() {
+    fn defaults_open_the_operators_studio_in_a_window() {
         let cli = parse(&[]).unwrap();
-        assert_eq!(cli.config, PathBuf::from(DEFAULT_CONFIG));
+        assert_eq!(cli.config, None);
+        assert_eq!(cli.config_path(), PathBuf::from(DEFAULT_CONFIG));
+        assert!(cli.default_config());
+        assert_ne!(
+            DEFAULT_CONFIG, DEMO_CONFIG,
+            "a bare launch is never the demo"
+        );
         assert!(!cli.headless);
         assert!(!cli.check);
         assert_eq!(cli.record, None);
@@ -181,7 +218,8 @@ mod tests {
     fn check_runs_alone() {
         let cli = parse(&["--check", "--config", "show.toml"]).unwrap();
         assert!(cli.check && !cli.headless);
-        assert_eq!(cli.config, PathBuf::from("show.toml"));
+        assert_eq!(cli.config_path(), PathBuf::from("show.toml"));
+        assert!(!cli.default_config());
         assert!(parse(&["--check"]).unwrap().check);
         assert!(parse(&["--check", "--headless"]).is_err());
         assert!(parse(&["--check", "--record", "x.mp4"]).is_err());
@@ -264,7 +302,7 @@ mod tests {
             "/tmp/x.mp4",
         ])
         .unwrap();
-        assert_eq!(cli.config, PathBuf::from("studio.json"));
+        assert_eq!(cli.config_path(), PathBuf::from("studio.json"));
         assert!(cli.headless);
         assert_eq!(cli.seconds, 2.5);
         assert_eq!(cli.record, Some(PathBuf::from("/tmp/x.mp4")));
@@ -284,5 +322,17 @@ mod tests {
         }
         assert!(parse(&["--frobnicate"]).is_err());
         assert_eq!(parse_seconds(" 1e1 "), Ok(10.0));
+    }
+
+    #[test]
+    fn demo_opens_the_demo_studio_and_excludes_config() {
+        let cli = parse(&["--demo"]).unwrap();
+        assert_eq!(cli.config_path(), PathBuf::from(DEMO_CONFIG));
+        assert!(!cli.default_config());
+        let headless = parse(&["--demo", "--headless", "--seconds", "3"]).unwrap();
+        assert_eq!(headless.config_path(), PathBuf::from(DEMO_CONFIG));
+        assert!(parse(&["--demo", "--check"]).unwrap().check);
+        assert!(parse(&["--demo", "--config", "show.toml"]).is_err());
+        assert!(parse(&["--demo", "--list-audio-devices"]).is_err());
     }
 }
