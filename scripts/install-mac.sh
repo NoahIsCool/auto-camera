@@ -224,15 +224,14 @@ fi
 # ------------------------------------------------------------------- done
 step "Done"
 cat <<EOF
-    Start the operator window on the demo studio (no camera or model needed):
+    Make your studio once (a video file; set its path first):
+      cp config/file-source.example.toml config/show.toml
+    or from config/capture.example.toml (cameras) or
+    config/sam3-sidecar.example.toml (SAM 3.1). Then check and run it:
+      $APP --check
       $APP
 
-    With OWLv2 on a video file (copy the example, set its path first):
-      $APP --config config/file-source.example.toml
-
-    With cameras:      config/capture.example.toml
-    With SAM 3.1:      config/sam3-sidecar.example.toml
-    Check any config:  $APP --config <file> --check
+    The demo studio (no camera or model needed):  $APP --demo
 
     See docs/install-mac.md for camera permission, the first run and updates.
 EOF

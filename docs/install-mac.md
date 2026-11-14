@@ -54,13 +54,9 @@ before using them.
 
 ## First run
 
-```sh
-target/release/auto-camera                     # demo studio: no camera or model
-```
-
-The demo studio is a synthetic camera with three moving subjects, so it
-shows the window, the switcher and the director without any setup. For real
-sources, copy one of the example configs and edit it:
+The app opens `config/show.toml`, your own studio, which you make once
+from one of the example configs (it is not in git: each machine has its
+own). Without it the app says how to make one and stops.
 
 | Config | For |
 |---|---|
@@ -69,10 +65,14 @@ sources, copy one of the example configs and edit it:
 | [`config/sam3-sidecar.example.toml`](../config/sam3-sidecar.example.toml) | a video file, SAM 3.1 |
 
 ```sh
-cp config/capture.example.toml config/show.toml   # then edit it
-target/release/auto-camera --config config/show.toml --check
-target/release/auto-camera --config config/show.toml
+cp config/file-source.example.toml config/show.toml   # then set `path` to your video
+target/release/auto-camera --check
+target/release/auto-camera
+target/release/auto-camera --demo     # demo studio: no camera or model
 ```
+
+The demo is a synthetic camera with three moving subjects, so it shows the
+window, the switcher and the director without any setup.
 
 `--check` lists every missing file, tool or folder without starting
 anything, and exits 2 when there is a problem. `--list-audio-devices` lists
@@ -101,7 +101,7 @@ grant it in System Settings, Privacy & Security:
 cd ~/repos/auto-camera
 git pull
 scripts/install-mac.sh --skip-warmup     # rebuilds; models are kept
-target/release/auto-camera --config config/show.toml --check
+target/release/auto-camera --check
 ```
 
 Each new build pays part of the CoreML compile again (about 2 minutes, while
