@@ -194,7 +194,7 @@ fn source_line_says_the_detector_is_preparing_and_for_how_long() {
 
 #[test]
 fn output_text_covers_every_state_and_stat() {
-    assert_eq!(output_state(&OutputState::Running), "ON AIR");
+    assert_eq!(output_state(&OutputState::Running), "running");
     assert_eq!(output_state(&OutputState::Idle), "idle");
     assert_eq!(
         output_state(&OutputState::Failed("ffmpeg exited".into())),

@@ -31,7 +31,7 @@
 
 use ac_core::{ParsedPrompt, Preset, ShotSize};
 use ac_engine::{EngineCommand, PromptReader, default_presets, preset_for, read_prompt};
-use eframe::egui::{self, Color32, RichText, Ui};
+use eframe::egui::{self, RichText, Ui};
 
 use super::text::{parse_line, parse_notes};
 
@@ -154,15 +154,27 @@ impl QueryForm {
 
 /// Draws the form and returns the `AddQuery` command when Add was clicked.
 pub fn show(ui: &mut Ui, form: &mut QueryForm, prompts: &PromptReader) -> Option<EngineCommand> {
-    egui::Grid::new("query-form").num_columns(2).show(ui, |ui| {
-        ui.label("Name");
-        ui.text_edit_singleline(&mut form.name);
-        ui.end_row();
-        ui.label("Prompt");
-        ui.text_edit_singleline(&mut form.prompt)
+    let width = (ui.available_width() - super::panels::FIELD_LABEL).max(120.0);
+    egui::Grid::new("query-form")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label(RichText::new("Name").weak());
+            ui.add(
+                egui::TextEdit::singleline(&mut form.name)
+                    .hint_text("Speaker")
+                    .desired_width(width),
+            );
+            ui.end_row();
+            ui.label(RichText::new("Prompt").weak());
+            ui.add(
+                egui::TextEdit::singleline(&mut form.prompt)
+                    .hint_text("speaker upper body")
+                    .desired_width(width),
+            )
             .on_hover_text(PROMPT_HINT);
-        ui.end_row();
-    });
+            ui.end_row();
+        });
     let parse = form.parse(prompts);
     form.follow(&parse);
     let mut touched = false;
@@ -179,7 +191,7 @@ pub fn show(ui: &mut Ui, form: &mut QueryForm, prompts: &PromptReader) -> Option
         ui.label(if parse.is_valid() {
             text.weak()
         } else {
-            text.color(Color32::from_rgb(230, 140, 40))
+            text.color(super::theme::AMBER)
         });
     }
     for note in parse_notes(&parse) {

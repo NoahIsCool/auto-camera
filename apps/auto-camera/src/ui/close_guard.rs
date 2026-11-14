@@ -57,7 +57,7 @@ pub const KEEP_RUNNING: &str = "Keep running";
 const DIALOG_WIDTH: f32 = 340.0;
 
 /// Colour of the confirming button's text.
-const DANGER_RED: Color32 = Color32::from_rgb(230, 70, 50);
+const DANGER_RED: Color32 = super::theme::RED_TEXT;
 
 /// True while the output has something to lose: the engine runs and the
 /// output is starting or running. A finishing output (`Stopping`) is
