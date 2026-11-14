@@ -27,6 +27,11 @@
 //! carries the tally lamps (ON AIR, REC, the director's mode) and the
 //! studio clock, and [`controls`] the switcher's transition block.
 //!
+//! The window opens on [`shell`], which shows the source picker
+//! ([`picker`]) when there is no studio file yet and over a running studio
+//! when the operator presses Sources, and restarts the engine on the new
+//! sources.
+//!
 //! eframe runs with the OpenGL (glow) renderer and, on Linux, X11 (Wayland
 //! sessions use XWayland); both load their system libraries at run time.
 
@@ -45,41 +50,37 @@ mod meter;
 mod multiview;
 mod notices;
 mod panels;
+mod picker;
 mod query_form;
 mod save;
+mod shell;
 mod switching;
 mod text;
 mod textures;
 mod theme;
 
-use ac_engine::{Engine, EngineOptions, StudioConfig};
 use eframe::egui;
 
-use crate::show::ShowTarget;
 use crate::signals::QuitSignal;
-use app::OperatorApp;
+pub use shell::{Opened, Setup, Start};
 
-/// Starts the engine from `config` with `options` and runs the window until
-/// it is closed, or until `quit` is requested (a termination signal), which
-/// closes it. The window opens with `warnings`, the config's, in its status
-/// bar, and Save show writes to `show`. The engine has stopped when this
-/// returns, whether the window opened or not.
-pub fn run(
-    config: StudioConfig,
-    options: EngineOptions,
-    warnings: &[String],
-    show: Result<ShowTarget, String>,
-    quit: QuitSignal,
-) -> Result<(), String> {
-    let engine = Engine::start_with(config.clone(), options).map_err(|e| e.to_string())?;
-    let _watch = crate::logs::watch(engine.handle());
-    let warnings = warnings.to_vec();
-    let title = format!("Auto Camera · {}", header::studio_title(&config));
+/// The camera lister the window's source picker uses.
+pub const LIST_CAMERAS: picker::Lister = crate::setup::list_cameras;
+
+/// Runs the window on `start` until it is closed, or until `quit` is
+/// requested (a termination signal), which closes it: a studio (its
+/// engine started here, opening with the config's warnings in its status
+/// bar) or the source picker, with `setup` saying where the picker writes
+/// and how studios opened from it start ([`shell`]). No engine runs when
+/// this returns, whether the window opened or not.
+pub fn run(start: Start, setup: Setup, quit: QuitSignal) -> Result<(), String> {
+    let shell = shell::Shell::new(start, setup, quit.clone())?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(title)
+            .with_title(shell.title())
             .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 600.0]),
+            .with_min_inner_size([960.0, 600.0])
+            .with_drag_and_drop(true),
         ..eframe::NativeOptions::default()
     };
     eframe::run_native(
@@ -92,12 +93,7 @@ pub fn run(
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 ctx.request_repaint();
             });
-            Ok(Box::new(
-                OperatorApp::new(engine, &config)
-                    .with_quit(quit)
-                    .with_warnings(&warnings)
-                    .with_show_target(show),
-            ))
+            Ok(Box::new(shell))
         }),
     )
     .map_err(|e| format!("cannot open the operator window: {e}"))

@@ -129,16 +129,24 @@ pub fn elapsed(frames: u64, fps: u32) -> Duration {
     Duration::from_secs(frames / u64::from(fps))
 }
 
+/// What the header's buttons asked for on one frame.
+#[derive(Debug, Default)]
+pub struct Pressed {
+    /// Save show's command, if it was pressed.
+    pub command: Option<ac_engine::EngineCommand>,
+    /// Sources was pressed: open the source picker.
+    pub sources: bool,
+}
+
+/// The Sources button's label.
+pub const SOURCES: &str = "Sources…";
+
 /// Draws the header for `snap`, under the window title `title`, for an
-/// output at `fps`, and returns the command of the Save show button
-/// (which sits at the left of the tally lamps), if it was pressed.
-pub fn show(
-    ui: &mut Ui,
-    snap: &EngineSnapshot,
-    title: &str,
-    fps: u32,
-) -> Option<ac_engine::EngineCommand> {
-    let mut command = None;
+/// output at `fps`, and returns what its buttons, Sources and Save show
+/// (at the left of the tally lamps), asked for. Sources is off while the
+/// output is live, since changing sources restarts the engine.
+pub fn show(ui: &mut Ui, snap: &EngineSnapshot, title: &str, fps: u32) -> Pressed {
+    let mut pressed = Pressed::default();
     ui.horizontal_centered(|ui| {
         logo(ui);
         ui.label(theme::semibold(ui, "Auto Camera", theme::LARGE).color(theme::TEXT_STRONG));
@@ -158,10 +166,18 @@ pub fn show(
                 draw(ui, pill);
             }
             divider(ui);
-            command = super::save::button(ui);
+            pressed.command = super::save::button(ui);
+            let live = super::close_guard::output_live(snap);
+            pressed.sources = ui
+                .add_enabled(!live, egui::Button::new(SOURCES))
+                .on_hover_text("Choose the video file or cameras; restarts the studio")
+                .on_disabled_hover_text(
+                    "Stop the output first: changing sources restarts the studio",
+                )
+                .clicked();
         });
     });
-    command
+    pressed
 }
 
 /// Size of the studio clock, in points.

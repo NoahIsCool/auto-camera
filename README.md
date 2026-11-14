@@ -18,18 +18,20 @@ Design decisions live in [`docs/adr/`](docs/adr/); the runtime architecture
 On a Mac set up with `scripts/install-mac.sh`, from the repository root:
 
 ```sh
-# 1. Make your studio once: a video file, or your cameras.
-cp config/file-source.example.toml config/show.toml   # then set `path` to your video
-# cp config/capture.example.toml config/show.toml     # cameras: see "Cameras and capture devices"
-
-# 2. Check it, then run it.
-cargo run --release -p auto-camera --features onnx,coreaudio -- --check
 cargo run --release -p auto-camera --features onnx,coreaudio
 ```
 
 With no `--config`, the app opens `config/show.toml` (not in git: each
-machine has its own). If it is missing, the app says how to make one and
-stops; it never falls back to the demo. The first run after a build spends
+machine has its own). If it is missing, the window opens on the source
+picker: choose a video file (Choose…, a typed path, or drop it on the
+window) or tick the cameras macOS lists, and Open studio writes
+`config/show.toml` from `config/file-source.example.toml` and starts. The
+header's **Sources…** button opens the same picker later, to switch to
+another file or set of cameras (it restarts the studio, so it is off while
+the output is live). The picker only rewrites the `[[sources]]` of
+`config/show.toml`; queries, detector and output stay as you edited them.
+`--check` lists anything missing; a headless run without the file says how
+to make one and stops. Nothing ever falls back to the demo. The first run after a build spends
 2 to 3 minutes on the detector's CoreML compile ("preparing detector").
 
 In the window: type prompts such as `a person speaking` or `speaker upper
