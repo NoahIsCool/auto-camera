@@ -28,7 +28,8 @@ pub const NOT_READY: u8 = 2;
 /// there or it does not load: how to make the operator's studio from an
 /// example, since a bare launch no longer falls back to the demo.
 pub const DEFAULT_CONFIG_HINT: &str = concat!(
-    "  Make your studio from an example, edit it, then start again:\n",
+    "  Start the window without --headless to choose a video file or cameras,\n",
+    "  or make your studio from an example, edit it, then start again:\n",
     "    cp config/file-source.example.toml config/show.toml   # a video file\n",
     "    cp config/capture.example.toml config/show.toml       # cameras\n",
     "  Run from the repository root, or pass --config PATH; --demo opens the demo.",

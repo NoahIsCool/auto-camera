@@ -21,9 +21,12 @@
 //!   the UIDs a `kind = "device"` audio input names.
 //!
 //! `--config` opens a studio file or a show saved from one ([`show`]);
-//! without it the app opens `config/show.toml`, the operator's own studio,
-//! and if that is missing it says how to make one and exits 2 rather than
-//! fall back to the demo, which needs `--demo` ([`cli`]). The
+//! without it the app opens `config/show.toml`, the operator's own studio.
+//! When that is missing the window opens on the source picker, which
+//! writes it from the video file or cameras the operator chooses
+//! ([`setup`]; the window's Sources button opens the same picker later),
+//! and a headless run says how to make one and exits 2. Neither falls back
+//! to the demo, which needs `--demo` ([`cli`]). The
 //! window's Save show writes the queries, director and transition to a
 //! show file (`--save-show PATH`, or a default one), which opens again as
 //! its studio file with the show laid over it. A `--save-show` path the
@@ -67,6 +70,7 @@ mod cli;
 mod detections;
 mod headless;
 mod logs;
+mod setup;
 mod show;
 mod signals;
 #[cfg(test)]
@@ -96,9 +100,10 @@ fn main() -> ExitCode {
     if cli.list_audio_devices {
         return audio_devices::run();
     }
-    if default_config && !config.exists() {
-        // A bare launch with no studio of its own yet: say how to make one
-        // rather than fall back to the demo.
+    let first_run = default_config && !config.exists();
+    if first_run && cli.headless {
+        // A bare headless launch with no studio of its own yet: say how to
+        // make one rather than fall back to the demo.
         eprintln!("auto-camera: no studio config at {}", cli::DEFAULT_CONFIG);
         eprintln!("{}", check::DEFAULT_CONFIG_HINT);
         return ExitCode::from(2);
@@ -108,6 +113,22 @@ fn main() -> ExitCode {
     if let Err(e) = quit.install() {
         eprintln!("auto-camera: {e}");
         tracing::error!("{e}");
+    }
+    if first_run {
+        // The window opens on the source picker, which writes the studio.
+        tracing::info!(
+            "no studio config at {}: opening the source picker",
+            cli::DEFAULT_CONFIG
+        );
+        let passes = cli.record_detections.as_deref();
+        let save_show = cli.save_show.clone();
+        return run_window(
+            ui::Start::Picker,
+            save_show,
+            cli.trace.as_deref(),
+            passes,
+            &quit,
+        );
     }
     let loaded = match StudioConfig::load_with_warnings(&config) {
         Ok(loaded) => loaded,
@@ -164,28 +185,31 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
         let passes = cli.record_detections.as_deref();
+        let start = ui::Start::Studio(Box::new(ui::Opened {
+            config: loaded.config,
+            warnings: loaded.warnings,
+            show: target,
+        }));
         run_window(
-            loaded.config,
-            &loaded.warnings,
+            start,
+            cli.save_show.clone(),
             cli.trace.as_deref(),
             passes,
-            target,
             &quit,
         )
     }
 }
 
-/// Runs the operator window until it is closed, opening with the config's
-/// `warnings` in its status bar, writing the per-tick trace to `trace` and
-/// the applied detector passes to `log` if given, and saving the show to
-/// `target` when the operator asks; see the module docs for the exit
+/// Runs the operator window on `start` until it is closed, writing the
+/// first engine's per-tick trace to `trace` and its applied detector
+/// passes to `log` if given; a studio opened from the source picker saves
+/// its show to `save_show` when given. See the module docs for the exit
 /// status.
 fn run_window(
-    config: StudioConfig,
-    warnings: &[String],
+    start: ui::Start,
+    save_show: Option<std::path::PathBuf>,
     trace: Option<&Path>,
     log: Option<&Path>,
-    target: Result<show::ShowTarget, String>,
     quit: &QuitSignal,
 ) -> ExitCode {
     let (trace, options) = match trace::attach(trace, EngineOptions::default()) {
@@ -206,7 +230,13 @@ fn run_window(
             return ExitCode::FAILURE;
         }
     };
-    let result = ui::run(config, options, warnings, target, quit.clone());
+    let setup = ui::Setup {
+        studio: cli::DEFAULT_CONFIG.into(),
+        save_show,
+        options: Some(options),
+        lister: ui::LIST_CAMERAS,
+    };
+    let result = ui::run(start, setup, quit.clone());
     // The window's engine has stopped, and its senders with it. A window
     // that failed, most often because its engine did not start, leaves no
     // empty trace or log behind.

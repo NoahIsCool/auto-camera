@@ -74,7 +74,7 @@ mod time;
 mod watch;
 mod writer;
 
-pub use watch::watch;
+pub use watch::{Watch, watch};
 
 use crash::CrashReporter;
 use file::RotatingFile;

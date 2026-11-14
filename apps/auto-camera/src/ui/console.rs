@@ -147,6 +147,11 @@ pub struct Console {
     title: String,
     /// Output frame rate, which the header's elapsed times count in.
     fps: u32,
+    /// The operator pressed Sources (taken by [`Self::take_sources`]).
+    sources: bool,
+    /// Another dialog is open over the console (the source picker), so
+    /// shortcuts are off.
+    blocked: bool,
 }
 
 impl Console {
@@ -172,7 +177,20 @@ impl Console {
             aspect: config.output.width as f32 / config.output.height.max(1) as f32,
             title: header::studio_title(config),
             fps: config.output.fps,
+            sources: false,
+            blocked: false,
         }
+    }
+
+    /// Whether the operator pressed Sources since the last call.
+    pub fn take_sources(&mut self) -> bool {
+        std::mem::take(&mut self.sources)
+    }
+
+    /// Turns the shortcuts off while another dialog is open over the
+    /// console (`true`), or on again.
+    pub fn block(&mut self, blocked: bool) {
+        self.blocked = blocked;
     }
 
     /// The notice the status bar shows for `snap`, and whether it reports
@@ -237,7 +255,8 @@ impl Console {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
-        let paused = ctx.egui_wants_keyboard_input() || self.guard.question().is_some();
+        let paused =
+            ctx.egui_wants_keyboard_input() || self.guard.question().is_some() || self.blocked;
         let ids: Vec<ShotId> = snap.shots.iter().map(|s| s.id.clone()).collect();
         let idle = !snap.switcher.in_transition;
         let mut seen = self.shown.clone();
@@ -257,7 +276,9 @@ impl Console {
         egui::Panel::top("header")
             .frame(bar_frame())
             .show(ui, |ui| {
-                commands.extend(header::show(ui, snap, &self.title, self.fps));
+                let pressed = header::show(ui, snap, &self.title, self.fps);
+                commands.extend(pressed.command);
+                self.sources |= pressed.sources;
             });
         egui::Panel::bottom("status")
             .frame(bar_frame())

@@ -41,6 +41,15 @@ serde_json = "1.0"
 # SHA-256 of the config and the model files in the log's header: pure Rust,
 # no dependencies, ISC, and already in the tree (ort's downloader uses it).
 hmac-sha256 = "1.1"
+# The source picker rewrites the studio file's [[sources]] and keeps the
+# rest of it, comments included. Already in the tree (proc-macro-crate).
+toml_edit = "0.25"
+
+# The source picker's Browse button: the native Open panel (NSOpenPanel).
+# macOS only, without the default features (the Linux portal and Wayland
+# backends); elsewhere the operator types or drops the path.
+[target.'cfg(target_os = "macos")'.dependencies]
+rfd = { version = "0.18", default-features = false }
 
 [dev-dependencies]
 ac-eval.workspace = true

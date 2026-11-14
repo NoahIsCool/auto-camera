@@ -319,9 +319,11 @@ fn the_default_path_gets_a_hint_only_when_nothing_is_there() {
 }
 
 #[test]
-fn a_bare_launch_without_a_studio_says_how_to_make_one() {
+fn a_bare_headless_launch_without_a_studio_says_how_to_make_one() {
+    // (The window opens on the source picker instead, which needs a
+    // display, so only the headless run is tested here.)
     let studio = Studio::new("bare");
-    let out = studio.run(&[]);
+    let out = studio.run(&["--headless"]);
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
