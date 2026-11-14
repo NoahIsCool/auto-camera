@@ -25,9 +25,13 @@ use super::text::{
     output_state, percent, query_hover, query_line, shot_name, source_hover, source_line,
     source_tone, stream_status, timing_line,
 };
+use super::theme;
 
 /// Amber, for warnings such as a prompt with no matches.
-const AMBER: Color32 = Color32::from_rgb(230, 140, 40);
+const AMBER: Color32 = theme::AMBER;
+
+/// Room a form's field labels take, which its fields leave them.
+pub const FIELD_LABEL: f32 = 72.0;
 
 /// Indent of a query's feedback line, under its name (past the remove
 /// button).
@@ -78,35 +82,57 @@ impl OutputForm {
 pub fn director(ui: &mut Ui, snap: &EngineSnapshot, seen: Option<&ShotId>) -> Vec<EngineCommand> {
     let mut commands = Vec::new();
     let d = &snap.director;
-    ui.heading("Director");
     let mut mode = d.mode;
-    ui.horizontal(|ui| {
-        ui.label("Mode");
-        ui.selectable_value(&mut mode, DirectorMode::Off, "Off");
-        ui.selectable_value(&mut mode, DirectorMode::Suggest, "Suggest");
-        ui.selectable_value(&mut mode, DirectorMode::Auto, "Auto");
-    });
+    let mut profile = d.profile;
+    egui::Grid::new("director-modes")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label(RichText::new("Mode").weak());
+            segmented(
+                ui,
+                &mut mode,
+                &[
+                    (DirectorMode::Off, "Off"),
+                    (DirectorMode::Suggest, "Suggest"),
+                    (DirectorMode::Auto, "Auto"),
+                ],
+            );
+            ui.end_row();
+            ui.label(RichText::new("Profile").weak());
+            segmented(
+                ui,
+                &mut profile,
+                &[
+                    (ContentProfile::Talk, "Talk"),
+                    (ContentProfile::Music, "Music"),
+                ],
+            );
+            ui.end_row();
+        });
     if mode != d.mode {
         commands.push(EngineCommand::SetDirectorMode { mode });
     }
-    let mut profile = d.profile;
-    ui.horizontal(|ui| {
-        ui.label("Profile");
-        ui.selectable_value(&mut profile, ContentProfile::Talk, "Talk");
-        ui.selectable_value(&mut profile, ContentProfile::Music, "Music");
-    });
     if profile != d.profile {
         commands.push(EngineCommand::SetDirectorProfile { profile });
     }
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label("Suggests");
-        ui.label(RichText::new(shot_name(snap, d.suggestion.as_ref())).strong());
+        ui.label(RichText::new("Suggests").weak());
+        ui.label(
+            RichText::new(shot_name(snap, d.suggestion.as_ref()))
+                .strong()
+                .color(theme::TEXT_STRONG),
+        );
     });
-    ui.label(RichText::new(&d.reason_text).weak());
+    if !d.reason_text.is_empty() {
+        ui.label(RichText::new(&d.reason_text).weak());
+    }
     ui.horizontal(|ui| {
         let can = d.mode != DirectorMode::Off && d.suggestion.is_some();
+        let accept = egui::Button::new("Accept").min_size(egui::vec2(84.0, 26.0));
         if ui
-            .add_enabled(can, egui::Button::new("Accept"))
+            .add_enabled(can, accept)
             .on_hover_text("Stage the suggestion and take it with the selected transition")
             .clicked()
             && let Some(shot) = seen
@@ -114,7 +140,10 @@ pub fn director(ui: &mut Ui, snap: &EngineSnapshot, seen: Option<&ShotId>) -> Ve
             commands.push(EngineCommand::AcceptSuggestion { shot: shot.clone() });
         }
         let skip = ui
-            .add_enabled(can, egui::Button::new("Skip"))
+            .add_enabled(
+                can,
+                egui::Button::new("Skip").min_size(egui::vec2(64.0, 26.0)),
+            )
             .on_hover_text(format!(
                 "Do not suggest this shot for {:.0} s",
                 d.skip.as_secs_f64()
@@ -124,7 +153,9 @@ pub fn director(ui: &mut Ui, snap: &EngineSnapshot, seen: Option<&ShotId>) -> Ve
         {
             commands.push(EngineCommand::Skip { shot: shot.clone() });
         }
-        ui.label(format!("{} takes", d.takes));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(takes_text(d.takes)).weak());
+        });
     });
     if let Some(held) = d
         .preview_held
@@ -132,8 +163,11 @@ pub fn director(ui: &mut Ui, snap: &EngineSnapshot, seen: Option<&ShotId>) -> Ve
         .filter(|_| d.mode != DirectorMode::Off)
     {
         ui.horizontal(|ui| {
-            ui.label(format!("Preview held: {}", shot_name(snap, Some(held))))
-                .on_hover_text(HELD_HOVER);
+            ui.label(
+                RichText::new(format!("Preview held: {}", shot_name(snap, Some(held))))
+                    .color(theme::AMBER),
+            )
+            .on_hover_text(HELD_HOVER);
             if ui
                 .button("Release")
                 .on_hover_text("Hand preview back to the director")
@@ -146,12 +180,51 @@ pub fn director(ui: &mut Ui, snap: &EngineSnapshot, seen: Option<&ShotId>) -> Ve
     commands
 }
 
+/// How many takes the director has made, in words.
+pub fn takes_text(takes: u64) -> String {
+    match takes {
+        1 => "1 take".into(),
+        n => format!("{n} takes"),
+    }
+}
+
+/// A row of toggle buttons choosing one of `options` into `value`, like a
+/// segmented control; the selected one is filled with the accent colour.
+fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (option, label) in options {
+            let selected = *value == *option;
+            let text = RichText::new(*label).color(if selected {
+                theme::text_on(theme::ACCENT)
+            } else {
+                theme::TEXT
+            });
+            if ui
+                .add(
+                    egui::Button::new(text)
+                        .selected(selected)
+                        .min_size(egui::vec2(58.0, 24.0)),
+                )
+                .clicked()
+            {
+                *value = *option;
+            }
+        }
+    });
+}
+
 /// Hover text of the operator's hold on preview.
 const HELD_HOVER: &str = "You staged this shot, so the director does not stage its \
                           suggestions over it until you take it or release it.";
 
-/// The queries panel: live queries, the add form (its prompt read with
-/// `prompts`, the engine's reader) and the subjects.
+/// What the queries panel says while there are none.
+pub const NO_QUERIES: &str = "No queries yet. Describe who to frame below, for example \
+                              \"speaker upper body\".";
+
+/// The queries panel: live queries with what the newest detector pass
+/// found for each, and the add form (its prompt read with `prompts`, the
+/// engine's reader).
 pub fn queries(
     ui: &mut Ui,
     snap: &EngineSnapshot,
@@ -159,18 +232,21 @@ pub fn queries(
     prompts: &PromptReader,
 ) -> Vec<EngineCommand> {
     let mut commands = Vec::new();
-    ui.heading("Queries");
     if snap.queries.is_empty() {
-        ui.label(RichText::new("No queries: add one to find subjects.").weak());
+        ui.label(RichText::new(NO_QUERIES).weak());
     }
     for q in &snap.queries {
         ui.horizontal(|ui| {
-            if ui.small_button("✕").on_hover_text("Remove").clicked() {
+            if ui
+                .small_button(REMOVE)
+                .on_hover_text(format!("Remove {}", q.name))
+                .clicked()
+            {
                 commands.push(EngineCommand::RemoveQuery {
                     query: q.id.clone(),
                 });
             }
-            ui.label(RichText::new(&q.name).strong());
+            ui.label(RichText::new(&q.name).strong().color(theme::TEXT_STRONG));
             ui.label(RichText::new(query_line(q)).weak())
                 .on_hover_text(query_hover(q));
         });
@@ -185,7 +261,7 @@ pub fn queries(
                         Tone::Warning => RichText::new(text).color(AMBER),
                         Tone::Weak => RichText::new(text).weak(),
                     };
-                    let label = ui.label(text);
+                    let label = ui.label(text.size(theme::SMALL));
                     if !hover.is_empty() {
                         label.on_hover_text(hover);
                     }
@@ -194,44 +270,72 @@ pub fn queries(
         }
     }
     ui.add_space(4.0);
-    commands.extend(query_form::show(ui, form, prompts));
     ui.separator();
-    ui.heading("Subjects");
+    ui.label(RichText::new("Add a query").weak());
+    commands.extend(query_form::show(ui, form, prompts));
+    commands
+}
+
+/// The remove button's text: a multiplication sign, which the default font
+/// has (it has no "✕").
+const REMOVE: &str = "×";
+
+/// The subjects panel: every subject with its tracking state, and Pin and
+/// Hide.
+pub fn subjects(ui: &mut Ui, snap: &EngineSnapshot) -> Vec<EngineCommand> {
+    let mut commands = Vec::new();
     if snap.subjects.is_empty() {
-        ui.label(RichText::new("none").weak());
+        ui.label(RichText::new("No subjects found yet.").weak());
+        return commands;
     }
-    for s in &snap.subjects {
-        ui.horizontal(|ui| {
-            let state = match s.state {
-                TrackState::Tracking => format!("tracking {}", percent(f64::from(s.confidence))),
-                TrackState::Lost => "lost".into(),
-            };
-            let mut label = format!("{} #{} · {}", s.query.0, s.id.0, state);
-            if snap.sources.len() > 1 {
-                label = format!("{} · {label}", s.source.0);
-            }
-            ui.label(label);
-            if s.protected {
-                ui.label(RichText::new("on air").color(Color32::from_rgb(230, 40, 40)));
-            }
-            let pin = if s.pinned { "Unpin" } else { "Pin" };
-            if ui.small_button(pin).clicked() {
-                commands.push(EngineCommand::Pin {
-                    source: s.source.clone(),
-                    subject: s.id,
-                    pinned: !s.pinned,
+    egui::Grid::new("subjects")
+        .num_columns(4)
+        .spacing([10.0, 4.0])
+        .striped(false)
+        .show(ui, |ui| {
+            for s in &snap.subjects {
+                let mut name = format!("{} #{}", s.query.0, s.id.0);
+                if snap.sources.len() > 1 {
+                    name = format!("{} · {name}", s.source.0);
+                }
+                ui.label(RichText::new(name).color(theme::TEXT_STRONG));
+                let state = match s.state {
+                    TrackState::Tracking => {
+                        RichText::new(format!("tracking {}", percent(f64::from(s.confidence))))
+                            .weak()
+                    }
+                    TrackState::Lost => RichText::new("lost").color(AMBER),
+                };
+                ui.horizontal(|ui| {
+                    ui.label(state);
+                    if s.protected {
+                        ui.label(
+                            RichText::new("on air")
+                                .size(theme::SMALL)
+                                .strong()
+                                .color(theme::RED_TEXT),
+                        );
+                    }
                 });
-            }
-            let hide = if s.hidden { "Show" } else { "Hide" };
-            if ui.small_button(hide).clicked() {
-                commands.push(EngineCommand::Hide {
-                    source: s.source.clone(),
-                    subject: s.id,
-                    hidden: !s.hidden,
-                });
+                let pin = if s.pinned { "Unpin" } else { "Pin" };
+                if ui.small_button(pin).clicked() {
+                    commands.push(EngineCommand::Pin {
+                        source: s.source.clone(),
+                        subject: s.id,
+                        pinned: !s.pinned,
+                    });
+                }
+                let hide = if s.hidden { "Show" } else { "Hide" };
+                if ui.small_button(hide).clicked() {
+                    commands.push(EngineCommand::Hide {
+                        source: s.source.clone(),
+                        subject: s.id,
+                        hidden: !s.hidden,
+                    });
+                }
+                ui.end_row();
             }
         });
-    }
     commands
 }
 
@@ -245,27 +349,47 @@ pub fn output(
 ) -> Vec<EngineCommand> {
     let mut commands = Vec::new();
     let out = &snap.output;
-    ui.heading("Output");
     let idle = matches!(
         out.state,
         OutputState::Idle | OutputState::Finished | OutputState::Failed(_)
     );
+    // The fields fill the card past their labels.
+    let width = (ui.available_width() - FIELD_LABEL).max(120.0);
     ui.add_enabled_ui(idle, |ui| {
         egui::Grid::new("output-form")
             .num_columns(2)
+            .spacing([10.0, 6.0])
             .show(ui, |ui| {
-                ui.label("RTMP URL");
-                ui.add(egui::TextEdit::singleline(&mut form.rtmp_url).password(true));
+                ui.label(RichText::new("Stream").weak());
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.rtmp_url)
+                        .password(true)
+                        .hint_text("rtmp://ingest/app/stream-key")
+                        .desired_width(width),
+                );
                 ui.end_row();
-                ui.label("Record to");
-                ui.text_edit_singleline(&mut form.record_path);
+                ui.label(RichText::new("Record").weak());
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.record_path)
+                        .hint_text("~/Movies/show.mp4")
+                        .desired_width(width),
+                );
                 ui.end_row();
             });
     });
     ui.horizontal(|ui| {
         if idle {
             let ready = form.command();
-            let start = ui.add_enabled(ready.is_ok(), egui::Button::new("Start"));
+            let start = ui.add_enabled(
+                ready.is_ok(),
+                egui::Button::new(
+                    RichText::new("Start")
+                        .strong()
+                        .color(theme::text_on(theme::PROGRAM_RED)),
+                )
+                .fill(theme::PROGRAM_RED)
+                .min_size(egui::vec2(84.0, 28.0)),
+            );
             match ready {
                 Ok(cmd) if start.clicked() => commands.push(cmd),
                 Ok(_) => {}
@@ -274,13 +398,16 @@ pub fn output(
                 }
             }
         } else if ui
-            .add_enabled(out.state == OutputState::Running, egui::Button::new("Stop"))
+            .add_enabled(
+                out.state == OutputState::Running,
+                egui::Button::new(RichText::new("Stop").strong()).min_size(egui::vec2(84.0, 28.0)),
+            )
             .clicked()
         {
             commands.extend(guard.stop_requested(close_guard::output_live(snap)));
         }
         let color = match out.state {
-            OutputState::Running => Color32::from_rgb(230, 40, 40),
+            OutputState::Running => theme::RED_TEXT,
             OutputState::Failed(_) => AMBER,
             _ => ui.visuals().text_color(),
         };
@@ -347,9 +474,9 @@ pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, paused: bool, notice: Opti
             }
             ui.separator();
         }
-        ui.label(timing_line(&snap.timing));
+        ui.label(RichText::new(timing_line(&snap.timing)).weak());
         ui.separator();
-        ui.label(dropped_line(snap));
+        ui.label(RichText::new(dropped_line(snap)).weak());
         if !snap.render_issues.is_empty() {
             ui.separator();
             ui.label(
@@ -364,7 +491,7 @@ pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, paused: bool, notice: Opti
         if let Some((text, error)) = notice {
             ui.separator();
             let color = if error {
-                Color32::from_rgb(230, 90, 60)
+                theme::RED_TEXT
             } else {
                 ui.visuals().weak_text_color()
             };

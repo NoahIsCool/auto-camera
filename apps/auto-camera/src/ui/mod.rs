@@ -22,6 +22,11 @@
 //! harness (`egui_kittest`, without a renderer) presses keys and clicks
 //! widgets found through the AccessKit tree, with no GPU or display.
 //!
+//! The window's look (palette, type scale, spacing) is one module,
+//! [`theme`], installed as the window opens; the header bar ([`header`])
+//! carries the tally lamps (ON AIR, REC, the director's mode) and the
+//! studio clock, and [`controls`] the switcher's transition block.
+//!
 //! eframe runs with the OpenGL (glow) renderer and, on Linux, X11 (Wayland
 //! sessions use XWayland); both load their system libraries at run time.
 
@@ -30,8 +35,10 @@ mod app;
 mod caption;
 mod close_guard;
 mod console;
+mod controls;
 #[cfg(test)]
 mod fixtures;
+mod header;
 mod keys;
 mod layout;
 mod meter;
@@ -43,6 +50,7 @@ mod save;
 mod switching;
 mod text;
 mod textures;
+mod theme;
 
 use ac_engine::{Engine, EngineOptions, StudioConfig};
 use eframe::egui;
@@ -66,10 +74,7 @@ pub fn run(
     let engine = Engine::start_with(config.clone(), options).map_err(|e| e.to_string())?;
     let _watch = crate::logs::watch(engine.handle());
     let warnings = warnings.to_vec();
-    let title = match config.sources.as_slice() {
-        [one] => format!("Auto Camera · {}", one.display_name()),
-        many => format!("Auto Camera · {} sources", many.len()),
-    };
+    let title = format!("Auto Camera · {}", header::studio_title(&config));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(title)
@@ -82,6 +87,7 @@ pub fn run(
         options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
+            theme::apply(&ctx);
             quit.wake_with(move || {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 ctx.request_repaint();

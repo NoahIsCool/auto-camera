@@ -29,7 +29,7 @@ use eframe::egui::Color32;
 
 /// The caption's colour while it carries [`lost_warning`]: the amber of the
 /// side panel's warnings.
-pub const WARNING: Color32 = Color32::from_rgb(230, 140, 40);
+pub const WARNING: Color32 = super::theme::AMBER;
 
 /// The caption's note on a take waiting for preview to settle
 /// (`CUT waiting for preview to settle · press again to take now`); `None`

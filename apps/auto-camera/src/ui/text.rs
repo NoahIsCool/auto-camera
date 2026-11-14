@@ -445,7 +445,7 @@ pub fn output_state(state: &OutputState) -> String {
     match state {
         OutputState::Idle => "idle".into(),
         OutputState::Starting => "starting…".into(),
-        OutputState::Running => "ON AIR".into(),
+        OutputState::Running => "running".into(),
         OutputState::Stopping => "finishing…".into(),
         OutputState::Finished => "finished".into(),
         OutputState::Failed(e) => format!("failed: {e}"),

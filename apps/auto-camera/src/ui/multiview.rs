@@ -47,17 +47,18 @@ use super::layout::MIN_TILE_WIDTH;
 use super::layout::{CAPTION, grid};
 use super::text::{LIMITED_BADGE, shot_hover, shot_status, shot_title};
 use super::textures::Textures;
+use super::theme;
 
 /// Program tally colour.
-pub const PROGRAM_RED: Color32 = Color32::from_rgb(230, 40, 40);
+pub const PROGRAM_RED: Color32 = theme::PROGRAM_RED;
 /// Preview tally colour.
-pub const PREVIEW_GREEN: Color32 = Color32::from_rgb(40, 200, 80);
+pub const PREVIEW_GREEN: Color32 = theme::PREVIEW_GREEN;
 /// Border of a tile with no tally.
 const IDLE_BORDER: Color32 = Color32::from_gray(70);
 /// Width of a tally border.
 const TALLY_WIDTH: f32 = 3.0;
 /// Colour of the zoom-limit badge.
-const BADGE_AMBER: Color32 = Color32::from_rgb(230, 160, 40);
+const BADGE_AMBER: Color32 = theme::AMBER;
 /// Font size of the zoom-limit badge, in points.
 const BADGE_FONT: f32 = 10.0;
 /// Padding around the badge's text, in points.
@@ -158,11 +159,14 @@ pub fn show(
         return commands;
     }
     let scrollbar = ui.spacing().scroll.bar_width + 4.0;
-    let area = ui.available_size() - vec2(scrollbar, 0.0);
+    let area = ui.available_size() - vec2(scrollbar, 2.0 * TALLY_WIDTH);
     let g = grid(snap.shots.len(), area, aspect);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Room for the tally borders, drawn outside the tiles, so the
+            // scroll area does not clip them.
+            ui.add_space(TALLY_WIDTH);
             let (rect, _) = ui.allocate_exact_size(g.size(), Sense::hover());
             for (i, shot) in snap.shots.iter().enumerate() {
                 let tile = g.tile_rect(rect.min, i);
@@ -253,7 +257,7 @@ fn draw_tile(
     let color = if q >= 0.6 {
         PREVIEW_GREEN
     } else if q >= 0.3 {
-        Color32::from_rgb(230, 180, 40)
+        theme::AMBER
     } else {
         PROGRAM_RED
     };
@@ -460,10 +464,14 @@ mod tests {
             show(ui, &snap, &mut textures, 16.0 / 9.0);
         });
         let texts = painted_texts(&out);
-        // Tiles scrolled out of view are clipped away entirely.
+        // Tiles scrolled out of view are clipped away entirely, and the
+        // window's bottom edge may cut the last visible row: only badges
+        // above that edge count.
         let badges: Vec<&(String, Rect, Rect)> = texts
             .iter()
-            .filter(|(t, _, clip)| t == LIMITED_BADGE && clip.is_positive())
+            .filter(|(t, rect, clip)| {
+                t == LIMITED_BADGE && clip.is_positive() && rect.max.y <= 900.0
+            })
             .collect();
         assert!(!badges.is_empty());
         for (_, rect, clip) in &badges {

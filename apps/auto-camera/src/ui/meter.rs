@@ -31,10 +31,10 @@ pub const NO_READING: &str = "—";
 const BAR: egui::Vec2 = vec2(150.0, 9.0);
 
 /// Colour of a bar's level.
-const LEVEL_GREEN: Color32 = Color32::from_rgb(40, 200, 80);
+const LEVEL_GREEN: Color32 = super::theme::PREVIEW_GREEN;
 
 /// Colour of a true peak above the limit.
-const AMBER: Color32 = Color32::from_rgb(230, 140, 40);
+const AMBER: Color32 = super::theme::AMBER;
 
 /// What the widget's hover text explains.
 const HOVER: &str = "Program loudness (EBU R 128) of the paced program audio. \
