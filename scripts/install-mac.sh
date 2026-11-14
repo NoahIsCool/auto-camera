@@ -150,6 +150,11 @@ else
 
   SAM_DIR="models/sam31-mlx"
   if [ -L "$SAM_DIR" ]; then
+    # A link is someone's own copy (the dev Mac links the old prototype's
+    # folder); keep it, but only if it reaches the weights. A link through
+    # an unmounted drive must not pass as installed.
+    [ -f "$SAM_DIR/model.safetensors" ] && [ -d "$SAM_DIR/tokenizer" ] ||
+      fail "$SAM_DIR links to $(readlink "$SAM_DIR"), which has no model.safetensors or tokenizer/ (unmounted drive?). Remove the link to download the weights here, or fix its target"
     info "$SAM_DIR is a link to $(readlink "$SAM_DIR"); left as it is"
   else
     mkdir -p "$SAM_DIR"
