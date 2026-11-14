@@ -1,7 +1,7 @@
 # Handoff (temporary)
 
 Updated 2026-11-01. Read `CLAUDE.md` first. The previous handoff's camera,
-CoreAudio timestamp and drift-correction fixes are implemented. Physical-board
+CoreAudio timestamp and drift-correction fixes are merged. Physical-board
 validation remains open. Delete this temporary file when its information has
 been absorbed into the normal project records.
 
@@ -84,14 +84,44 @@ loudness test and camera alignment checks. Investigate an idle rerun and an
 unchanged-main comparison before declaring a regression; do not weaken their
 assertions to accommodate contention.
 
+## Roadmap record
+
+Keep roadmap information in this file, as Noah requested on 2026-10-30.
+The original private roadmap is the
+[Claude artifact](https://claude.ai/artifact/V6Cx7mh64gG6AvphP6aecs).
+Its contents and current row statuses could not be read: it required sign-in
+and a CAPTCHA. After the verified merges, Noah explicitly said **"Leave the
+roadmap for later."** We did not edit the external artifact; its update is
+deferred. The local statuses below record completed software, not a claim
+that the Claude rows were updated or physical hardware was validated.
+
+| Package | Local software status | Merged work | Remaining validation |
+|---|---|---|---|
+| A6 — CoreAudio board input | Done | [PR #29](https://github.com/NoahIsCool/auto-camera/pull/29), gated head `fbdd18b`, merge `feea725` | Board UID/channel/rate listing; physical capture; unchanged sample rate; readiness; unplug/replug without default-microphone substitution. |
+| A5 — Audio clock-drift correction | Done | [PR #30](https://github.com/NoahIsCool/auto-camera/pull/30), gated head `d4a34ea`, merge `db4658a` | Hour-long clap/alignment check within 20 ms; correction/reset/step telemetry; reconnect recovery; rate-change warning and output restart. |
+
+Camera capture and shutdown fixes also merged in
+[PR #32](https://github.com/NoahIsCool/auto-camera/pull/32), gated head
+`bbdf1c9`, merge `1152553`. Final integrated `main` at `db4658a` has the same
+source tree as the gated A5 head: all required manual gates passed, with
+1,964 Rust tests/doc-tests, 42 script tests, the 12,030 identifiable scenarios
+and 24 separate ambiguity-policy cases above. Native CoreAudio builds and
+synthetic recording smoke tests passed; the final recording had zero drops.
+The PR checklists retain the exact physical-board commands and acceptance
+steps. Detailed local evidence is in
+`scratch/handoff-2026-10-30/RESULTS.md` (ignored scratch, not tracked in Git).
+
+When the external update is resumed, A6 and A5 should be marked Done for the
+merged software while retaining the outstanding hardware checks. No other
+roadmap package statuses were read or inferred. The known follow-ups and
+decisions waiting on Noah remain listed below.
+
 ## Next work
 
 1. Noah: complete #29's physical-board checklist, then #30's hour-long A/V
    alignment, reconnect and sample-rate-change checks.
-2. After both audio PRs have merged, reflect A6 and A5 as Done in the
-   [roadmap](https://claude.ai/artifact/V6Cx7mh64gG6AvphP6aecs). Noah authorized
-   opening and updating it after verified merges. Check the roadmap itself
-   for current status; private access may require his signed-in browser.
+2. Keep the local roadmap record above current. Leave the external Claude
+   update deferred until Noah resumes it.
 3. Complete the round-3 Mac checks for framing PR #6. Its checklist remains
    `git show origin/notes/mac-checks:mac-checks.md`; leave that draft pending
    Noah's footage run.
