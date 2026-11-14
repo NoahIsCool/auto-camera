@@ -13,19 +13,43 @@ Design decisions live in [`docs/adr/`](docs/adr/); the runtime architecture
 (threads, mailboxes, clocks, ownership) is
 [ADR 0002](docs/adr/0002-pipeline-architecture.md).
 
+## Quick start
+
+On a Mac set up with `scripts/install-mac.sh`, from the repository root:
+
+```sh
+# 1. Make your studio once: a video file, or your cameras.
+cp config/file-source.example.toml config/show.toml   # then set `path` to your video
+# cp config/capture.example.toml config/show.toml     # cameras: see "Cameras and capture devices"
+
+# 2. Check it, then run it.
+cargo run --release -p auto-camera --features onnx,coreaudio -- --check
+cargo run --release -p auto-camera --features onnx,coreaudio
+```
+
+With no `--config`, the app opens `config/show.toml` (not in git: each
+machine has its own). If it is missing, the app says how to make one and
+stops; it never falls back to the demo. The first run after a build spends
+2 to 3 minutes on the detector's CoreML compile ("preparing detector").
+
+In the window: type prompts such as `a person speaking` or `speaker upper
+body` in the Queries panel; click a tile or press `1` to `9` for preview;
+`Space` cuts and `Enter` (AUTO) transitions it to program, or drag the
+T-bar; Output starts the recording and, with an RTMP URL, the stream.
+
 ## Demo
 
 Requires Rust 1.92 or newer, and `ffmpeg` for file sources and output:
 `AC_FFMPEG` / `AC_FFPROBE` name the executables, else they are looked up on
 `PATH`, and on macOS also in `/opt/homebrew/bin` and `/usr/local/bin` (an
 app started from Finder or the Dock gets a `PATH` without Homebrew). The
-demo studio ([`config/demo.toml`](config/demo.toml)) is one synthetic 720p
+demo studio (`--demo`, [`config/demo.toml`](config/demo.toml)) is one synthetic 720p
 camera with three moving subjects and a ground-truth detector, so it needs
 no camera, model or video file. Its director starts in Suggest mode: it
 proposes shots and the operator takes them.
 
 ```sh
-cargo run -p auto-camera                     # operator window on the demo studio
+cargo run -p auto-camera -- --demo           # operator window on the demo studio
 ```
 
 The window is always dark and set in Inter, laid out after broadcast
@@ -152,8 +176,8 @@ preview shot's subject is lost; it only warns, and the take goes ahead.
 ## Headless mode
 
 ```sh
-cargo run -p auto-camera -- --headless --seconds 5 --record /tmp/demo.mp4
-auto-camera [--config PATH] --headless [--seconds N] [--record PATH] [--trace PATH]
+cargo run -p auto-camera -- --demo --headless --seconds 5 --record /tmp/demo.mp4
+auto-camera [--config PATH | --demo] --headless [--seconds N] [--record PATH] [--trace PATH]
 ```
 
 A headless run starts the engine without a window, waits for the first
@@ -208,7 +232,7 @@ framing offline with `ac-eval` (spec V9: containment, framing error, jerk,
 latency):
 
 ```sh
-cargo run -p auto-camera -- --headless --seconds 2 --trace /tmp/demo.jsonl
+cargo run -p auto-camera -- --demo --headless --seconds 2 --trace /tmp/demo.jsonl
 ```
 
 Each line has the tick number and its PTS (`tick`, `pts_ns`), whether it
@@ -302,7 +326,7 @@ minimized window: that takes `LSAppNapIsDisabled` in an app bundle's
 
 ```sh
 cargo run -p auto-camera -- --check --config config/sam3-sidecar.example.toml
-auto-camera [--config PATH] --check
+auto-camera [--config PATH | --demo] --check
 ```
 
 `--check` finds what would stop a studio before a show, without starting

@@ -20,7 +20,10 @@
 //!   nothing and reads no config; lists the Mac's audio input devices with
 //!   the UIDs a `kind = "device"` audio input names.
 //!
-//! `--config` opens a studio file or a show saved from one ([`show`]): the
+//! `--config` opens a studio file or a show saved from one ([`show`]);
+//! without it the app opens `config/show.toml`, the operator's own studio,
+//! and if that is missing it says how to make one and exits 2 rather than
+//! fall back to the demo, which needs `--demo` ([`cli`]). The
 //! window's Save show writes the queries, director and transition to a
 //! show file (`--save-show PATH`, or a default one), which opens again as
 //! its studio file with the show laid over it. A `--save-show` path the
@@ -85,12 +88,20 @@ use signals::QuitSignal;
 /// status.
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let default_config = cli.config.as_os_str() == cli::DEFAULT_CONFIG;
+    let config = cli.config_path();
+    let default_config = cli.default_config();
     if cli.check {
-        return check::run(&cli.config, default_config);
+        return check::run(&config, default_config);
     }
     if cli.list_audio_devices {
         return audio_devices::run();
+    }
+    if default_config && !config.exists() {
+        // A bare launch with no studio of its own yet: say how to make one
+        // rather than fall back to the demo.
+        eprintln!("auto-camera: no studio config at {}", cli::DEFAULT_CONFIG);
+        eprintln!("{}", check::DEFAULT_CONFIG_HINT);
+        return ExitCode::from(2);
     }
     let mut log = logs::LogSession::start(cli.log_dir.as_deref());
     let quit = QuitSignal::new();
@@ -98,7 +109,7 @@ fn main() -> ExitCode {
         eprintln!("auto-camera: {e}");
         tracing::error!("{e}");
     }
-    let loaded = match StudioConfig::load_with_warnings(&cli.config) {
+    let loaded = match StudioConfig::load_with_warnings(&config) {
         Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("auto-camera: {e}");
@@ -113,7 +124,7 @@ fn main() -> ExitCode {
         eprintln!("auto-camera: warning: {warning}");
         tracing::warn!("{warning}");
     }
-    log.studio(&cli.config, &loaded);
+    log.studio(&config, &loaded);
     if cli.headless {
         let options = headless::HeadlessOptions {
             seconds: cli.seconds,
@@ -121,7 +132,7 @@ fn main() -> ExitCode {
             trace: cli.trace,
             record_detections: cli.record_detections,
         };
-        let summary = headless::run(loaded.config, &cli.config, &options, &quit);
+        let summary = headless::run(loaded.config, &config, &options, &quit);
         match &summary.error {
             Some(e) => tracing::error!("headless run failed: {e}"),
             None => tracing::info!("headless run done"),
@@ -143,7 +154,7 @@ fn main() -> ExitCode {
     } else {
         let target = show::ShowTarget::for_run(
             &loaded,
-            &cli.config,
+            &config,
             cli.save_show.as_deref(),
             show::shows_dir(),
         );
