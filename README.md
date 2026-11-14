@@ -15,6 +15,9 @@ Design decisions live in [`docs/adr/`](docs/adr/); the runtime architecture
 
 ## Demo
 
+To install on a show Mac (tools, models, release build and the first CoreML
+compile in one script), see [`docs/install-mac.md`](docs/install-mac.md).
+
 Requires Rust 1.92 or newer, and `ffmpeg` for file sources and output:
 `AC_FFMPEG` / `AC_FFPROBE` name the executables, else they are looked up on
 `PATH`, and on macOS also in `/opt/homebrew/bin` and `/usr/local/bin` (an
