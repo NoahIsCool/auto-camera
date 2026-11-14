@@ -24,7 +24,7 @@ use ac_core::ShotId;
 use ac_engine::{EngineCommand, EngineSnapshot};
 use ac_switcher::TransitionKind;
 use eframe::egui::{
-    self, AtomExt, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
+    self, AtomExt, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
 use super::switching::{DURATION_RANGE, KINDS, SwitchState, TBAR_HOLDS, cut_enabled};
@@ -44,6 +44,11 @@ const GROOVE_WIDTH: f32 = 14.0;
 const LEVER_HEIGHT: f32 = 18.0;
 /// Shortest T-bar travel, however small the window.
 const MIN_TRAVEL: f32 = 60.0;
+/// The edge of an unlit key, lighter than its face, like a backlit
+/// switcher key's rim.
+const KEY_EDGE: Color32 = Color32::from_rgb(72, 79, 90);
+/// Tick marks along the T-bar's travel, ends included.
+const TICKS: usize = 11;
 
 /// Draws the controls into a column `height` points tall: the transition
 /// and its rate on top, then CUT over AUTO (both carrying `seen`) beside
@@ -58,21 +63,22 @@ pub fn show(
     commands: &mut Vec<EngineCommand>,
 ) {
     let top = ui.cursor().top();
-    ui.label(RichText::new("TRANSITION").size(theme::SMALL).weak());
+    ui.label(theme::caps(ui, "Transition"));
     let mut kind = state.transition.kind;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        let each = (WIDTH - 4.0) / KINDS.len() as f32;
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let each = (WIDTH - 8.0) / KINDS.len() as f32;
         for (k, label, hover) in KINDS {
             let selected = kind == k;
-            let text = RichText::new(label).color(if selected {
-                theme::text_on(theme::ACCENT)
+            let (fill, color) = if selected {
+                (theme::ACCENT, theme::text_on(theme::ACCENT))
             } else {
-                theme::TEXT
-            });
-            let button = egui::Button::new(text)
-                .selected(selected)
-                .min_size(vec2(each, 26.0));
+                (theme::SURFACE, theme::TEXT)
+            };
+            let button = egui::Button::new(theme::semibold(ui, label, theme::BODY).color(color))
+                .fill(fill)
+                .corner_radius(CornerRadius::same(theme::RADIUS))
+                .min_size(vec2(each, 30.0));
             if ui.add(button).on_hover_text(hover).clicked() {
                 kind = k;
             }
@@ -81,7 +87,7 @@ pub fn show(
     commands.extend(state.set_kind(kind));
     let mut duration = state.transition.duration;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Rate").weak());
+        ui.label(theme::caps(ui, "Rate"));
         ui.add_enabled(
             kind != TransitionKind::Cut,
             egui::DragValue::new(&mut duration)
@@ -92,7 +98,7 @@ pub fn show(
         );
     });
     commands.extend(state.set_duration(duration));
-    ui.add_space(4.0);
+    ui.add_space(6.0);
     let rest = (height - (ui.cursor().top() - top)).max(MIN_TRAVEL + LEVER_HEIGHT);
     let gap = ui.spacing().item_spacing.y;
     let take = ((rest - gap) / 2.0).clamp(*TAKE_HEIGHT.start(), *TAKE_HEIGHT.end());
@@ -118,7 +124,7 @@ fn takes(
 ) {
     let ready = snap.switcher.preview.is_some();
     let mut cut = ui
-        .add_enabled(cut_enabled(snap), take_button("CUT", false, height))
+        .add_enabled(cut_enabled(snap), take_button(ui, "CUT", false, height))
         .on_hover_text("Space · during a transition, cuts it short");
     if snap.switcher.tbar_held {
         cut = cut.on_disabled_hover_text(TBAR_HOLDS);
@@ -130,7 +136,7 @@ fn takes(
     }
     let running = snap.switcher.in_transition;
     if ui
-        .add_enabled(ready, take_button("AUTO", running, height))
+        .add_enabled(ready, take_button(ui, "AUTO", running, height))
         .on_hover_text("Enter · during a transition, queues a take of the next shot")
         .clicked()
     {
@@ -142,7 +148,7 @@ fn takes(
 
 /// A take button `height` points tall: large, bold, and lit red when
 /// `lit`.
-fn take_button(text: &str, lit: bool, height: f32) -> egui::Button<'static> {
+fn take_button(ui: &Ui, text: &str, lit: bool, height: f32) -> egui::Button<'static> {
     let fill = if lit {
         theme::PROGRAM_RED
     } else {
@@ -154,13 +160,16 @@ fn take_button(text: &str, lit: bool, height: f32) -> egui::Button<'static> {
         theme::TEXT_STRONG
     };
     egui::Button::new(
-        RichText::new(text.to_owned())
-            .size(theme::BIG_BUTTON)
-            .strong()
+        theme::semibold(ui, text.to_owned(), theme::KEY)
+            .extra_letter_spacing(1.0)
             .color(color)
             .atom_grow(true),
     )
     .fill(fill)
+    .stroke(Stroke::new(
+        1.0,
+        if lit { theme::RED_TEXT } else { KEY_EDGE },
+    ))
     .corner_radius(CornerRadius::same(theme::CARD_RADIUS))
     .min_size(vec2(TAKE_WIDTH, height))
 }
@@ -199,6 +208,16 @@ fn tbar(ui: &mut Ui, state: &mut SwitchState, travel: f32) -> Option<EngineComma
         pos2(rect.center().x, rect.center().y),
         vec2(GROOVE_WIDTH, bottom - top),
     );
+    // A scale on both sides of the groove, longer at the ends and middle.
+    for i in 0..TICKS {
+        let y = top + (bottom - top) * i as f32 / (TICKS - 1) as f32;
+        let major = i == 0 || i == TICKS - 1 || i == TICKS / 2;
+        let length = if major { 10.0 } else { 6.0 };
+        for side in [-1.0, 1.0] {
+            let x = rect.center().x + side * (GROOVE_WIDTH / 2.0 + 4.0);
+            painter.hline(x..=x + side * length, y, Stroke::new(1.0, theme::BORDER));
+        }
+    }
     painter.rect_filled(groove, CornerRadius::same(7), theme::WELL);
     painter.rect_stroke(
         groove,
@@ -214,18 +233,31 @@ fn tbar(ui: &mut Ui, state: &mut SwitchState, travel: f32) -> Option<EngineComma
         let fill = Rect::from_min_max(pos2(groove.left(), y), groove.right_bottom());
         painter.rect_filled(fill, CornerRadius::same(7), theme::PROGRAM_RED);
     }
-    let lever = Rect::from_center_size(pos2(rect.center().x, y), vec2(width - 8.0, LEVER_HEIGHT));
-    let fill = if response.hovered() || response.dragged() {
-        Color32::from_rgb(214, 218, 225)
+    let lever = Rect::from_center_size(pos2(rect.center().x, y), vec2(width - 4.0, LEVER_HEIGHT));
+    let lit = response.hovered() || response.dragged();
+    let face = if lit {
+        Color32::from_rgb(92, 100, 112)
     } else {
-        Color32::from_rgb(184, 190, 199)
+        Color32::from_rgb(70, 77, 88)
     };
-    painter.rect_filled(lever, CornerRadius::same(4), fill);
-    painter.line_segment(
-        [
-            pos2(lever.left() + 8.0, lever.center().y),
-            pos2(lever.right() - 8.0, lever.center().y),
-        ],
+    painter.rect_filled(lever, CornerRadius::same(4), face);
+    painter.rect_stroke(
+        lever,
+        CornerRadius::same(4),
+        Stroke::new(1.0, Color32::from_rgb(120, 130, 144)),
+        StrokeKind::Inside,
+    );
+    // Grip lines across the handle, and its red index line.
+    for dy in [-4.0, 4.0] {
+        painter.hline(
+            lever.left() + 10.0..=lever.right() - 10.0,
+            lever.center().y + dy,
+            Stroke::new(1.0, Color32::from_rgb(110, 119, 132)),
+        );
+    }
+    painter.hline(
+        lever.left() + 6.0..=lever.right() - 6.0,
+        lever.center().y,
         Stroke::new(2.0, theme::PROGRAM_RED),
     );
     command

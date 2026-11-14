@@ -28,13 +28,16 @@ proposes shots and the operator takes them.
 cargo run -p auto-camera                     # operator window on the demo studio
 ```
 
-The window is always dark, sized for an operator sitting back from the
-screen. A header bar carries the tally lamps: the director's mode, ON AIR
+The window is always dark and set in Inter, laid out after broadcast
+switchers (vMix, ATEM Software Control, OBS) and sized for an operator
+sitting back from the screen. A header bar carries Save show and the tally
+lamps: the director's mode, ON AIR
 (red while the stream is connected, amber while it connects, reconnects,
 stalls or is down) and REC, each with the time the output has run, and
 the studio clock; if the engine stops, a red banner says nothing is going
 out. Below it are the preview (green) and program (red) monitors, each
-under a caption strip in its tally colour, with the transition (Cut, Mix,
+framed in its tally colour with the shot name laid over the picture, with
+the transition (Cut, Mix,
 Dip and its rate), CUT and AUTO (lit red while a transition runs) and a
 T-bar between them; under them the
 multiview of every shot with tally borders, tracking status and quality.

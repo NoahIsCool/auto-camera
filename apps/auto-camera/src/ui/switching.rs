@@ -2,10 +2,12 @@
 //!
 //! The layout follows a hardware switcher: preview on the left with a green
 //! frame, program on the right with a red one, and between them Cut, Auto,
-//! the transition selector and a vertical T-bar ([`super::controls`]). Each
-//! monitor's caption sits in a strip of its tally colour over the picture,
-//! so the bus reads from across the room; the preview strip turns amber
-//! while it warns of a lost subject. A monitor with no shot on its bus says
+//! the transition selector and a vertical T-bar ([`super::controls`]). As
+//! on a broadcast multiviewer the picture comes first: each monitor's
+//! caption is laid over the top of its picture on a dark band, marked with
+//! a bar of its tally colour (amber on preview while it warns of a lost
+//! subject), and program draws a running transition's progress along its
+//! bottom edge. A monitor with no shot on its bus says
 //! so over the picture ([`empty_text`]), so black on air never looks like a
 //! frozen window. The block is centred when the monitors are limited by
 //! height.
@@ -45,8 +47,7 @@ use ac_director::{DirectorMode, Takeover};
 use ac_engine::{EngineCommand, EngineSnapshot};
 use ac_switcher::{Transition, TransitionKind};
 use eframe::egui::{
-    self, Color32, CornerRadius, FontId, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui,
-    Vec2, pos2, vec2,
+    self, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
 use super::caption::{caption_color, preview_notes};
@@ -60,12 +61,12 @@ use super::theme::{self, PREVIEW_GREEN, PROGRAM_RED};
 pub const DURATION_RANGE: std::ops::RangeInclusive<f64> = 0.1..=5.0;
 /// T-bar moves smaller than this are not sent.
 const TBAR_STEP: f64 = 1e-3;
-/// Height of a monitor's caption strip, in points.
-const CAPTION_HEIGHT: f32 = 28.0;
+/// Height of the caption band laid over a monitor's picture, in points.
+const BAND_HEIGHT: f32 = 28.0;
 /// Gap between a monitor and the control column.
 const MONITOR_GAP: f32 = 14.0;
 /// Width of a monitor's tally border.
-const BORDER: f32 = 3.0;
+const BORDER: f32 = 2.0;
 /// Font size of the AUTO badge, in points.
 const BADGE_FONT: f32 = 13.0;
 /// Padding around the AUTO badge's text, and its gap to the picture's
@@ -151,7 +152,7 @@ pub fn show(
     let mut commands = Vec::new();
     let gaps = 2.0 * MONITOR_GAP;
     let width = ((ui.available_width() - controls::WIDTH - gaps) / 2.0).max(80.0);
-    let size = fit(aspect, vec2(width, max_height - CAPTION_HEIGHT));
+    let size = fit(aspect, vec2(width, max_height));
     // Centre the block when the monitors are limited by height.
     let block = 2.0 * size.x + controls::WIDTH + gaps;
     let spare = (ui.available_width() - block).max(0.0);
@@ -161,7 +162,6 @@ pub fn show(
         monitor(ui, snap, textures, Monitor::Preview, size);
         ui.vertical(|ui| {
             ui.set_width(controls::WIDTH);
-            ui.add_space(CAPTION_HEIGHT);
             controls::show(ui, snap, seen, state, size.y, &mut commands);
         });
         monitor(ui, snap, textures, Monitor::Program, size);
@@ -186,7 +186,11 @@ fn caption(snap: &EngineSnapshot, which: Monitor) -> String {
         Monitor::Preview => ("PREVIEW", snap.switcher.preview.as_ref()),
         Monitor::Program => ("PROGRAM", snap.switcher.program.as_ref()),
     };
-    let mut caption = format!("{label}  {}", shot_name(snap, shot));
+    // An empty bus says so over the picture instead (`empty_text`).
+    let mut caption = match shot {
+        Some(_) => format!("{label}  {}", shot_name(snap, shot)),
+        None => label.to_owned(),
+    };
     if which == Monitor::Program
         && let Some((_, opacity)) = &snap.switcher.overlay
     {
@@ -208,8 +212,11 @@ pub fn empty_text(program: bool) -> &'static str {
     if program { "BLACK" } else { "NOTHING STAGED" }
 }
 
-/// Draws one monitor: a caption strip in its tally colour (amber on preview
-/// while it warns of a lost subject), the picture, and a tally border.
+/// Draws one monitor, picture first as on a broadcast multiviewer: the
+/// picture in a thin tally border, and its caption laid over the top of the
+/// picture on a dark band with a bar of the tally colour (amber on preview
+/// while it warns of a lost subject). Program shows a running transition's
+/// progress as a red line along its bottom edge.
 fn monitor(
     ui: &mut Ui,
     snap: &EngineSnapshot,
@@ -231,62 +238,68 @@ fn monitor(
             "monitor/program",
         ),
     };
-    let strip = match which {
-        Monitor::Preview => caption_color(snap, color),
-        Monitor::Program => color,
+    let warn = match which {
+        Monitor::Preview => caption_color(snap, color) != color,
+        Monitor::Program => false,
     };
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        egui::Frame::new()
-            .fill(strip)
-            .corner_radius(CornerRadius {
-                nw: theme::RADIUS,
-                ne: theme::RADIUS,
-                sw: 0,
-                se: 0,
-            })
-            .inner_margin(Margin::symmetric(8, 4))
-            .show(ui, |ui| {
-                ui.set_width(size.x - 16.0);
-                ui.set_height(CAPTION_HEIGHT - 8.0);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(caption(snap, which))
-                            .strong()
-                            .color(theme::text_on(strip)),
-                    )
-                    .truncate(),
-                );
-            });
-        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-        let painter = ui.painter_at(rect.expand(BORDER));
-        painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
-        if let Some((id, px)) = textures.show(ui.ctx(), name, frame) {
-            let inner = centred(rect, fit(px.x / px.y, rect.size()));
-            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            painter.image(id, inner, uv, Color32::WHITE);
-        }
-        if shot.is_none() {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                empty_text(which == Monitor::Program),
-                FontId::proportional(theme::HEADING),
-                theme::TEXT_WEAK,
-            );
-        }
-        painter.rect_stroke(
-            rect,
-            CornerRadius::ZERO,
-            Stroke::new(BORDER, color),
-            StrokeKind::Inside,
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter_at(rect.expand(BORDER));
+    painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
+    if let Some((id, px)) = textures.show(ui.ctx(), name, frame) {
+        let inner = centred(rect, fit(px.x / px.y, rect.size()));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        painter.image(id, inner, uv, Color32::WHITE);
+    }
+    if shot.is_none() {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            empty_text(which == Monitor::Program),
+            theme::semibold_font(ui, theme::BODY),
+            theme::TEXT_WEAK,
         );
-        if which == Monitor::Program
-            && let Some(text) = auto_badge(snap)
-        {
-            draw_auto_badge(ui, rect, &text, snap);
-        }
+    }
+    // The caption band over the top of the picture.
+    let band = Rect::from_min_size(rect.min, vec2(rect.width(), BAND_HEIGHT));
+    painter.rect_filled(band, CornerRadius::ZERO, theme::SCRIM);
+    let bar = if warn { theme::AMBER } else { color };
+    painter.rect_filled(
+        Rect::from_min_size(band.min, vec2(4.0, band.height())),
+        CornerRadius::ZERO,
+        bar,
+    );
+    let text = theme::semibold(ui, caption(snap, which), theme::BODY).color(if warn {
+        theme::AMBER
+    } else {
+        theme::TEXT_STRONG
     });
+    let label = Rect::from_min_max(pos2(band.left() + 12.0, band.top()), band.right_bottom());
+    // A child that the row's layout does not see, laid over the picture.
+    let mut over = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(label)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    over.add(egui::Label::new(text).truncate());
+    if which == Monitor::Program
+        && let Some((_, opacity)) = &snap.switcher.overlay
+    {
+        let done = rect.width() * (*opacity as f32).clamp(0.0, 1.0);
+        let line = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 4.0), vec2(done, 4.0));
+        painter.rect_filled(line, CornerRadius::ZERO, PROGRAM_RED);
+    }
+    painter.rect_stroke(
+        rect,
+        CornerRadius::ZERO,
+        Stroke::new(BORDER, color),
+        StrokeKind::Outside,
+    );
+    if which == Monitor::Program
+        && let Some(text) = auto_badge(snap)
+    {
+        let below = Rect::from_min_max(pos2(rect.left(), band.bottom()), rect.max);
+        draw_auto_badge(ui, below, &text, snap);
+    }
 }
 
 /// The AUTO badge's text while the director runs in Auto mode: `AUTO`, or
@@ -334,7 +347,7 @@ pub fn auto_badge_hover(snap: &EngineSnapshot) -> String {
 fn draw_auto_badge(ui: &Ui, picture: Rect, text: &str, snap: &EngineSnapshot) {
     let galley = ui.painter().layout_no_wrap(
         text.to_owned(),
-        FontId::proportional(BADGE_FONT),
+        theme::semibold_font(ui, BADGE_FONT),
         Color32::WHITE,
     );
     let badge = Rect::from_min_size(

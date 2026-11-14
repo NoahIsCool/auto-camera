@@ -130,30 +130,64 @@ pub fn elapsed(frames: u64, fps: u32) -> Duration {
 }
 
 /// Draws the header for `snap`, under the window title `title`, for an
-/// output at `fps`.
-pub fn show(ui: &mut Ui, snap: &EngineSnapshot, title: &str, fps: u32) {
+/// output at `fps`, and returns the command of the Save show button
+/// (which sits at the left of the tally lamps), if it was pressed.
+pub fn show(
+    ui: &mut Ui,
+    snap: &EngineSnapshot,
+    title: &str,
+    fps: u32,
+) -> Option<ac_engine::EngineCommand> {
+    let mut command = None;
     ui.horizontal_centered(|ui| {
-        ui.label(
-            RichText::new("AUTO CAMERA")
-                .size(theme::HEADING)
-                .strong()
-                .color(theme::TEXT_STRONG),
-        );
+        logo(ui);
+        ui.label(theme::semibold(ui, "Auto Camera", theme::LARGE).color(theme::TEXT_STRONG));
+        divider(ui);
         ui.label(RichText::new(title).color(theme::TEXT_WEAK));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 RichText::new(clock(snap.media_time))
                     .monospace()
-                    .size(theme::HEADING)
+                    .size(CLOCK)
                     .color(theme::TEXT_STRONG),
             )
             .on_hover_text("Studio time: the clock alarms are stamped with");
-            ui.add_space(8.0);
+            ui.label(theme::caps(ui, "Time"));
+            divider(ui);
             for pill in pills(snap, fps).iter().rev() {
                 draw(ui, pill);
             }
+            divider(ui);
+            command = super::save::button(ui);
         });
     });
+    command
+}
+
+/// Size of the studio clock, in points.
+const CLOCK: f32 = 18.0;
+/// Height of a tally lamp.
+const LAMP_HEIGHT: f32 = 26.0;
+/// Narrowest tally lamp, so the lamps line up as a bank.
+const LAMP_WIDTH: f32 = 84.0;
+
+/// The app's mark: a red lens in a dark rounded square.
+fn logo(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::same(6), theme::SURFACE_ACTIVE);
+    painter.circle_filled(rect.center(), 7.0, theme::PROGRAM_RED);
+    painter.circle_filled(rect.center(), 3.0, theme::BACKGROUND);
+}
+
+/// A short vertical hairline between groups.
+fn divider(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 20.0), egui::Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.y_range(),
+        Stroke::new(1.0, theme::BORDER),
+    );
 }
 
 /// What the banner over the monitors says once the engine has stopped.
@@ -174,39 +208,45 @@ pub fn stopped_banner(ui: &mut Ui, snap: &EngineSnapshot) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(
-                RichText::new(STOPPED_BANNER)
-                    .strong()
+                theme::semibold(ui, STOPPED_BANNER, theme::BODY)
                     .color(theme::text_on(theme::PROGRAM_RED)),
             );
         });
     ui.add_space(8.0);
 }
 
-/// Paints one pill.
+/// Paints one pill as a tally lamp: a dot and its text in a fixed-height
+/// box, dark while off, lit in its colour while on.
 fn draw(ui: &mut Ui, pill: &Pill) {
-    let (fill, stroke, text) = match pill.look {
-        Look::Idle => (egui::Color32::TRANSPARENT, theme::BORDER, theme::TEXT_WEAK),
+    let (fill, dot, text) = match pill.look {
+        Look::Idle => (theme::SURFACE, theme::SURFACE_ACTIVE, theme::TEXT_WEAK),
         Look::Live => (
             theme::PROGRAM_RED,
-            theme::PROGRAM_RED,
+            theme::ON_DARK,
             theme::text_on(theme::PROGRAM_RED),
         ),
-        Look::Warning => (theme::AMBER, theme::AMBER, theme::text_on(theme::AMBER)),
-        Look::Selected => (theme::ACCENT, theme::ACCENT, theme::text_on(theme::ACCENT)),
+        Look::Warning => (theme::AMBER, theme::ON_LIGHT, theme::text_on(theme::AMBER)),
+        Look::Selected => (theme::ACCENT, theme::ON_DARK, theme::text_on(theme::ACCENT)),
     };
-    egui::Frame::new()
-        .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
-        .corner_radius(CornerRadius::same(theme::RADIUS))
-        .inner_margin(Margin::symmetric(8, 3))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(&pill.text)
-                    .size(theme::SMALL)
-                    .strong()
-                    .color(text),
-            );
-        });
+    let galley = ui.painter().layout_no_wrap(
+        pill.text.clone(),
+        theme::semibold_font(ui, theme::SMALL),
+        text,
+    );
+    let width = (galley.size().x + 30.0).max(LAMP_WIDTH);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, LAMP_HEIGHT), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::same(theme::RADIUS), fill);
+    let centre = egui::pos2(rect.left() + 12.0, rect.center().y);
+    painter.circle_filled(centre, 3.5, dot);
+    painter.galley(
+        egui::pos2(rect.left() + 21.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        text,
+    );
+    let name = pill.text.clone();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &name));
 }
 
 #[cfg(test)]

@@ -3,9 +3,13 @@
 //! Tiles follow broadcast multiview conventions: a **red** border marks a
 //! shot visible on program (both shots during a mix), **green** the shot
 //! staged on preview, and an unavailable shot is dimmed with "no signal".
-//! The caption carries the tile's shortcut number (1–9), the shot name, its
-//! tracking status and a quality bar. A shot that its preset's zoom ceiling
-//! keeps looser than its size carries an amber [`LIMITED_BADGE`] in the top
+//! The caption under the picture is one line: the tile's shortcut number
+//! (1–9) on a key lit in the tally colour, the shot name, and its tracking
+//! status on the right, with the framing quality as a hairline across its
+//! top (green, amber, red). A shot that its preset's zoom ceiling
+//! keeps looser than its size carries an amber-outlined [`LIMITED_BADGE`]
+//! (amber text on a dark scrim, so it informs without outshining the
+//! picture) in the top
 //! right corner of its picture, never in the caption: a caption is clipped
 //! to its tile, and on a narrow tile a long name would push a trailing
 //! "(limited)" out of sight. The badge's width does not depend on the name
@@ -54,7 +58,7 @@ pub const PROGRAM_RED: Color32 = theme::PROGRAM_RED;
 /// Preview tally colour.
 pub const PREVIEW_GREEN: Color32 = theme::PREVIEW_GREEN;
 /// Border of a tile with no tally.
-const IDLE_BORDER: Color32 = Color32::from_gray(70);
+const IDLE_BORDER: Color32 = theme::BORDER;
 /// Width of a tally border.
 const TALLY_WIDTH: f32 = 3.0;
 /// Colour of the zoom-limit badge.
@@ -78,15 +82,22 @@ pub fn badge_rect(picture: Rect, text_size: Vec2) -> Rect {
 }
 
 /// Paints the zoom-limit badge on `picture`.
-fn draw_badge(painter: &Painter, picture: Rect) {
+fn draw_badge(ui: &Ui, painter: &Painter, picture: Rect) {
     let galley = painter.layout_no_wrap(
         LIMITED_BADGE.into(),
-        FontId::proportional(BADGE_FONT),
-        Color32::BLACK,
+        theme::semibold_font(ui, BADGE_FONT),
+        BADGE_AMBER,
     );
     let rect = badge_rect(picture, galley.size());
-    painter.rect_filled(rect, CornerRadius::same(2), BADGE_AMBER);
-    painter.galley(rect.min + Vec2::splat(BADGE_PAD), galley, Color32::BLACK);
+    // Amber text on a dark scrim: it tells without outshining the picture.
+    painter.rect_filled(rect, CornerRadius::same(2), theme::SCRIM);
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(2),
+        Stroke::new(1.0, BADGE_AMBER),
+        StrokeKind::Inside,
+    );
+    painter.galley(rect.min + Vec2::splat(BADGE_PAD), galley, BADGE_AMBER);
 }
 
 /// The tally colour of a tile, program taking precedence.
@@ -191,7 +202,9 @@ pub fn show(
     commands
 }
 
-/// Paints one tile.
+/// Paints one tile: the picture, and under it a one-line caption with the
+/// shortcut number in a key of the tally colour, the name, and the status
+/// on the right; a hairline between them shows the framing quality.
 fn draw_tile(
     ui: &Ui,
     shot: &ShotView,
@@ -212,48 +225,26 @@ fn draw_tile(
             painter.image(id, picture, uv, Color32::WHITE);
         }
         None => {
-            painter.rect_filled(picture, CornerRadius::ZERO, Color32::from_gray(24));
+            painter.rect_filled(picture, CornerRadius::ZERO, theme::WELL);
         }
     }
     if shot.limited_by_zoom {
-        draw_badge(&painter, picture);
+        draw_badge(ui, &painter, picture);
     }
     if !shot.available {
-        painter.rect_filled(picture, CornerRadius::ZERO, Color32::from_black_alpha(170));
+        painter.rect_filled(picture, CornerRadius::ZERO, theme::SCRIM);
         painter.text(
             picture.center(),
             Align2::CENTER_CENTER,
             "NO SIGNAL",
-            FontId::proportional(14.0),
-            Color32::LIGHT_GRAY,
+            theme::semibold_font(ui, theme::SMALL),
+            theme::TEXT_WEAK,
         );
     }
     let caption = Rect::from_min_size(picture.left_bottom(), vec2(picture.width(), CAPTION));
-    painter.rect_filled(caption, CornerRadius::ZERO, Color32::from_gray(30));
-    let label = match tile_label(index) {
-        Some(n) => format!("{n}  {}", shot.name),
-        None => shot.name.clone(),
-    };
-    let text = ui.visuals().strong_text_color();
-    painter.text(
-        caption.left_top() + vec2(6.0, 3.0),
-        Align2::LEFT_TOP,
-        label,
-        FontId::proportional(13.0),
-        text,
-    );
-    painter.text(
-        caption.left_bottom() + vec2(6.0, -4.0),
-        Align2::LEFT_BOTTOM,
-        shot_status(shot),
-        FontId::proportional(11.0),
-        ui.visuals().weak_text_color(),
-    );
-    // Quality bar along the bottom-right of the caption.
-    let bar = Rect::from_min_size(caption.right_bottom() + vec2(-66.0, -10.0), vec2(60.0, 5.0));
-    painter.rect_filled(bar, CornerRadius::same(2), Color32::from_gray(55));
+    painter.rect_filled(caption, CornerRadius::ZERO, theme::SURFACE);
+    // Framing quality: a hairline across the top of the caption.
     let q = shot.quality.clamp(0.0, 1.0);
-    let fill = Rect::from_min_size(bar.min, vec2(bar.width() * q, bar.height()));
     let color = if q >= 0.6 {
         PREVIEW_GREEN
     } else if q >= 0.3 {
@@ -261,15 +252,55 @@ fn draw_tile(
     } else {
         PROGRAM_RED
     };
-    painter.rect_filled(fill, CornerRadius::same(2), color);
-    let (width, border) = match tally_color(shot.tally) {
+    let line = Rect::from_min_size(caption.min, vec2(caption.width() * q, 2.0));
+    painter.rect_filled(line, CornerRadius::ZERO, color);
+    let tally = tally_color(shot.tally);
+    let mut x = caption.left() + 6.0;
+    if let Some(n) = tile_label(index) {
+        let key = Rect::from_min_size(pos2(x, caption.center().y - 9.0), vec2(18.0, 18.0));
+        let fill = tally.unwrap_or(theme::SURFACE_ACTIVE);
+        painter.rect_filled(key, CornerRadius::same(3), fill);
+        painter.text(
+            key.center(),
+            Align2::CENTER_CENTER,
+            n,
+            theme::semibold_font(ui, theme::SMALL),
+            theme::text_on(fill),
+        );
+        x = key.right() + 7.0;
+    }
+    let status = painter.layout_no_wrap(
+        shot_status(shot),
+        FontId::proportional(theme::SMALL),
+        theme::TEXT_WEAK,
+    );
+    let status_x = caption.right() - 6.0 - status.size().x;
+    // The name gets what the status leaves, and is clipped to it.
+    let name_clip = Rect::from_x_y_ranges(x..=(status_x - 6.0).max(x), caption.y_range());
+    ui.painter()
+        .with_clip_rect(name_clip.intersect(painter.clip_rect()))
+        .text(
+            pos2(x, caption.center().y),
+            Align2::LEFT_CENTER,
+            &shot.name,
+            theme::semibold_font(ui, 12.5),
+            theme::TEXT_STRONG,
+        );
+    if status_x > x + 40.0 {
+        painter.galley(
+            pos2(status_x, caption.center().y - status.size().y / 2.0),
+            status,
+            theme::TEXT_WEAK,
+        );
+    }
+    let (width, border) = match tally {
         Some(c) => (TALLY_WIDTH, c),
-        None if hovered => (1.5, Color32::from_gray(160)),
+        None if hovered => (1.5, Color32::from_rgb(120, 130, 146)),
         None => (1.0, IDLE_BORDER),
     };
     painter.rect_stroke(
         tile,
-        CornerRadius::same(2),
+        CornerRadius::same(3),
         Stroke::new(width, border),
         StrokeKind::Outside,
     );

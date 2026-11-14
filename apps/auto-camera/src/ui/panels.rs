@@ -30,6 +30,15 @@ use super::theme;
 /// Amber, for warnings such as a prompt with no matches.
 const AMBER: Color32 = theme::AMBER;
 
+/// Text size of the status bar.
+const STATUS: f32 = 12.0;
+
+/// A status light: a small dot of `color`, vertically centred in the row.
+fn status_dot(ui: &mut Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 14.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 3.5, color);
+}
+
 /// Room a form's field labels take, which its fields leave them.
 pub const FIELD_LABEL: f32 = 72.0;
 
@@ -116,47 +125,60 @@ pub fn director(ui: &mut Ui, snap: &EngineSnapshot, seen: Option<&ShotId>) -> Ve
     if profile != d.profile {
         commands.push(EngineCommand::SetDirectorProfile { profile });
     }
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Suggests").weak());
-        ui.label(
-            RichText::new(shot_name(snap, d.suggestion.as_ref()))
-                .strong()
-                .color(theme::TEXT_STRONG),
-        );
-    });
-    if !d.reason_text.is_empty() {
-        ui.label(RichText::new(&d.reason_text).weak());
-    }
-    ui.horizontal(|ui| {
-        let can = d.mode != DirectorMode::Off && d.suggestion.is_some();
-        let accept = egui::Button::new("Accept").min_size(egui::vec2(84.0, 26.0));
-        if ui
-            .add_enabled(can, accept)
-            .on_hover_text("Stage the suggestion and take it with the selected transition")
-            .clicked()
-            && let Some(shot) = seen
-        {
-            commands.push(EngineCommand::AcceptSuggestion { shot: shot.clone() });
-        }
-        let skip = ui
-            .add_enabled(
-                can,
-                egui::Button::new("Skip").min_size(egui::vec2(64.0, 26.0)),
-            )
-            .on_hover_text(format!(
-                "Do not suggest this shot for {:.0} s",
-                d.skip.as_secs_f64()
-            ));
-        if skip.clicked()
-            && let Some(shot) = seen
-        {
-            commands.push(EngineCommand::Skip { shot: shot.clone() });
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(takes_text(d.takes)).weak());
+    ui.add_space(6.0);
+    egui::Frame::new()
+        .fill(theme::SURFACE)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(egui::CornerRadius::same(theme::CARD_RADIUS))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(theme::caps(ui, "Next shot"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(takes_text(d.takes)).size(theme::SMALL).weak());
+                });
+            });
+            ui.label(
+                theme::semibold(ui, shot_name(snap, d.suggestion.as_ref()), theme::LARGE)
+                    .color(theme::TEXT_STRONG),
+            );
+            if !d.reason_text.is_empty() {
+                ui.label(RichText::new(&d.reason_text).size(theme::SMALL).weak());
+            }
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let can = d.mode != DirectorMode::Off && d.suggestion.is_some();
+                let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                let accept = if can {
+                    theme::primary(ui, "Accept")
+                } else {
+                    egui::Button::new("Accept")
+                };
+                if ui
+                    .add_enabled(can, accept.min_size(egui::vec2(half, 30.0)))
+                    .on_hover_text("Stage the suggestion and take it with the selected transition")
+                    .clicked()
+                    && let Some(shot) = seen
+                {
+                    commands.push(EngineCommand::AcceptSuggestion { shot: shot.clone() });
+                }
+                let skip = ui
+                    .add_enabled(
+                        can,
+                        egui::Button::new("Skip").min_size(egui::vec2(half, 30.0)),
+                    )
+                    .on_hover_text(format!(
+                        "Do not suggest this shot for {:.0} s",
+                        d.skip.as_secs_f64()
+                    ));
+                if skip.clicked()
+                    && let Some(shot) = seen
+                {
+                    commands.push(EngineCommand::Skip { shot: shot.clone() });
+                }
+            });
         });
-    });
     if let Some(held) = d
         .preview_held
         .as_ref()
@@ -380,16 +402,16 @@ pub fn output(
     ui.horizontal(|ui| {
         if idle {
             let ready = form.command();
-            let start = ui.add_enabled(
-                ready.is_ok(),
+            let button = if ready.is_ok() {
                 egui::Button::new(
-                    RichText::new("Start")
-                        .strong()
+                    theme::semibold(ui, "Start", theme::BODY)
                         .color(theme::text_on(theme::PROGRAM_RED)),
                 )
                 .fill(theme::PROGRAM_RED)
-                .min_size(egui::vec2(84.0, 28.0)),
-            );
+            } else {
+                egui::Button::new("Start")
+            };
+            let start = ui.add_enabled(ready.is_ok(), button.min_size(egui::vec2(96.0, 30.0)));
             match ready {
                 Ok(cmd) if start.clicked() => commands.push(cmd),
                 Ok(_) => {}
@@ -400,7 +422,8 @@ pub fn output(
         } else if ui
             .add_enabled(
                 out.state == OutputState::Running,
-                egui::Button::new(RichText::new("Stop").strong()).min_size(egui::vec2(84.0, 28.0)),
+                egui::Button::new(theme::semibold(ui, "Stop", theme::BODY))
+                    .min_size(egui::vec2(96.0, 30.0)),
             )
             .clicked()
         {
@@ -463,20 +486,21 @@ pub fn status_bar(ui: &mut Ui, snap: &EngineSnapshot, paused: bool, notice: Opti
     ui.horizontal_wrapped(|ui| {
         for s in &snap.sources {
             let line = source_line(s, snap.media_time);
-            let text = match source_tone(s) {
-                Tone::Warning => RichText::new(line).color(AMBER),
-                Tone::Plain | Tone::Weak => RichText::new(line),
+            let (text, dot) = match source_tone(s) {
+                Tone::Warning => (RichText::new(line).color(AMBER), AMBER),
+                Tone::Plain | Tone::Weak => (RichText::new(line), theme::PREVIEW_GREEN),
             };
-            let label = ui.label(text);
+            status_dot(ui, dot);
+            let label = ui.label(text.size(STATUS));
             let hover = source_hover(s);
             if !hover.is_empty() {
                 label.on_hover_text(hover);
             }
             ui.separator();
         }
-        ui.label(RichText::new(timing_line(&snap.timing)).weak());
+        ui.label(RichText::new(timing_line(&snap.timing)).size(STATUS).weak());
         ui.separator();
-        ui.label(RichText::new(dropped_line(snap)).weak());
+        ui.label(RichText::new(dropped_line(snap)).size(STATUS).weak());
         if !snap.render_issues.is_empty() {
             ui.separator();
             ui.label(

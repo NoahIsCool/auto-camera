@@ -94,15 +94,14 @@ use super::multiview;
 use super::notices::Notices;
 use super::panels::{self, OutputForm};
 use super::query_form::QueryForm;
-use super::save;
 use super::switching::{self, SwitchState};
 use super::textures::Textures;
 use super::theme;
 
 /// The side panel's width as the window opens, in points.
-const SIDE_WIDTH: f32 = 400.0;
+const SIDE_WIDTH: f32 = 360.0;
 /// The narrowest the operator can drag the side panel.
-const SIDE_MIN_WIDTH: f32 = 320.0;
+const SIDE_MIN_WIDTH: f32 = 300.0;
 
 /// The frame of the header and the status bar: the panel colour with a
 /// little more room than egui's default.
@@ -215,6 +214,7 @@ impl Console {
         quitting: bool,
     ) -> Vec<EngineCommand> {
         let ctx = ui.ctx().clone();
+        theme::ensure(&ctx);
         let now = ctx.input(|i| i.time);
         for (text, error) in raised {
             self.notices.raise(text, error, now);
@@ -256,7 +256,9 @@ impl Console {
         }
         egui::Panel::top("header")
             .frame(bar_frame())
-            .show(ui, |ui| header::show(ui, snap, &self.title, self.fps));
+            .show(ui, |ui| {
+                commands.extend(header::show(ui, snap, &self.title, self.fps));
+            });
         egui::Panel::bottom("status")
             .frame(bar_frame())
             .show(ui, |ui| {
@@ -270,26 +272,30 @@ impl Console {
             .default_size(SIDE_WIDTH)
             .min_size(SIDE_MIN_WIDTH)
             .resizable(true)
-            .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(10))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER)),
+            )
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 6.0;
-                    commands.extend(theme::card(ui, "Director", |ui| {
+                    commands.extend(theme::section(ui, "Director", |ui| {
                         panels::director(ui, snap, suggested.as_ref())
                     }));
-                    commands.extend(theme::card(ui, "Queries", |ui| {
+                    commands.extend(theme::section(ui, "Prompts", |ui| {
                         panels::queries(ui, snap, &mut self.query_form, &self.prompts)
                     }));
-                    commands.extend(theme::card(ui, "Subjects", |ui| panels::subjects(ui, snap)));
-                    commands.extend(theme::card(ui, "Output", |ui| {
+                    commands.extend(theme::section(ui, "Subjects", |ui| {
+                        panels::subjects(ui, snap)
+                    }));
+                    commands.extend(theme::section(ui, "Output", |ui| {
                         panels::output(ui, snap, &mut self.output_form, &mut self.guard)
                     }));
-                    commands.extend(theme::card(ui, "Show", save::button));
                 });
             });
         let central = egui::Frame::central_panel(ui.style())
             .fill(theme::BACKGROUND)
-            .inner_margin(12);
+            .inner_margin(16);
         egui::CentralPanel::default().frame(central).show(ui, |ui| {
             header::stopped_banner(ui, snap);
             let height = (ui.available_height() * 0.55).clamp(160.0, 720.0);
@@ -302,7 +308,8 @@ impl Console {
                 self.aspect,
                 height,
             ));
-            ui.add_space(10.0);
+            ui.add_space(14.0);
+            ui.label(theme::caps(ui, "Shots"));
             commands.extend(multiview::show(ui, snap, &mut self.textures, self.aspect));
         });
         if let Some(question) = self.guard.question()
